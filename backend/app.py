@@ -37,10 +37,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration
+# CORS: localhost + optional ALLOWED_ORIGINS (comma-separated, e.g. your Vercel URL)
+# Vercel previews/production *.vercel.app allowed via regex unless CORS_ALLOW_VERCEL_PREVIEWS=false
+_default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+_extra_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+_cors_origins = list(_default_origins)
+if _extra_origins:
+    _cors_origins.extend([o.strip() for o in _extra_origins.split(",") if o.strip()])
+
+_allow_vercel_regex = os.getenv("CORS_ALLOW_VERCEL_PREVIEWS", "true").lower() in ("1", "true", "yes")
+_cors_regex = r"https://.*\.vercel\.app" if _allow_vercel_regex else None
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
