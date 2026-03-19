@@ -1,0 +1,276 @@
+================================================================================
+           NEET UG 2026 AI ASSISTANT - PROJECT OVERVIEW
+                    Get My University RAG Chatbot
+================================================================================
+
+PROJECT STRUCTURE
+-----------------
+smart-rag-chatbot/
+├── backend/
+│   ├── app.py              # FastAPI server + RAG logic
+│   ├── data/
+│   │   └── neet.pdf        # Source document (NEET UG 2026 Bulletin, 83 pages)
+│   ├── storage/            # Persisted vector index (auto-generated)
+│   ├── .env                # Contains OPENAI_API_KEY
+│   ├── requirements.txt    # Python dependencies
+│   └── venv/               # Python virtual environment
+├── frontend/
+│   ├── app/page.tsx        # Main chat UI (Next.js App Router)
+│   ├── components/         # React components (ChatWindow, MessageBubble)
+│   ├── services/api.ts     # API calls to backend
+│   └── types/index.ts      # TypeScript interfaces
+└── README.md
+
+
+================================================================================
+                           TECH STACK
+================================================================================
+
+LAYER           | TECHNOLOGY
+----------------|--------------------------------------------
+Frontend        | Next.js 14, TypeScript, Tailwind CSS
+Backend         | FastAPI (Python 3.12)
+RAG Framework   | LlamaIndex 0.14.18
+LLM             | OpenAI GPT-4o-mini
+Embeddings      | OpenAI text-embedding-ada-002 (default)
+Vector Store    | LlamaIndex SimpleVectorStore (in-memory, persisted to disk)
+PDF Parser      | pypdf
+
+
+================================================================================
+                      END-TO-END FLOW
+================================================================================
+
+1. INDEXING (One-time, on first server startup)
+-----------------------------------------------
+   PDF Document (neet.pdf)
+         ↓
+   pypdf extracts text page-by-page (83 pages)
+         ↓
+   LlamaIndex creates Document objects with metadata:
+   - file_name: "neet.pdf"
+   - page_label: "1", "2", ... "83"
+         ↓
+   OpenAI Embeddings API converts text chunks → 1536-dimension vectors
+   (API: text-embedding-ada-002)
+         ↓
+   Vectors stored in SimpleVectorStore
+         ↓
+   Persisted to ./storage/ folder as JSON files
+
+
+2. QUERY FLOW (Per question)
+----------------------------
+   User types question in frontend (localhost:3000)
+         ↓
+   Frontend sends POST /chat request to backend (localhost:8000)
+         ↓
+   Backend converts question → vector using OpenAI Embeddings API
+         ↓
+   Vector similarity search (cosine similarity) → retrieves Top 3 relevant chunks
+         ↓
+   Retrieved chunks + question combined into prompt
+         ↓
+   Sent to GPT-4o-mini for answer generation
+         ↓
+   LLM generates answer based ONLY on retrieved context
+         ↓
+   Response sent back with:
+   - Answer text
+   - Source citations (file name + page numbers)
+         ↓
+   Frontend displays answer with "Verified from Official Document" badge
+
+
+================================================================================
+                      OPENAI API USAGE
+================================================================================
+
+OPERATION       | WHEN                  | API USED
+----------------|----------------------|----------------------------------
+Indexing        | First startup only   | Embeddings API (text-embedding-ada-002)
+Per Query       | Every question       | Embeddings API + Chat Completions (GPT-4o-mini)
+
+*** YES, OpenAI API key is used for BOTH indexing AND querying ***
+
+
+================================================================================
+                      COST ESTIMATION
+================================================================================
+
+ONE-TIME INDEXING COST (83 pages, ~50K tokens):
+- Embeddings: ~50,000 tokens × $0.0001/1K = ~$0.005 (half a cent)
+
+PER QUERY COST BREAKDOWN:
+-------------------------------------------------
+Component              | Tokens  | Cost
+-------------------------------------------------
+Question embedding     | ~20     | $0.000002
+Context (3 chunks)     | ~1,500  | $0.000225 (input)
+LLM response           | ~200    | $0.0006 (output)
+-------------------------------------------------
+TOTAL PER QUERY        |         | ~$0.001 (0.1 cent)
+-------------------------------------------------
+
+COST SUMMARY:
+- 1,000 queries   ≈ $1
+- 10,000 queries  ≈ $10
+- 100,000 queries ≈ $100
+
+Pricing based on:
+- GPT-4o-mini: $0.15/1M input tokens, $0.60/1M output tokens
+- Embeddings: $0.10/1M tokens
+
+
+================================================================================
+                      VECTOR DATABASE DETAILS
+================================================================================
+
+Type: SimpleVectorStore (LlamaIndex built-in)
+
+CHARACTERISTICS:
+- In-memory vector store with disk persistence
+- Storage location: ./storage/ directory (JSON files)
+- Search algorithm: Brute-force cosine similarity
+- Performance: Fast for <100K vectors
+- No external database required
+
+WHY THIS CHOICE:
+- Perfect for demos and small-medium documents
+- Zero configuration needed
+- Data persists across server restarts
+- Easy to understand and explain
+
+FOR PRODUCTION SCALE, consider:
+- Pinecone (managed, serverless)
+- Weaviate (open-source)
+- Qdrant (open-source)
+- Chroma (embedded)
+- PostgreSQL + pgvector
+
+
+================================================================================
+                      KEY DEMO TALKING POINTS
+================================================================================
+
+1. RAG (Retrieval Augmented Generation)
+   "The AI answers ONLY from the uploaded NEET bulletin, not from its general 
+   knowledge. This prevents hallucination and ensures accuracy."
+
+2. 100% Authentic Information
+   "Every answer comes directly from the official NTA document. We show the 
+   exact page number where the information was found."
+
+3. Cost-Effective Architecture
+   "Using GPT-4o-mini costs ~$0.001 per query (0.1 cent), compared to GPT-4 
+   which would cost ~$0.03 per query. 30x cheaper!"
+
+4. Source Citations
+   "Each answer includes source citations showing which page of the NEET 
+   bulletin the information came from - full transparency."
+
+5. Fast Response Time
+   "The vector index is pre-built, so queries only take 1-2 seconds. No 
+   waiting for document processing."
+
+6. Scalable Design
+   "Can easily add more documents, switch to a production vector database, 
+   or upgrade the LLM model."
+
+
+================================================================================
+                      HOW TO RUN THE PROJECT
+================================================================================
+
+BACKEND (Terminal 1):
+---------------------
+cd C:\Zaheer\workspace\athma\smart-rag-chatbot\backend
+.\venv\Scripts\activate
+python -m uvicorn app:app --reload --port 8000
+
+FRONTEND (Terminal 2):
+----------------------
+cd C:\Zaheer\workspace\athma\smart-rag-chatbot\frontend
+npm run dev
+
+ACCESS:
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+
+
+================================================================================
+                      ENVIRONMENT VARIABLES
+================================================================================
+
+File: backend/.env
+
+Required:
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+
+================================================================================
+                      COMMON QUESTIONS & ANSWERS
+================================================================================
+
+Q: What happens if the answer is not in the document?
+A: The AI responds with "This information is not available in the document."
+
+Q: Can we add more documents?
+A: Yes! Just add PDF files to backend/data/ folder and restart the server.
+   The index will be rebuilt automatically.
+
+Q: How do we update the NEET bulletin for next year?
+A: Replace neet.pdf in backend/data/, delete the storage/ folder, and 
+   restart the server to rebuild the index.
+
+Q: Is the data stored on OpenAI servers?
+A: The document text is sent to OpenAI for embedding only. OpenAI's API 
+   doesn't train on customer data.
+
+Q: Can this work offline?
+A: No, it requires internet connection for OpenAI API calls. For offline,
+   you'd need to use local models like Llama or Mistral.
+
+Q: How accurate is the similarity search?
+A: We retrieve top 3 most relevant chunks using cosine similarity. The
+   threshold is tuned for high precision in Q&A scenarios.
+
+
+================================================================================
+                      API ENDPOINTS
+================================================================================
+
+GET  /           - Health check
+GET  /health     - Detailed health status (index loaded, available models)
+POST /chat       - Main chat endpoint
+
+/chat Request Body:
+{
+    "question": "What is the eligibility criteria for NEET?",
+    "model": "openai"
+}
+
+/chat Response:
+{
+    "answer": "The eligibility criteria for NEET UG 2026...",
+    "sources": [
+        {
+            "file_name": "neet.pdf",
+            "page": 5,
+            "text_snippet": "..."
+        }
+    ],
+    "model_used": "openai"
+}
+
+
+================================================================================
+                      CREATED BY
+================================================================================
+
+Project: Get My University - NEET UG 2026 AI Assistant
+Purpose: Help students get instant, accurate answers about NEET UG 2026
+Source: Official NTA Information Bulletin
+
+================================================================================

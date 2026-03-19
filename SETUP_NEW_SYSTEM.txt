@@ -1,0 +1,189 @@
+================================================================================
+         QUICK SETUP GUIDE - Run on Another System
+================================================================================
+
+WHAT TO COPY (Zip these folders/files):
+----------------------------------------
+smart-rag-chatbot/
+├── backend/
+│   ├── app.py              ✅ COPY
+│   ├── requirements.txt    ✅ COPY
+│   └── data/
+│       └── neet.pdf        ✅ COPY
+├── frontend/
+│   ├── app/                ✅ COPY (entire folder)
+│   ├── components/         ✅ COPY (entire folder)
+│   ├── services/           ✅ COPY (entire folder)
+│   ├── types/              ✅ COPY (entire folder)
+│   ├── package.json        ✅ COPY
+│   ├── tsconfig.json       ✅ COPY
+│   ├── tailwind.config.ts  ✅ COPY
+│   ├── postcss.config.mjs  ✅ COPY
+│   └── next.config.ts      ✅ COPY
+└── PROJECT_OVERVIEW.txt    ✅ COPY (optional, for reference)
+
+DO NOT COPY (These will be recreated):
+--------------------------------------
+❌ backend/venv/           (Python virtual environment - recreate)
+❌ backend/storage/        (Vector index - will auto-generate)
+❌ backend/.env            (Contains API key - recreate manually)
+❌ frontend/node_modules/  (NPM packages - reinstall)
+❌ frontend/.next/         (Build cache - auto-generated)
+
+
+================================================================================
+                    PREREQUISITES ON NEW SYSTEM
+================================================================================
+
+Install these before starting:
+
+1. Python 3.10+ (Recommended: 3.12)
+   Download: https://www.python.org/downloads/
+   ✓ Check "Add Python to PATH" during installation
+
+2. Node.js 18+ (Recommended: 20 LTS)
+   Download: https://nodejs.org/
+   
+3. OpenAI API Key
+   Get from: https://platform.openai.com/api-keys
+
+
+================================================================================
+                    STEP-BY-STEP SETUP
+================================================================================
+
+STEP 1: Extract/Copy Project
+-----------------------------
+Copy the smart-rag-chatbot folder to your new system
+Example: C:\Projects\smart-rag-chatbot
+
+
+STEP 2: Setup Backend
+----------------------
+Open PowerShell/Terminal and run:
+
+cd C:\Projects\smart-rag-chatbot\backend
+
+# Create Python virtual environment
+python -m venv venv
+
+# Activate virtual environment (Windows)
+.\venv\Scripts\activate
+
+# Activate virtual environment (Mac/Linux)
+# source venv/bin/activate
+
+# Install dependencies (Option A - using requirements.txt)
+pip install -r requirements.txt
+
+# OR Install dependencies (Option B - direct install)
+pip install fastapi uvicorn python-dotenv llama-index llama-index-llms-openai pypdf
+
+
+STEP 3: Create .env File
+-------------------------
+Create file: backend/.env
+
+Contents:
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+(Replace with your actual OpenAI API key)
+
+
+STEP 4: Setup Frontend
+-----------------------
+Open NEW PowerShell/Terminal and run:
+
+cd C:\Projects\smart-rag-chatbot\frontend
+
+# Install Node.js dependencies
+npm install
+
+
+STEP 5: Start Backend Server
+-----------------------------
+In backend terminal (with venv activated):
+
+cd C:\Projects\smart-rag-chatbot\backend
+.\venv\Scripts\activate
+python -m uvicorn app:app --reload --port 8000
+
+Wait until you see:
+- "Loading existing index..." or "Creating new index from documents..."
+- "RAG Chatbot ready!"
+- "Uvicorn running on http://127.0.0.1:8000"
+
+
+STEP 6: Start Frontend Server
+------------------------------
+In frontend terminal:
+
+cd C:\Projects\smart-rag-chatbot\frontend
+npm run dev
+
+Wait until you see:
+- "Ready in X.Xs"
+- "Local: http://localhost:3000"
+
+
+STEP 7: Open Browser
+---------------------
+Go to: http://localhost:3000
+
+You should see the "Get My University - NEET UG 2026 AI Assistant" interface!
+
+
+================================================================================
+                    QUICK COMMANDS CHEATSHEET
+================================================================================
+
+BACKEND (Terminal 1):
+cd C:\Projects\smart-rag-chatbot\backend
+.\venv\Scripts\activate
+python -m uvicorn app:app --reload --port 8000
+
+FRONTEND (Terminal 2):
+cd C:\Projects\smart-rag-chatbot\frontend
+npm run dev
+
+STOP SERVERS:
+Press Ctrl+C in each terminal
+
+
+================================================================================
+                    TROUBLESHOOTING
+================================================================================
+
+PROBLEM: "python not found"
+SOLUTION: Install Python and ensure it's added to PATH
+
+PROBLEM: "npm not found"  
+SOLUTION: Install Node.js and restart terminal
+
+PROBLEM: "OPENAI_API_KEY not set"
+SOLUTION: Check backend/.env file exists with valid API key
+
+PROBLEM: "Port 8000 already in use"
+SOLUTION: Kill existing process or use different port:
+          python -m uvicorn app:app --reload --port 8001
+
+PROBLEM: "Port 3000 already in use"
+SOLUTION: Kill existing process or Next.js will auto-use 3001
+
+PROBLEM: First query is slow
+SOLUTION: Normal! First startup indexes the PDF (takes 30-60 seconds)
+
+PROBLEM: "Cannot connect to backend"
+SOLUTION: Ensure backend is running on port 8000 before testing frontend
+
+
+================================================================================
+                    TOTAL SETUP TIME
+================================================================================
+
+With good internet: ~5-10 minutes
+- pip install: ~2-3 min (downloads ~500MB)
+- npm install: ~1-2 min  
+- First index creation: ~30-60 sec
+
+================================================================================

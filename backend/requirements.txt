@@ -1,0 +1,17 @@
+# FastAPI and server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# LlamaIndex for RAG (OpenAI only)
+llama-index>=0.12.0
+llama-index-llms-openai>=0.3.0
+
+# PDF processing
+pypdf>=4.0.0
+
+# LLM provider
+openai>=1.30.0
+
+# Environment variables
+python-dotenv>=1.0.0
