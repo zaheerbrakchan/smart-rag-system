@@ -16,6 +16,11 @@ export default function ChatWindow({
   isLoading,
   messagesEndRef,
 }: ChatWindowProps) {
+  const last = messages[messages.length - 1];
+  // While streaming, assistant bubble is already shown — don't duplicate global typing row
+  const showGlobalTyping =
+    isLoading && !(last?.role === 'assistant' && last?.isStreaming);
+
   return (
     <div className="h-full overflow-y-auto px-4 py-6">
       <div className="max-w-4xl mx-auto space-y-6">
@@ -23,8 +28,8 @@ export default function ChatWindow({
           <MessageBubble key={message.id} message={message} />
         ))}
 
-        {/* Loading indicator */}
-        {isLoading && (
+        {/* Loading indicator (only before assistant placeholder is added) */}
+        {showGlobalTyping && (
           <div className="flex items-start gap-4 message-enter">
             <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center flex-shrink-0 shadow-md">
               <GraduationCap className="w-5 h-5 text-white" />

@@ -52,6 +52,17 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         >
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : message.isStreaming && !message.content.trim() ? (
+            <div className="flex items-center gap-3 py-1">
+              <span className="text-sm text-gray-500">Thinking…</span>
+              <span className="inline-flex gap-1">
+                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" />
+              </span>
+            </div>
+          ) : message.isStreaming ? (
+            <p className="whitespace-pre-wrap text-gray-800 leading-relaxed">{message.content}</p>
           ) : (
             <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-li:text-gray-700 prose-strong:text-gray-800">
               <ReactMarkdown>{message.content}</ReactMarkdown>
@@ -60,7 +71,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         </div>
 
         {/* Source indicator for assistant */}
-        {!isUser && !message.isError && (
+        {!isUser && !message.isError && !message.isStreaming && (
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 border border-green-200 rounded-full">
               <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
@@ -70,7 +81,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         )}
 
         {/* Sources section */}
-        {!isUser && message.sources && message.sources.length > 0 && (
+        {!isUser && !message.isStreaming && message.sources && message.sources.length > 0 && (
           <div className="mt-3">
             <button
               onClick={() => setShowSources(!showSources)}

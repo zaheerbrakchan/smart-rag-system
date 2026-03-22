@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import ChatWindow from '@/components/ChatWindow';
 import { Message, ModelType } from '@/types';
-import { sendChatMessage } from '@/services/api';
+import { streamChatMessage } from '@/services/api';
 import { GraduationCap, Send, Sparkles, BookOpen, Calendar, FileCheck, HelpCircle, Shield, RotateCcw } from 'lucide-react';
 
 export default function Home() {
@@ -13,7 +13,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive or stream updates content
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -30,36 +30,62 @@ export default function Home() {
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const assistantId = `${Date.now()}-assistant`;
+
+    setMessages((prev) => [
+      ...prev,
+      userMessage,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        isStreaming: true,
+      },
+    ]);
     setInputValue('');
     setIsLoading(true);
 
     try {
-      // Send to API
-      const response = await sendChatMessage(question, selectedModel);
-
-      // Add assistant message
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: response.answer,
-        timestamp: new Date(),
-        sources: response.sources,
-        modelUsed: response.model_used,
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
+      await streamChatMessage(
+        question,
+        selectedModel,
+        (delta) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + delta } : m
+            )
+          );
+        },
+        ({ sources, model_used }) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    sources,
+                    modelUsed: model_used,
+                    isStreaming: false,
+                  }
+                : m
+            )
+          );
+        }
+      );
     } catch (error) {
-      // Add error message
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`,
-        timestamp: new Date(),
-        isError: true,
-      };
-
-      setMessages((prev) => [...prev, errorMessage]);
+      const msg = error instanceof Error ? error.message : 'Failed to get response';
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: m.content ? `${m.content}\n\nError: ${msg}` : `Error: ${msg}`,
+                isError: true,
+                isStreaming: false,
+              }
+            : m
+        )
+      );
     } finally {
       setIsLoading(false);
     }

@@ -3,10 +3,12 @@ RAG Chatbot - FastAPI Backend (OpenAI Only)
 Simple RAG implementation using LlamaIndex + OpenAI
 """
 
+import json
 import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -157,6 +159,87 @@ def load_or_create_index() -> VectorStoreIndex:
     return index
 
 
+def _qa_prompt_template() -> PromptTemplate:
+    return PromptTemplate(
+        """You are a helpful AI assistant that answers questions based ONLY on the provided context.
+
+RULES:
+1. Answer ONLY using information from the context below
+2. If the answer is not in the context, say: "This information is not available in the document."
+3. Do NOT make up information
+4. Be concise and accurate
+
+Context:
+{context_str}
+
+Question: {query_str}
+
+Answer:"""
+    )
+
+
+def _sources_from_response(response) -> List[Source]:
+    sources: List[Source] = []
+    if hasattr(response, "source_nodes") and response.source_nodes:
+        for node in response.source_nodes[:3]:
+            n = node.node
+            text = n.text if hasattr(n, "text") else str(n)
+            meta = n.metadata if hasattr(n, "metadata") else {}
+            sources.append(
+                Source(
+                    file_name=meta.get("file_name", "Unknown") if isinstance(meta, dict) else "Unknown",
+                    page=meta.get("page_label") if isinstance(meta, dict) else None,
+                    text_snippet=text[:200] + "..." if len(text) > 200 else text,
+                )
+            )
+    return sources
+
+
+def _configure_query_engine(idx: VectorStoreIndex, streaming: bool):
+    query_engine = idx.as_query_engine(
+        similarity_top_k=3,
+        response_mode="compact",
+        streaming=streaming,
+    )
+    query_engine.update_prompts(
+        {"response_synthesizer:text_qa_template": _qa_prompt_template()}
+    )
+    return query_engine
+
+
+def ndjson_chat_stream(question: str):
+    """Stream LLM tokens as NDJSON lines: delta, then done with sources."""
+    try:
+        if not question.strip():
+            yield json.dumps({"type": "error", "message": "Question cannot be empty"}) + "\n"
+            return
+
+        idx = load_or_create_index()
+        query_engine = _configure_query_engine(idx, streaming=True)
+        streaming_response = query_engine.query(question)
+
+        gen = getattr(streaming_response, "response_gen", None)
+        if gen is not None:
+            for token in gen:
+                if token:
+                    yield json.dumps({"type": "delta", "text": str(token)}) + "\n"
+        else:
+            text = str(streaming_response)
+            yield json.dumps({"type": "delta", "text": text}) + "\n"
+
+        sources = _sources_from_response(streaming_response)
+        payload = {
+            "type": "done",
+            "sources": [s.model_dump() for s in sources],
+            "model_used": "openai",
+        }
+        yield json.dumps(payload) + "\n"
+    except ValueError as e:
+        yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+    except Exception as e:
+        yield json.dumps({"type": "error", "message": f"Error: {str(e)}"}) + "\n"
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize index on startup"""
@@ -186,65 +269,43 @@ async def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Chat endpoint - answers questions using RAG"""
+    """Chat endpoint - answers questions using RAG (full response at once)"""
     try:
         if not request.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        # Get or create index
+
         idx = load_or_create_index()
-        
-        # Create query engine
-        query_engine = idx.as_query_engine(
-            similarity_top_k=3,
-            response_mode="compact"
-        )
-        
-        # Custom RAG prompt
-        qa_template = PromptTemplate(
-            """You are a helpful AI assistant that answers questions based ONLY on the provided context.
-
-RULES:
-1. Answer ONLY using information from the context below
-2. If the answer is not in the context, say: "This information is not available in the document."
-3. Do NOT make up information
-4. Be concise and accurate
-
-Context:
-{context_str}
-
-Question: {query_str}
-
-Answer:"""
-        )
-        
-        query_engine.update_prompts({"response_synthesizer:text_qa_template": qa_template})
-        
-        # Execute query
+        query_engine = _configure_query_engine(idx, streaming=False)
         response = query_engine.query(request.question)
-        
-        # Extract sources
-        sources = []
-        if hasattr(response, 'source_nodes'):
-            for node in response.source_nodes[:3]:
-                text = node.node.text if hasattr(node.node, 'text') else str(node.node)
-                source = Source(
-                    file_name=node.node.metadata.get("file_name", "Unknown") if hasattr(node.node, 'metadata') else "Unknown",
-                    page=node.node.metadata.get("page_label") if hasattr(node.node, 'metadata') else None,
-                    text_snippet=text[:200] + "..." if len(text) > 200 else text
-                )
-                sources.append(source)
-        
+        sources = _sources_from_response(response)
+
         return ChatResponse(
             answer=str(response),
             sources=sources if sources else None,
-            model_used="openai"
+            model_used="openai",
         )
-        
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Stream answer tokens (NDJSON) for ChatGPT-like UI. Lines: delta, then done."""
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    return StreamingResponse(
+        ndjson_chat_stream(request.question),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/models")

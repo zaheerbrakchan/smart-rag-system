@@ -17,6 +17,8 @@ export interface Message {
   sources?: Source[];
   modelUsed?: string;
   isError?: boolean;
+  /** True while tokens are still streaming from /chat/stream */
+  isStreaming?: boolean;
 }
 
 // API response
