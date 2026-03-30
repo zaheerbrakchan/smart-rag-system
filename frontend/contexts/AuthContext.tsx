@@ -24,6 +24,8 @@ interface RegisterData {
   age?: number;
   target_exams?: string[];
   verification_token: string;
+  preferred_state?: string;
+  category?: string;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);

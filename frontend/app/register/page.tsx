@@ -188,8 +188,7 @@ export default function RegisterPage() {
           <div className="flex items-center justify-center mb-6">
             <div className="flex items-center">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${
-                step === 'phone' ? 'bg-blue-600 text-white' : 
-                step !== 'phone' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'
+                step === 'phone' ? 'bg-blue-600 text-white' : 'bg-green-500 text-white'
               }`}>
                 {step !== 'phone' ? <CheckCircle className="w-4 h-4" /> : '1'}
               </div>
