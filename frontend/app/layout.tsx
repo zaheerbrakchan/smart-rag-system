@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { Providers } from './providers';
 
 export const metadata: Metadata = {
   title: 'NEET UG 2026 Assistant | Get My University',
@@ -14,7 +15,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-gray-50 antialiased">{children}</body>
+      <body className="bg-gray-50 antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

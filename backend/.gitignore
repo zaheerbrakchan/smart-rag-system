@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Storage (persisted index)
+storage/
+
+# Data folder (user-uploaded PDFs)
+# Keep the folder but ignore contents
+data/*
+!data/.gitkeep
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Distribution
+dist/
+build/
+*.egg-info/

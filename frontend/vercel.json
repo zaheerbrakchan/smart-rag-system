@@ -1,5 +1,10 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
   "installCommand": "npm install",
-  "buildCommand": "npm run build"
+  "env": {
+    "NEXT_PUBLIC_API_URL": "@rag-chatbot-api-url"
+  }
 }

@@ -1,13 +1,21 @@
-import { ChatResponse, ModelType, Source } from '@/types';
+import { ChatResponse, ModelType } from '@/types';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+// User preferences for smart query routing
+export interface UserPreferences {
+  preferred_state?: string;
+  category?: string;
+  target_exams?: string[];
+}
+
 /**
- * Send a chat message to the RAG backend
+ * Send a chat message to the RAG backend (non-streaming)
  */
 export async function sendChatMessage(
   question: string,
-  model: ModelType
+  model: ModelType,
+  userPreferences?: UserPreferences
 ): Promise<ChatResponse> {
   const response = await fetch(`${API_BASE_URL}/chat`, {
     method: 'POST',
@@ -17,6 +25,7 @@ export async function sendChatMessage(
     body: JSON.stringify({
       question,
       model,
+      user_preferences: userPreferences,
     }),
   });
 
@@ -28,89 +37,81 @@ export async function sendChatMessage(
   return response.json();
 }
 
-export type StreamDonePayload = {
-  sources?: Source[];
-  model_used: string;
-};
-
 /**
- * Stream chat from /chat/stream (NDJSON: delta lines, then done).
+ * Stream chat response from the RAG backend
  */
 export async function streamChatMessage(
   question: string,
   model: ModelType,
-  onDelta: (text: string) => void,
-  onDone: (data: StreamDonePayload) => void
+  onToken: (token: string) => void,
+  onSources: (sources: any[]) => void,
+  onDone: (filters?: any) => void,
+  onError: (error: string) => void,
+  userPreferences?: UserPreferences,
+  clarifiedScope?: string,
+  onClarificationNeeded?: (options: string[], message: string) => void
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/chat/stream`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ question, model }),
-  });
+  try {
+    const response = await fetch(`${API_BASE_URL}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        question,
+        model,
+        user_preferences: userPreferences,
+        clarified_scope: clarifiedScope,
+      }),
+    });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-    throw new Error(
-      typeof error.detail === 'string'
-        ? error.detail
-        : `HTTP error! status: ${response.status}`
-    );
-  }
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
 
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('No response body');
-  }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body');
+    }
 
-  const decoder = new TextDecoder();
-  let buffer = '';
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let obj: { type: string; text?: string; message?: string; sources?: Source[]; model_used?: string };
-      try {
-        obj = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-      if (obj.type === 'delta' && obj.text) {
-        onDelta(obj.text);
-      } else if (obj.type === 'done') {
-        onDone({
-          sources: obj.sources,
-          model_used: obj.model_used ?? 'openai',
-        });
-      } else if (obj.type === 'error') {
-        throw new Error(obj.message || 'Stream error');
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      
+      // Process complete SSE messages
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            
+            if (data.type === 'token' && data.token) {
+              onToken(data.token);
+            } else if (data.type === 'sources' && data.sources) {
+              onSources(data.sources);
+            } else if (data.type === 'clarification_needed' && onClarificationNeeded) {
+              onClarificationNeeded(data.options, data.message);
+            } else if (data.type === 'done') {
+              onDone(data.filters_applied);
+            } else if (data.type === 'error') {
+              onError(data.error);
+            }
+          } catch (e) {
+            // Ignore parse errors for incomplete JSON
+          }
+        }
       }
     }
-  }
-
-  if (buffer.trim()) {
-    try {
-      const obj = JSON.parse(buffer.trim());
-      if (obj.type === 'done') {
-        onDone({
-          sources: obj.sources,
-          model_used: obj.model_used ?? 'openai',
-        });
-      } else if (obj.type === 'error') {
-        throw new Error(obj.message || 'Stream error');
-      }
-    } catch (e) {
-      if (e instanceof SyntaxError) return;
-      throw e;
-    }
+  } catch (error) {
+    onError(error instanceof Error ? error.message : 'Stream failed');
   }
 }
 

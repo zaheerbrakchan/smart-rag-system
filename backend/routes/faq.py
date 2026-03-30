@@ -1,0 +1,578 @@
+"""
+FAQ Routes
+Manages FAQ knowledge base - bulk upload, review, approve/reject
+Supports hybrid retrieval (FAQ first, then RAG fallback)
+"""
+
+import os
+import uuid
+from datetime import datetime
+from typing import Optional, List
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_, or_
+from pydantic import BaseModel, Field
+import json
+
+from database.connection import get_db
+from models.user import User
+from models.pending_qa import PendingQA, QAStatus
+from dependencies.auth import get_current_admin
+from pinecone import Pinecone
+from llama_index.embeddings.openai import OpenAIEmbedding
+
+router = APIRouter(prefix="/faq", tags=["FAQ"])
+
+# Lazy-loaded embedding model (initialized on first use to avoid blocking startup)
+_embed_model = None
+
+def get_embed_model():
+    """Get or initialize embedding model (lazy loading)"""
+    global _embed_model
+    if _embed_model is None:
+        _embed_model = OpenAIEmbedding(model="text-embedding-3-small")  # Same as RAG docs
+    return _embed_model
+
+
+# ============== SCHEMAS ==============
+
+class FAQCreateRequest(BaseModel):
+    question: str = Field(..., min_length=5)
+    answer: str = Field(..., min_length=10)
+    state: Optional[str] = None
+    exam: Optional[str] = "NEET"
+    category: Optional[str] = None
+
+
+class FAQBulkUploadItem(BaseModel):
+    question: str
+    answer: str
+    state: Optional[str] = None
+    exam: Optional[str] = "NEET"
+    category: Optional[str] = None
+
+
+class FAQUpdateRequest(BaseModel):
+    modified_answer: Optional[str] = None
+    detected_state: Optional[str] = None
+    detected_exam: Optional[str] = None
+    detected_category: Optional[str] = None
+
+
+class FAQReviewRequest(BaseModel):
+    action: str = Field(..., pattern="^(approve|reject|modify)$")
+    modified_answer: Optional[str] = None
+    review_notes: Optional[str] = None
+
+
+class FAQResponse(BaseModel):
+    id: int
+    question: str
+    original_answer: str
+    modified_answer: Optional[str]
+    detected_state: Optional[str]
+    detected_exam: Optional[str]
+    detected_category: Optional[str]
+    status: str
+    occurrence_count: int
+    faq_vector_id: Optional[str]
+    created_at: datetime
+    reviewed_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+
+
+class FAQListResponse(BaseModel):
+    faqs: List[FAQResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class FAQSearchResult(BaseModel):
+    id: int
+    question: str
+    answer: str
+    similarity_score: float
+    state: Optional[str]
+    category: Optional[str]
+
+
+# ============== HELPER FUNCTIONS ==============
+
+def get_pinecone_index():
+    """Get Pinecone index for FAQ vectors"""
+    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    index_name = os.getenv("PINECONE_INDEX_NAME", "neet-assistant")
+    return pc.Index(index_name)
+
+
+async def vectorize_and_store_faq(faq: PendingQA) -> str:
+    """Vectorize FAQ question and store in Pinecone with special metadata"""
+    # Generate embedding for the question
+    embedding = get_embed_model().get_text_embedding(faq.question)
+    
+    # Generate unique vector ID
+    vector_id = f"faq_{faq.id}_{uuid.uuid4().hex[:8]}"
+    
+    # Prepare metadata
+    metadata = {
+        "is_faq": True,
+        "faq_id": faq.id,
+        "question": faq.question,
+        "answer": faq.modified_answer or faq.original_answer,
+        "state": faq.detected_state or "All-India",
+        "exam": faq.detected_exam or "NEET",
+        "category": faq.detected_category or "general",
+        "document_type": "faq"
+    }
+    
+    # Store in Pinecone
+    pc_index = get_pinecone_index()
+    pc_index.upsert(vectors=[(vector_id, embedding, metadata)])
+    
+    return vector_id
+
+
+async def search_faq(query: str, state_filter: Optional[str] = None, top_k: int = 3) -> List[dict]:
+    """Search FAQ vectors in Pinecone"""
+    try:
+        # Generate query embedding
+        query_embedding = get_embed_model().get_text_embedding(query)
+        
+        # Use simple filter - just get FAQs (state filtering done post-query if needed)
+        # Complex $and/$or filters not supported in newer Pinecone SDK
+        filter_dict = {"is_faq": True}
+        
+        # Query Pinecone
+        pc_index = get_pinecone_index()
+        results = pc_index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            filter=filter_dict,
+            include_metadata=True
+        )
+        
+        matches = []
+        # Handle both dict and QueryResponse object
+        result_matches = results.get("matches", []) if isinstance(results, dict) else getattr(results, 'matches', [])
+        
+        for match in result_matches:
+            # Handle both dict and Match object
+            if isinstance(match, dict):
+                metadata = match.get("metadata", {})
+                score = match.get("score", 0)
+            else:
+                metadata = match.metadata if hasattr(match, 'metadata') else {}
+                score = match.score if hasattr(match, 'score') else 0
+            
+            matches.append({
+                "faq_id": metadata.get("faq_id"),
+                "question": metadata.get("question", ""),
+                "answer": metadata.get("answer", ""),
+                "state": metadata.get("state"),
+                "category": metadata.get("category"),
+                "score": score
+            })
+        
+        return matches
+    except Exception as e:
+        print(f"FAQ search error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+# ============== ROUTES ==============
+
+@router.post("/create", response_model=FAQResponse)
+async def create_faq(
+    request: FAQCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Create a single FAQ entry (auto-approved by admin)"""
+    faq = PendingQA(
+        question=request.question,
+        original_answer=request.answer,
+        detected_state=request.state,
+        detected_exam=request.exam,
+        detected_category=request.category,
+        status=QAStatus.APPROVED,
+        reviewed_by=current_admin.id,
+        reviewed_at=datetime.utcnow()
+    )
+    db.add(faq)
+    await db.commit()
+    await db.refresh(faq)
+    
+    # Vectorize and store in Pinecone
+    try:
+        vector_id = await vectorize_and_store_faq(faq)
+        faq.faq_vector_id = vector_id
+        await db.commit()
+    except Exception as e:
+        print(f"Warning: Could not vectorize FAQ: {e}")
+    
+    return faq
+
+
+@router.post("/bulk-upload")
+async def bulk_upload_faqs(
+    faqs: List[FAQBulkUploadItem],
+    auto_approve: bool = Query(default=False, description="Auto-approve all uploaded FAQs"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Bulk upload FAQs from JSON array"""
+    created = 0
+    failed = 0
+    
+    for item in faqs:
+        try:
+            faq = PendingQA(
+                question=item.question,
+                original_answer=item.answer,
+                detected_state=item.state,
+                detected_exam=item.exam,
+                detected_category=item.category,
+                status=QAStatus.APPROVED if auto_approve else QAStatus.PENDING,
+                reviewed_by=current_admin.id if auto_approve else None,
+                reviewed_at=datetime.utcnow() if auto_approve else None
+            )
+            db.add(faq)
+            await db.flush()
+            
+            # Vectorize if auto-approved
+            if auto_approve:
+                try:
+                    vector_id = await vectorize_and_store_faq(faq)
+                    faq.faq_vector_id = vector_id
+                except Exception as e:
+                    print(f"Warning: Could not vectorize FAQ {faq.id}: {e}")
+            
+            created += 1
+        except Exception as e:
+            print(f"Failed to create FAQ: {e}")
+            failed += 1
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "created": created,
+        "failed": failed,
+        "auto_approved": auto_approve
+    }
+
+
+@router.post("/upload-json")
+async def upload_faq_json(
+    file: UploadFile = File(...),
+    auto_approve: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Upload FAQs from JSON file"""
+    if not file.filename.endswith('.json'):
+        raise HTTPException(status_code=400, detail="Only JSON files are supported")
+    
+    try:
+        content = await file.read()
+        faqs_data = json.loads(content)
+        
+        if not isinstance(faqs_data, list):
+            raise HTTPException(status_code=400, detail="JSON must be an array of FAQ objects")
+        
+        # Convert to FAQBulkUploadItem
+        items = [FAQBulkUploadItem(**item) for item in faqs_data]
+        
+        # Use bulk upload
+        return await bulk_upload_faqs(items, auto_approve, db, current_admin)
+    
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+
+
+@router.get("/list", response_model=FAQListResponse)
+async def list_faqs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status_filter: Optional[str] = Query(None, description="pending|approved|rejected"),
+    state_filter: Optional[str] = None,
+    search: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """List FAQs with pagination and filtering"""
+    query = select(PendingQA)
+    count_query = select(func.count(PendingQA.id))
+    
+    # Apply filters
+    if status_filter:
+        try:
+            status_enum = QAStatus(status_filter)
+            query = query.where(PendingQA.status == status_enum)
+            count_query = count_query.where(PendingQA.status == status_enum)
+        except ValueError:
+            pass
+    
+    if state_filter:
+        query = query.where(PendingQA.detected_state == state_filter)
+        count_query = count_query.where(PendingQA.detected_state == state_filter)
+    
+    if search:
+        search_filter = or_(
+            PendingQA.question.ilike(f"%{search}%"),
+            PendingQA.original_answer.ilike(f"%{search}%")
+        )
+        query = query.where(search_filter)
+        count_query = count_query.where(search_filter)
+    
+    # Get total count
+    total = await db.scalar(count_query) or 0
+    
+    # Apply pagination
+    offset = (page - 1) * page_size
+    query = query.offset(offset).limit(page_size).order_by(PendingQA.id.desc())
+    
+    result = await db.execute(query)
+    faqs = result.scalars().all()
+    
+    return FAQListResponse(
+        faqs=[FAQResponse(
+            id=f.id,
+            question=f.question,
+            original_answer=f.original_answer,
+            modified_answer=f.modified_answer,
+            detected_state=f.detected_state,
+            detected_exam=f.detected_exam,
+            detected_category=f.detected_category,
+            status=f.status.value,
+            occurrence_count=f.occurrence_count,
+            faq_vector_id=f.faq_vector_id,
+            created_at=f.created_at,
+            reviewed_at=f.reviewed_at
+        ) for f in faqs],
+        total=total,
+        page=page,
+        page_size=page_size
+    )
+
+
+@router.get("/{faq_id}", response_model=FAQResponse)
+async def get_faq(
+    faq_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get single FAQ by ID"""
+    faq = await db.get(PendingQA, faq_id)
+    if not faq:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    
+    return FAQResponse(
+        id=faq.id,
+        question=faq.question,
+        original_answer=faq.original_answer,
+        modified_answer=faq.modified_answer,
+        detected_state=faq.detected_state,
+        detected_exam=faq.detected_exam,
+        detected_category=faq.detected_category,
+        status=faq.status.value,
+        occurrence_count=faq.occurrence_count,
+        faq_vector_id=faq.faq_vector_id,
+        created_at=faq.created_at,
+        reviewed_at=faq.reviewed_at
+    )
+
+
+@router.post("/{faq_id}/review")
+async def review_faq(
+    faq_id: int,
+    request: FAQReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Review (approve/reject/modify) a pending FAQ"""
+    faq = await db.get(PendingQA, faq_id)
+    if not faq:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    
+    if request.action == "approve":
+        faq.status = QAStatus.APPROVED
+        
+        # Vectorize and store in Pinecone
+        try:
+            vector_id = await vectorize_and_store_faq(faq)
+            faq.faq_vector_id = vector_id
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not vectorize FAQ: {e}")
+    
+    elif request.action == "reject":
+        faq.status = QAStatus.REJECTED
+        
+        # Remove from Pinecone if exists
+        if faq.faq_vector_id:
+            try:
+                pc_index = get_pinecone_index()
+                pc_index.delete(ids=[faq.faq_vector_id])
+            except:
+                pass
+            faq.faq_vector_id = None
+    
+    elif request.action == "modify":
+        if not request.modified_answer:
+            raise HTTPException(status_code=400, detail="modified_answer required for modify action")
+        faq.status = QAStatus.MODIFIED
+        faq.modified_answer = request.modified_answer
+        
+        # Vectorize with modified answer
+        try:
+            vector_id = await vectorize_and_store_faq(faq)
+            faq.faq_vector_id = vector_id
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not vectorize FAQ: {e}")
+    
+    faq.reviewed_by = current_admin.id
+    faq.reviewed_at = datetime.utcnow()
+    faq.review_notes = request.review_notes
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "action": request.action,
+        "faq_id": faq_id,
+        "status": faq.status.value,
+        "vector_id": faq.faq_vector_id
+    }
+
+
+@router.delete("/{faq_id}")
+async def delete_faq(
+    faq_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Delete an FAQ"""
+    faq = await db.get(PendingQA, faq_id)
+    if not faq:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    
+    # Remove from Pinecone if exists
+    if faq.faq_vector_id:
+        try:
+            pc_index = get_pinecone_index()
+            pc_index.delete(ids=[faq.faq_vector_id])
+        except Exception as e:
+            print(f"Warning: Could not delete FAQ vector: {e}")
+    
+    await db.delete(faq)
+    await db.commit()
+    
+    return {"success": True, "deleted_id": faq_id}
+
+
+@router.get("/search/query")
+async def search_faq_endpoint(
+    q: str = Query(..., min_length=3),
+    state: Optional[str] = None,
+    threshold: float = Query(0.75, ge=0, le=1, description="Minimum similarity score"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Search FAQs by semantic similarity.
+    This is the endpoint used by hybrid retrieval.
+    Returns matches above the threshold.
+    """
+    try:
+        matches = await search_faq(q, state_filter=state, top_k=5)
+        
+        # Filter by threshold
+        filtered = [m for m in matches if m["score"] >= threshold]
+        
+        return {
+            "query": q,
+            "matches": filtered,
+            "has_good_match": len(filtered) > 0 and filtered[0]["score"] >= 0.85
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+# ============== STATS ==============
+
+@router.get("/stats/overview")
+async def get_faq_stats(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get FAQ statistics"""
+    total = await db.scalar(select(func.count(PendingQA.id)))
+    pending = await db.scalar(
+        select(func.count(PendingQA.id)).where(PendingQA.status == QAStatus.PENDING)
+    )
+    approved = await db.scalar(
+        select(func.count(PendingQA.id)).where(
+            or_(PendingQA.status == QAStatus.APPROVED, PendingQA.status == QAStatus.MODIFIED)
+        )
+    )
+    rejected = await db.scalar(
+        select(func.count(PendingQA.id)).where(PendingQA.status == QAStatus.REJECTED)
+    )
+    
+    return {
+        "total": total or 0,
+        "pending_review": pending or 0,
+        "approved": approved or 0,
+        "rejected": rejected or 0
+    }
+
+
+@router.post("/revectorize-all")
+async def revectorize_all_faqs(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Re-vectorize all approved FAQs with the current embedding model"""
+    # Get all approved/modified FAQs
+    result = await db.execute(
+        select(PendingQA).where(
+            or_(PendingQA.status == QAStatus.APPROVED, PendingQA.status == QAStatus.MODIFIED)
+        )
+    )
+    faqs = result.scalars().all()
+    
+    if not faqs:
+        return {"success": True, "message": "No approved FAQs to revectorize", "count": 0}
+    
+    success_count = 0
+    errors = []
+    
+    for faq in faqs:
+        try:
+            # Delete old vector if exists
+            if faq.faq_vector_id:
+                try:
+                    pc_index = get_pinecone_index()
+                    pc_index.delete(ids=[faq.faq_vector_id])
+                except:
+                    pass
+            
+            # Re-vectorize
+            vector_id = await vectorize_and_store_faq(faq)
+            faq.faq_vector_id = vector_id
+            success_count += 1
+        except Exception as e:
+            errors.append({"faq_id": faq.id, "error": str(e)})
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "message": f"Re-vectorized {success_count}/{len(faqs)} FAQs",
+        "count": success_count,
+        "errors": errors if errors else None
+    }

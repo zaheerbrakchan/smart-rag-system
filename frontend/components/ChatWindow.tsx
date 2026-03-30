@@ -9,34 +9,42 @@ interface ChatWindowProps {
   messages: Message[];
   isLoading: boolean;
   messagesEndRef: RefObject<HTMLDivElement>;
+  onClarificationSelect?: (option: string) => void;
 }
 
 export default function ChatWindow({
   messages,
   isLoading,
   messagesEndRef,
+  onClarificationSelect,
 }: ChatWindowProps) {
-  const last = messages[messages.length - 1];
-  // While streaming, assistant bubble is already shown — don't duplicate global typing row
-  const showGlobalTyping =
-    isLoading && !(last?.role === 'assistant' && last?.isStreaming);
+  // Check if the last assistant message has content (means it's streaming)
+  const lastMessage = messages[messages.length - 1];
+  const isStreaming = lastMessage?.role === 'assistant' && lastMessage?.content?.length > 0;
+  
+  // Only show loading indicator if loading AND not already streaming content
+  const showLoadingIndicator = isLoading && !isStreaming;
 
   return (
     <div className="h-full overflow-y-auto px-4 py-6">
       <div className="max-w-4xl mx-auto space-y-6">
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble 
+            key={message.id} 
+            message={message} 
+            onClarificationSelect={onClarificationSelect}
+          />
         ))}
 
-        {/* Loading indicator (only before assistant placeholder is added) */}
-        {showGlobalTyping && (
+        {/* Loading indicator - only show when waiting for first response */}
+        {showLoadingIndicator && (
           <div className="flex items-start gap-4 message-enter">
             <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center flex-shrink-0 shadow-md">
               <GraduationCap className="w-5 h-5 text-white" />
             </div>
             <div className="flex-1">
-              <p className="text-xs font-semibold text-blue-600 mb-1.5">NEET Assistant</p>
-              <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-sm p-4 shadow-md">
+              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1.5">NEET Assistant</p>
+              <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl rounded-tl-sm p-4 shadow-md dark:shadow-lg dark:shadow-black/10">
                 <TypingIndicator />
               </div>
             </div>
@@ -52,14 +60,14 @@ export default function ChatWindow({
 function TypingIndicator() {
   return (
     <div className="flex items-center gap-3">
-      <Search className="w-4 h-4 text-blue-500 animate-pulse" />
-      <span className="text-sm text-gray-500">Searching NEET UG 2026 Bulletin...</span>
+      <Search className="w-4 h-4 text-blue-500 dark:text-blue-400 animate-pulse" />
+      <span className="text-sm text-gray-500 dark:text-gray-400">Searching NEET UG 2026 Bulletin...</span>
       <div className="flex gap-1">
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
       </div>
-      <span className="text-sm text-gray-500 ml-2">Thinking...</span>
+      <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">Thinking...</span>
     </div>
   );
 }
