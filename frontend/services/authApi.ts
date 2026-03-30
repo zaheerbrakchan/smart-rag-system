@@ -98,7 +98,7 @@ export async function register(data: {
  */
 export async function login(username: string, password: string): Promise<AuthResponse> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // Render free tier cold starts can exceed 15s
 
   try {
     const response = await fetch(`${API_BASE_URL}/auth/login`, {
@@ -134,7 +134,7 @@ export async function refreshToken(
   refresh_token: string
 ): Promise<{ access_token: string; token_type: string; expires_in: number }> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
     const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
@@ -164,7 +164,7 @@ export async function refreshToken(
  */
 export async function getCurrentUser(access_token: string): Promise<User> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
     const response = await fetch(`${API_BASE_URL}/auth/me`, {
