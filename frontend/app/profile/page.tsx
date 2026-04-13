@@ -146,8 +146,8 @@ export default function ProfilePage() {
                   <Calendar className="w-5 h-5 text-orange-600 dark:text-orange-400" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Age</p>
-                  <p className="font-medium text-gray-800 dark:text-white">{user?.age || 'Not provided'}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Preferred State</p>
+                  <p className="font-medium text-gray-800 dark:text-white">{user?.preferences?.preferred_state || 'Not provided'}</p>
                 </div>
               </div>
             </div>
@@ -164,18 +164,9 @@ export default function ProfilePage() {
               <div className="flex-1">
                 <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">Preparing For</p>
                 <div className="flex flex-wrap gap-2">
-                  {user?.target_exams && user.target_exams.length > 0 ? (
-                    user.target_exams.map((exam) => (
-                      <span
-                        key={exam}
-                        className="px-4 py-2 bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400 rounded-full text-sm font-medium"
-                      >
-                        {exam}
-                      </span>
-                    ))
-                  ) : (
-                    <p className="text-gray-400 dark:text-gray-500 italic">No exams selected</p>
-                  )}
+                  <span className="px-4 py-2 bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400 rounded-full text-sm font-medium">
+                    NEET UG
+                  </span>
                 </div>
               </div>
             </div>
