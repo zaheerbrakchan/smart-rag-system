@@ -3,7 +3,7 @@ Knowledge Search Tool for NEET Counselling Assistant
 
 This module provides a unified search interface that:
 - Performs semantic search on the vector database
-- Supports optional metadata filters (state, document_type, category)
+- Supports optional metadata filter by state only (document_type / doc_topic are not used for retrieval)
 - Returns formatted chunks for LLM consumption
 """
 
@@ -106,19 +106,13 @@ def warm_knowledge_tool():
         return False
 
 
-def build_metadata_filters(
-    state: Optional[str] = None,
-    document_type: Optional[str] = None,
-    doc_topic: Optional[str] = None
-) -> Optional[Any]:
+def build_metadata_filters(state: Optional[str] = None) -> Optional[Any]:
     """
-    Build LlamaIndex metadata filters from optional parameters.
-    
+    Build LlamaIndex metadata filters (state only).
+
     Args:
-        state: Filter by state name
-        document_type: Filter by document type
-        doc_topic: Filter by document topic (fees, eligibility, cutoff, process, etc.)
-    
+        state: Filter by state/UT name (e.g. "Maharashtra", "All-India"). Omit to search all states.
+
     Returns:
         MetadataFilters object or None if no filters
     """
@@ -126,43 +120,25 @@ def build_metadata_filters(
         MetadataFilters,
         MetadataFilter,
         FilterOperator,
-        FilterCondition,
     )
-    
-    filters = []
-    
-    if state:
-        filters.append(MetadataFilter(
-            key="state",
-            value=state,
-            operator=FilterOperator.EQ
-        ))
-    
-    if document_type:
-        filters.append(MetadataFilter(
-            key="document_type", 
-            value=document_type,
-            operator=FilterOperator.EQ
-        ))
-    
-    if doc_topic:
-        filters.append(MetadataFilter(
-            key="doc_topic",
-            value=doc_topic,
-            operator=FilterOperator.EQ
-        ))
-    
-    if not filters:
+
+    if not state:
         return None
-    
-    return MetadataFilters(filters=filters, condition=FilterCondition.AND)
+
+    return MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="state",
+                value=state,
+                operator=FilterOperator.EQ,
+            )
+        ],
+    )
 
 
 def search_knowledge_base(
     query: str,
     state: Optional[str] = None,
-    document_type: Optional[str] = None,
-    doc_topic: Optional[str] = None,
     top_k: int = 8
 ) -> SearchResponse:
     """
@@ -172,9 +148,7 @@ def search_knowledge_base(
     
     Args:
         query: Semantic search query (required)
-        state: Optional state filter
-        document_type: Optional document type filter  
-        doc_topic: Optional document topic filter (fees, eligibility, cutoff, etc.)
+        state: Optional state/UT filter only
         top_k: Number of results to return (default: 8)
     
     Returns:
@@ -183,18 +157,12 @@ def search_knowledge_base(
     log(f"[TOOL] search_knowledge_base called:")
     log(f"       Query: {query}")
     log(f"       State: {state or 'None'}")
-    log(f"       Doc Type: {document_type or 'None'}")
-    log(f"       Doc Topic: {doc_topic or 'None'}")
     
-    # Build filters
-    filters = build_metadata_filters(state, document_type, doc_topic)
-    filters_applied = {}
+    # Build filters (state only)
+    filters = build_metadata_filters(state)
+    filters_applied: Dict[str, str] = {}
     if state:
         filters_applied["state"] = state
-    if document_type:
-        filters_applied["document_type"] = document_type
-    if doc_topic:
-        filters_applied["doc_topic"] = doc_topic
     
     # Get vector index
     index = get_vector_index()
@@ -309,8 +277,6 @@ def execute_tool_call(
             response = search_knowledge_base(
                 query=arguments.get("query", ""),
                 state=arguments.get("state"),
-                document_type=arguments.get("document_type"),
-                doc_topic=arguments.get("doc_topic")
             )
             formatted = format_search_results_for_llm(response)
             return formatted, True

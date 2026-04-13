@@ -31,6 +31,19 @@ def log(msg):
     uvicorn_logger.info(msg)
 
 
+def sse_tokens_preserving_formatting(text: str):
+    """
+    Yield text chunks for SSE without destroying newlines or markdown structure.
+    Using str.split() drops newlines and merges lines, so ### headings and lists
+    end up on one line and the UI cannot render Markdown properly.
+    """
+    if not text:
+        return
+    for part in re.split(r"(\s+)", text):
+        if part:
+            yield part
+
+
 def clarification_followup_message(user_state: Optional[str]) -> str:
     """Conversational copy when the router needs central vs state scope (no UI buttons)."""
     text = (
@@ -875,8 +888,8 @@ async def chat_stream(request: ChatRequest):
                     
                     # Stream the FAQ answer
                     faq_answer = faq_match["answer"]
-                    for word in faq_answer.split():
-                        yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                    for token in sse_tokens_preserving_formatting(faq_answer):
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.01)
                     
                     # Save FAQ response to conversation history
@@ -921,8 +934,8 @@ async def chat_stream(request: ChatRequest):
             if not is_query_in_domain(request.question):
                 log("[WARN] ❌ OUT OF DOMAIN - Query rejected")
                 yield f"data: {json.dumps({'type': 'sources', 'sources': []})}\n\n"
-                for word in OUT_OF_DOMAIN_RESPONSE.split():
-                    yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                for token in sse_tokens_preserving_formatting(OUT_OF_DOMAIN_RESPONSE):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.02)
                 yield f"data: {json.dumps({'type': 'done', 'out_of_domain': True})}\n\n"
                 return
@@ -1090,8 +1103,8 @@ async def chat_stream(request: ChatRequest):
                     else:
                         no_result_msg = "I'm sorry, I couldn't find the information you're looking for. Please check the official NTA NEET UG bulletin for accurate details."
                     
-                    for word in no_result_msg.split():
-                        yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                    for token in sse_tokens_preserving_formatting(no_result_msg):
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.02)
                     yield f"data: {json.dumps({'type': 'done', 'intent': routing.intent.value, 'no_data': True})}\n\n"
                     return
@@ -1844,7 +1857,7 @@ async def chat_v2_stream(request: ChatRequest):
     - Asks for clarification when truly needed
     - Generates accurate, concise responses
     
-    The LLM has access to a search_knowledge_base tool with optional filters.
+    The LLM has access to a search_knowledge_base tool with optional state filter only.
     """
     from openai import OpenAI as OpenAIClient
     from services.unified_prompt import get_system_prompt, get_tools
@@ -1925,8 +1938,8 @@ async def chat_v2_stream(request: ChatRequest):
                     }
                     yield f"data: {json.dumps({'type': 'sources', 'sources': [faq_source]})}\n\n"
                     
-                    for word in faq_match["answer"].split():
-                        yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                    for token in sse_tokens_preserving_formatting(faq_match["answer"]):
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.01)
                     
                     # Save FAQ response to conversation
@@ -2188,13 +2201,13 @@ async def chat_v2_stream(request: ChatRequest):
             # ========== FINAL RESPONSE ==========
             if forced_fallback_response:
                 full_response = forced_fallback_response
-                for word in full_response.split():
-                    yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                for token in sse_tokens_preserving_formatting(full_response):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
             elif assistant_message and not assistant_message.tool_calls and (assistant_message.content or "").strip():
                 full_response = assistant_message.content or ""
-                for word in full_response.split():
-                    yield f"data: {json.dumps({'type': 'token', 'token': word + ' '})}\n\n"
+                for token in sse_tokens_preserving_formatting(full_response):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
             else:
                 log("[V2] 🤖 Generating final response with context...")

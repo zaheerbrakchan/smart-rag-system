@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { Message, Source } from '@/types';
 
 function topicLabel(code: string | null | undefined): string {
@@ -15,6 +17,17 @@ interface MessageBubbleProps {
 }
 
 /** True when the model likely refused or said it could not answer (avoid "Verified" in that case). */
+/** Fix common LLM mistakes so react-markdown can parse (headings/lists glued to prior text). */
+function normalizeMarkdownForRender(content: string): string {
+  let s = content;
+  if (!s.trim()) return s;
+  // "### Heading" or "## H" immediately after non-newline text → insert breaks
+  s = s.replace(/([^\n#])(#{1,6}\s)/g, '$1\n\n$2');
+  // "1." "2." after a sentence on the same line
+  s = s.replace(/([.!?])\s+(\d{1,2}\.\s)/g, '$1\n\n$2');
+  return s;
+}
+
 function isLikelyRefusalOrNoInfo(content: string): boolean {
   const t = content.toLowerCase();
   if (t.includes('not available')) return true;
@@ -74,8 +87,13 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
-            <div className="prose prose-sm max-w-none prose-headings:text-gray-800 dark:prose-headings:text-white prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-800 dark:prose-strong:text-white">
-              <ReactMarkdown>{message.content}</ReactMarkdown>
+            <div className="assistant-markdown prose prose-sm max-w-none prose-headings:text-gray-800 dark:prose-headings:text-white prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-800 dark:prose-strong:text-white">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkBreaks]}
+                urlTransform={(url) => url}
+              >
+                {normalizeMarkdownForRender(message.content)}
+              </ReactMarkdown>
             </div>
           )}
         </div>
