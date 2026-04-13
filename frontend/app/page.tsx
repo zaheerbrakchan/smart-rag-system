@@ -106,7 +106,6 @@ export default function Home() {
       const userPreferences: UserPreferences | undefined = user?.preferences ? {
         preferred_state: user.preferences.preferred_state,
         category: user.preferences.category,
-        target_exams: user.target_exams,
       } : undefined;
       
       // Stream response from API
