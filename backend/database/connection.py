@@ -23,9 +23,16 @@ DATABASE_URL = async_url_for_neon(_raw_db_url)
 
 def _asyncpg_connect_args() -> dict:
     args: dict = {"timeout": 30, "command_timeout": 30}
-    # Remote hosts (Neon, Supabase pooler, RDS) require TLS; asyncpg uses ssl=, not sslmode=
+    # Remote hosts require TLS; use asyncpg SSL mode instead of forcing cert verification.
+    # `ssl=True` creates a verifying context and may fail on managed/self-signed chains.
     if not is_local_postgres_host(_raw_db_url):
-        args["ssl"] = True
+        ssl_mode = os.getenv("DB_SSL_MODE", "require").strip().lower()
+        if ssl_mode in {"disable", "false", "0", "off"}:
+            pass
+        elif ssl_mode in {"prefer", "allow", "require", "verify-ca", "verify-full"}:
+            args["ssl"] = ssl_mode
+        else:
+            args["ssl"] = "require"
     return args
 
 # For Alembic (sync operations)
