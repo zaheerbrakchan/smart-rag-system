@@ -41,7 +41,6 @@ class User(Base):
     # Profile information
     full_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    age: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
     # Role and permissions
     role: Mapped[UserRole] = mapped_column(
@@ -53,16 +52,11 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
-    # Student-specific fields (JSONB for flexibility)
-    target_exams: Mapped[Optional[List[str]]] = mapped_column(
-        JSONB, 
-        default=list,
-        comment="List of target exams: NEET, JEE, etc."
-    )
+    # User preferences (JSONB for flexibility)
     preferences: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB,
         default=dict,
-        comment="User preferences: notification settings, UI preferences, etc."
+        comment="User preferences: notification settings, UI preferences, home state, category, etc."
     )
     profile_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB,
@@ -120,11 +114,9 @@ class User(Base):
             "email": self.email,
             "full_name": self.full_name,
             "phone": self.phone,
-            "age": self.age,
             "role": self.role.value,
             "is_active": self.is_active,
             "is_verified": self.is_verified,
-            "target_exams": self.target_exams or [],
             "preferences": self.preferences or {},
             "profile_data": self.profile_data or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,

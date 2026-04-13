@@ -7,13 +7,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
 import { 
-  GraduationCap, Phone, Mail, User, Lock, Eye, EyeOff, 
+  GraduationCap, Phone, User, Lock, Eye, EyeOff, 
   ArrowRight, CheckCircle, Loader2, AlertCircle 
 } from 'lucide-react';
 
 type Step = 'phone' | 'otp' | 'details';
-
-const TARGET_EXAMS = ['NEET', 'JEE Main', 'JEE Advanced', 'CUET', 'Other'];
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -31,14 +29,12 @@ export default function RegisterPage() {
   const [verificationToken, setVerificationToken] = useState(''); // Token from OTP verification
   const [formData, setFormData] = useState({
     username: '',
-    email: '',
     password: '',
     confirmPassword: '',
     full_name: '',
-    age: '',
-    target_exams: [] as string[],
-    preferred_state: '',
+    home_state: '',
     category: '',
+    customCategory: '',
   });
   
   // OTP countdown
@@ -122,17 +118,17 @@ export default function RegisterPage() {
     setIsLoading(true);
     
     try {
+      const finalCategory = formData.category === 'Other' ? formData.customCategory : formData.category;
+      
       await register({
-        username: formData.username,
-        email: formData.email,
+        username: formData.username.toLowerCase().replace(/[^a-z0-9_]/g, ''),
+        email: `${formData.username.toLowerCase().replace(/[^a-z0-9_]/g, '')}@neet.user`,
         password: formData.password,
         full_name: formData.full_name,
         phone: phone,
-        age: formData.age ? parseInt(formData.age) : undefined,
-        target_exams: formData.target_exams,
         verification_token: verificationToken,
-        preferred_state: formData.preferred_state || undefined,
-        category: formData.category || undefined,
+        preferred_state: formData.home_state || undefined,
+        category: finalCategory || undefined,
       });
       
       router.push('/');
@@ -141,15 +137,6 @@ export default function RegisterPage() {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const toggleExam = (exam: string) => {
-    setFormData(prev => ({
-      ...prev,
-      target_exams: prev.target_exams.includes(exam)
-        ? prev.target_exams.filter(e => e !== exam)
-        : [...prev.target_exams, exam]
-    }));
   };
 
   return (
@@ -344,6 +331,23 @@ export default function RegisterPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="col-span-2">
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Username
+                      </label>
+                      <div className="relative">
+                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <input
+                          type="text"
+                          value={formData.username}
+                          onChange={(e) => setFormData({...formData, username: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')})}
+                          placeholder="johndoe"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          required
+                        />
+                      </div>
+                    </div>
+                    
+                    <div className="col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Full Name
                       </label>
                       <div className="relative">
@@ -353,52 +357,6 @@ export default function RegisterPage() {
                           value={formData.full_name}
                           onChange={(e) => setFormData({...formData, full_name: e.target.value})}
                           placeholder="John Doe"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                        />
-                      </div>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Username
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.username}
-                        onChange={(e) => setFormData({...formData, username: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')})}
-                        placeholder="johndoe"
-                        className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        required
-                      />
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Age
-                      </label>
-                      <input
-                        type="number"
-                        value={formData.age}
-                        onChange={(e) => setFormData({...formData, age: e.target.value})}
-                        placeholder="18"
-                        min="10"
-                        max="100"
-                        className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
-                    
-                    <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Email Address
-                      </label>
-                      <div className="relative">
-                        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                        <input
-                          type="email"
-                          value={formData.email}
-                          onChange={(e) => setFormData({...formData, email: e.target.value})}
-                          placeholder="john@example.com"
                           className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           required
                         />
@@ -447,35 +405,13 @@ export default function RegisterPage() {
                       </div>
                     </div>
                     
-                    <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Target Exams
-                      </label>
-                      <div className="flex flex-wrap gap-2">
-                        {TARGET_EXAMS.map((exam) => (
-                          <button
-                            key={exam}
-                            type="button"
-                            onClick={() => toggleExam(exam)}
-                            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-                              formData.target_exams.includes(exam)
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-slate-600'
-                            }`}
-                          >
-                            {exam}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Preferred State
+                        Home State
                       </label>
                       <select
-                        value={formData.preferred_state}
-                        onChange={(e) => setFormData({...formData, preferred_state: e.target.value})}
+                        value={formData.home_state}
+                        onChange={(e) => setFormData({...formData, home_state: e.target.value})}
                         className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
                         <option value="">Select State</option>
@@ -489,9 +425,11 @@ export default function RegisterPage() {
                         <option value="Gujarat">Gujarat</option>
                         <option value="Haryana">Haryana</option>
                         <option value="Himachal Pradesh">Himachal Pradesh</option>
+                        <option value="Jammu & Kashmir">Jammu & Kashmir</option>
                         <option value="Jharkhand">Jharkhand</option>
                         <option value="Karnataka">Karnataka</option>
                         <option value="Kerala">Kerala</option>
+                        <option value="Ladakh">Ladakh</option>
                         <option value="Madhya Pradesh">Madhya Pradesh</option>
                         <option value="Maharashtra">Maharashtra</option>
                         <option value="Manipur">Manipur</option>
@@ -517,7 +455,7 @@ export default function RegisterPage() {
                       </label>
                       <select
                         value={formData.category}
-                        onChange={(e) => setFormData({...formData, category: e.target.value})}
+                        onChange={(e) => setFormData({...formData, category: e.target.value, customCategory: ''})}
                         className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
                         <option value="">Select Category</option>
@@ -526,8 +464,25 @@ export default function RegisterPage() {
                         <option value="SC">SC (Scheduled Caste)</option>
                         <option value="ST">ST (Scheduled Tribe)</option>
                         <option value="EWS">EWS (Economically Weaker Section)</option>
+                        <option value="Other">Other (Type manually)</option>
                       </select>
                     </div>
+                    
+                    {formData.category === 'Other' && (
+                      <div className="col-span-2">
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Enter Your Category
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.customCategory}
+                          onChange={(e) => setFormData({...formData, customCategory: e.target.value})}
+                          placeholder="e.g., OBC-NCL, PwD, etc."
+                          className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          required
+                        />
+                      </div>
+                    )}
                   </div>
                   
                   {error && (

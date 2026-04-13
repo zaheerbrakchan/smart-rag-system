@@ -1,43 +1,49 @@
+"""Ad-hoc debug: query pgvector for NTA bulletin chunks (run: python debug_query.py)."""
+
+import asyncio
 import os
+import sys
+from pathlib import Path
+
 from dotenv import load_dotenv
-load_dotenv()
-from pinecone import Pinecone
-from openai import OpenAI
 
-pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-index = pc.Index('neet-assistant')
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Get ALL NTA bulletin chunks
-print("--- Searching ALL NTA bulletin chunks for date keywords ---")
 
-# Use a generic query to get all chunks
-query = "NEET exam"
-response = client.embeddings.create(model="text-embedding-3-small", input=query)
-query_vector = response.data[0].embedding
+async def main():
+    from llama_index.core.vector_stores import VectorStoreQuery
+    from llama_index.core.vector_stores.types import VectorStoreQueryMode
+    from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, FilterOperator
+    from llama_index.embeddings.openai import OpenAIEmbedding
+    from openai import OpenAI
 
-results = index.query(
-    vector=query_vector,
-    top_k=200,  # Get more chunks
-    include_metadata=True,
-    filter={'document_type': 'nta_bulletin'}
-)
+    from services.vector_store_factory import get_vector_store
 
-print(f"Got {len(results['matches'])} chunks")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    vs = get_vector_store()
+    embed = OpenAIEmbedding(model="text-embedding-3-small")
 
-# Search through all for date keywords
-found_any = False
-for r in results['matches']:
-    m = r['metadata']
-    text = m.get('text', '')
-    
-    # Look for specific date patterns
-    if any(kw in text for kw in ['03 May', '08 February', '08 March', 'Date of Examination', 'Online Submission']):
-        found_any = True
-        print(f"\n*** FOUND on page {m.get('page_label')} ***")
-        print(text[:800])
-        print("---")
+    query = "NEET exam"
+    qv = embed.get_text_embedding(query)
+    mf = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="document_type",
+                value="nta_bulletin",
+                operator=FilterOperator.EQ,
+            )
+        ]
+    )
+    vq = VectorStoreQuery(
+        query_embedding=qv,
+        similarity_top_k=50,
+        filters=mf,
+        mode=VectorStoreQueryMode.DEFAULT,
+    )
+    result = await vs.aquery(vq)
+    print(f"Got {len(result.nodes)} chunks")
 
-if not found_any:
-    print("\n!!! NO CHUNKS contain the dates table content !!!")
-    print("This means the PDF table was not extracted properly.")
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
@@ -13,7 +13,9 @@ import {
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
+  const resetSuccess = searchParams.get('reset') === 'success';
   
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -88,6 +90,11 @@ export default function LoginPage() {
             </div>
             
             <form onSubmit={handleLogin} className="space-y-4">
+              {resetSuccess && (
+                <div className="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-500/10 p-3 rounded-lg border border-green-200 dark:border-green-500/30">
+                  Password updated. You can sign in with your new password.
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
                   Username or Email
@@ -137,9 +144,12 @@ export default function LoginPage() {
                   />
                   <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">Remember me</span>
                 </label>
-                <a href="#" className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">
+                <Link
+                  href="/forgot-password"
+                  className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                >
                   Forgot password?
-                </a>
+                </Link>
               </div>
               
               {error && (

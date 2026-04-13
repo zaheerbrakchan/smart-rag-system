@@ -10,7 +10,8 @@ import {
   Upload, FileText, Trash2, RefreshCw, Database, Users, Settings,
   CheckCircle, AlertCircle, ArrowLeft, Search, ChevronLeft, ChevronRight,
   ShieldAlert, Loader2, Edit2, X, Key, BarChart3, TrendingUp, Shield, 
-  UserX, Layers, MessageSquare, Check, XCircle, Eye, Plus, FileUp
+  UserX, Layers, MessageSquare, Check, XCircle, Eye, Plus, FileUp, Sparkles,
+  Pause, Play, Globe, Download
 } from 'lucide-react';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -130,6 +131,7 @@ export default function AdminPage() {
   const [docsTotalPages, setDocsTotalPages] = useState(1);
   const [docsSearch, setDocsSearch] = useState('');
   const [docsStateFilter, setDocsStateFilter] = useState('');
+  const [docsDocTypeFilter, setDocsDocTypeFilter] = useState('');
   
   // Upload state
   const [uploading, setUploading] = useState(false);
@@ -156,6 +158,14 @@ export default function AdminPage() {
   const [showCreateFaq, setShowCreateFaq] = useState(false);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [reviewingFaqAction, setReviewingFaqAction] = useState<{ id: number; action: string } | null>(null);
+  
+  // Auto-learning state
+  const [autoLearningEnabled, setAutoLearningEnabled] = useState<boolean>(true);
+  const [autoLearningLoading, setAutoLearningLoading] = useState<boolean>(false);
+  const [autoLearningUpdatedAt, setAutoLearningUpdatedAt] = useState<string | null>(null);
+  const [webFallbackEnabled, setWebFallbackEnabled] = useState<boolean>(false);
+  const [webFallbackLoading, setWebFallbackLoading] = useState<boolean>(false);
+  const [webFallbackUpdatedAt, setWebFallbackUpdatedAt] = useState<string | null>(null);
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = useState<{
@@ -263,7 +273,8 @@ export default function AdminPage() {
         page: docsPage.toString(),
         page_size: '10',
         ...(docsSearch && { search: docsSearch }),
-        ...(docsStateFilter && { state: docsStateFilter })
+        ...(docsStateFilter && { state: docsStateFilter }),
+        ...(docsDocTypeFilter && { document_type: docsDocTypeFilter }),
       });
       
       const response = await fetch(`${API_BASE_URL}/admin/documents?${params}`, {
@@ -280,7 +291,7 @@ export default function AdminPage() {
     } finally {
       setDocsLoading(false);
     }
-  }, [docsPage, docsSearch, docsStateFilter]);
+  }, [docsPage, docsSearch, docsStateFilter, docsDocTypeFilter]);
 
   // Fetch FAQs
   const fetchFaqs = useCallback(async (showLoader = true) => {
@@ -326,6 +337,92 @@ export default function AdminPage() {
     }
   }, []);
 
+  // Fetch auto-learning status
+  const fetchAutoLearningStatus = useCallback(async () => {
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/auto-learning`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setAutoLearningEnabled(data.enabled);
+        setAutoLearningUpdatedAt(data.updated_at);
+      }
+    } catch (err) {
+      console.error('Failed to fetch auto-learning status:', err);
+    }
+  }, []);
+
+  // Toggle auto-learning
+  const toggleAutoLearning = async () => {
+    setAutoLearningLoading(true);
+    try {
+      const token = getAuthToken();
+      const newStatus = !autoLearningEnabled;
+      const response = await fetch(`${API_BASE_URL}/faq/settings/auto-learning?enable=${newStatus}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setAutoLearningEnabled(data.enabled);
+        setAutoLearningUpdatedAt(data.updated_at);
+        setSuccess(data.message);
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update auto-learning setting');
+      }
+    } catch (err) {
+      setError('Failed to update auto-learning setting');
+    } finally {
+      setAutoLearningLoading(false);
+    }
+  };
+
+  // Fetch web-search fallback status
+  const fetchWebFallbackStatus = useCallback(async () => {
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/web-search-fallback`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setWebFallbackEnabled(data.enabled);
+        setWebFallbackUpdatedAt(data.updated_at);
+      }
+    } catch (err) {
+      console.error('Failed to fetch web fallback status:', err);
+    }
+  }, []);
+
+  // Toggle web-search fallback
+  const toggleWebFallback = async () => {
+    setWebFallbackLoading(true);
+    try {
+      const token = getAuthToken();
+      const newStatus = !webFallbackEnabled;
+      const response = await fetch(`${API_BASE_URL}/faq/settings/web-search-fallback?enable=${newStatus}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setWebFallbackEnabled(data.enabled);
+        setWebFallbackUpdatedAt(data.updated_at);
+        setSuccess(data.message);
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update web fallback setting');
+      }
+    } catch (err) {
+      setError('Failed to update web fallback setting');
+    } finally {
+      setWebFallbackLoading(false);
+    }
+  };
+
   // Fetch metadata options
   const fetchMetadataOptions = useCallback(async () => {
     try {
@@ -354,14 +451,16 @@ export default function AdminPage() {
         fetchUsers(false),      // false = don't show loader (initial load)
         fetchDocuments(false),
         fetchFaqs(false),
-        fetchFaqStats()
+        fetchFaqStats(),
+        fetchAutoLearningStatus(),
+        fetchWebFallbackStatus()
       ]);
       setInitialLoadDone(true);
     };
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchFaqStats]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -376,7 +475,7 @@ export default function AdminPage() {
     if (initialLoadDone && activeTab === 'documents') {
       fetchDocuments();
     }
-  }, [docsPage, docsSearch, docsStateFilter, initialLoadDone]);
+  }, [docsPage, docsSearch, docsStateFilter, docsDocTypeFilter, initialLoadDone, fetchDocuments]);
 
   useEffect(() => {
     if (initialLoadDone && activeTab === 'faqs') {
@@ -599,6 +698,60 @@ export default function AdminPage() {
     });
   };
 
+  const handleViewDocument = (doc: Document) => {
+    const token = getAuthToken();
+    if (!token) {
+      setError('Authentication required to view documents');
+      return;
+    }
+
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/admin/documents/${doc.id}/file`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!response.ok) {
+          throw new Error('Failed to fetch document');
+        }
+        const blob = await response.blob();
+        const objectUrl = window.URL.createObjectURL(blob);
+        window.open(objectUrl, '_blank', 'noopener,noreferrer');
+        setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
+      } catch (err) {
+        setError('Unable to open document');
+      }
+    })();
+  };
+
+  const handleDownloadDocument = async (doc: Document) => {
+    const token = getAuthToken();
+    if (!token) {
+      setError('Authentication required to download documents');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/documents/${doc.id}/file?download=true`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        throw new Error('Download failed');
+      }
+
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = doc.original_filename || 'document.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      setError('Unable to download document');
+    }
+  };
+
   // FAQ actions
   const handleReviewFaq = async (faqId: number, action: 'approve' | 'reject' | 'modify', modifiedAnswer?: string, reviewNotes?: string) => {
     setReviewingFaqAction({ id: faqId, action });
@@ -768,7 +921,7 @@ export default function AdminPage() {
                   fetchStats();
                   if (activeTab === 'users') fetchUsers();
                   if (activeTab === 'documents') fetchDocuments();
-                  if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); }
+                  if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); fetchAutoLearningStatus(); fetchWebFallbackStatus(); }
                 }}
                 className="p-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 rounded-lg"
               >
@@ -1159,11 +1312,16 @@ export default function AdminPage() {
                 <Upload className="w-5 h-5 text-blue-400" /> Upload Document
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <label className="block cursor-pointer">
-                  <div className="border-2 border-dashed border-slate-600 hover:border-blue-500 rounded-xl p-6 text-center">
+                <label className="block cursor-pointer min-w-0">
+                  <div className="border-2 border-dashed border-slate-600 hover:border-blue-500 rounded-xl p-6 text-center min-w-0 max-w-full overflow-hidden">
                     <input id="file-upload" type="file" accept=".pdf" onChange={handleFileChange} className="hidden" />
-                    <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                    <p className="text-slate-300">{selectedFile ? selectedFile.name : 'Choose PDF'}</p>
+                    <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2 shrink-0" />
+                    <p
+                      className={`text-slate-300 text-sm w-full min-w-0 ${selectedFile ? 'truncate' : ''}`}
+                      title={selectedFile ? selectedFile.name : undefined}
+                    >
+                      {selectedFile ? selectedFile.name : 'Choose PDF'}
+                    </p>
                   </div>
                 </label>
                 <div className="space-y-3">
@@ -1191,18 +1349,27 @@ export default function AdminPage() {
 
             {/* Documents List */}
             <div className="bg-slate-800/50 rounded-2xl border border-slate-700 overflow-hidden">
-              <div className="flex items-center gap-4 p-4 border-b border-slate-700">
-                <div className="flex-1 relative">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border-b border-slate-700">
+                <div className="flex-1 min-w-0 relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <input type="text" placeholder="Search documents..." value={docsSearch}
                     onChange={(e) => { setDocsSearch(e.target.value); setDocsPage(1); }}
                     className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
-                <select value={docsStateFilter} onChange={(e) => { setDocsStateFilter(e.target.value); setDocsPage(1); }}
-                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
-                  <option value="">All States</option>
-                  {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
+                <div className="flex flex-wrap gap-2 sm:gap-3">
+                  <select value={docsStateFilter} onChange={(e) => { setDocsStateFilter(e.target.value); setDocsPage(1); }}
+                    className="min-w-[140px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    <option value="">All States</option>
+                    {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <select value={docsDocTypeFilter} onChange={(e) => { setDocsDocTypeFilter(e.target.value); setDocsPage(1); }}
+                    className="min-w-[160px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    <option value="">All document types</option>
+                    {metadataOptions?.document_types.map((dt) => (
+                      <option key={dt.value} value={dt.value}>{dt.label}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1240,6 +1407,20 @@ export default function AdminPage() {
                         </div>
                       </div>
                       <div className="flex gap-1 flex-shrink-0">
+                        <button
+                          onClick={() => handleViewDocument(doc)}
+                          className="p-1.5 rounded hover:bg-indigo-500/10"
+                          title="View document"
+                        >
+                          <Eye className="w-4 h-4 text-indigo-400" />
+                        </button>
+                        <button
+                          onClick={() => handleDownloadDocument(doc)}
+                          className="p-1.5 rounded hover:bg-emerald-500/10"
+                          title="Download document"
+                        >
+                          <Download className="w-4 h-4 text-emerald-400" />
+                        </button>
                         <button 
                           onClick={() => handleReindexDocument(doc.id, doc.original_filename)} 
                           disabled={reindexingDocs.has(doc.id)}
@@ -1258,6 +1439,18 @@ export default function AdminPage() {
                       </div>
                     </div>
                     <div className="space-y-2 text-sm">
+                      <div className="flex justify-between gap-2 items-start">
+                        <span className="text-slate-400 shrink-0">Document type</span>
+                        <span className="text-right text-violet-300 font-medium text-xs leading-snug max-w-[65%]" title={doc.document_type}>
+                          {metadataOptions?.document_types.find((d) => d.value === doc.document_type)?.label ?? doc.document_type}
+                        </span>
+                      </div>
+                      <div className="flex justify-between gap-2 items-start">
+                        <span className="text-slate-400 shrink-0">Sub-category</span>
+                        <span className="text-right text-amber-200/90 text-xs font-medium max-w-[65%]" title={doc.category}>
+                          {metadataOptions?.categories.find((c) => c.value === doc.category)?.label ?? doc.category}
+                        </span>
+                      </div>
                       <div className="flex justify-between"><span className="text-slate-400">State</span><span className="text-blue-400">{doc.state}</span></div>
                       <div className="flex justify-between"><span className="text-slate-400">Pages</span><span className="text-white">{doc.total_pages}</span></div>
                       <div className="flex justify-between"><span className="text-slate-400">Vectors</span><span className="text-green-400">{doc.total_vectors}</span></div>
@@ -1334,6 +1527,136 @@ export default function AdminPage() {
                   </div>
                 </>
               )}
+            </div>
+
+            {/* Auto-Learning Control */}
+            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
+              autoLearningEnabled 
+                ? 'bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border-emerald-500/30' 
+                : 'bg-gradient-to-r from-amber-500/10 to-orange-500/10 border-amber-500/30'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`p-3 rounded-xl ${
+                    autoLearningEnabled 
+                      ? 'bg-emerald-500/20' 
+                      : 'bg-amber-500/20'
+                  }`}>
+                    {autoLearningEnabled ? (
+                      <Sparkles className="w-6 h-6 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-6 h-6 text-amber-400" />
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold flex items-center gap-2">
+                      Auto-Learning
+                      <span className={`px-2 py-0.5 text-xs rounded-full ${
+                        autoLearningEnabled 
+                          ? 'bg-emerald-500/20 text-emerald-400' 
+                          : 'bg-amber-500/20 text-amber-400'
+                      }`}>
+                        {autoLearningEnabled ? 'Active' : 'Paused'}
+                      </span>
+                    </h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      {autoLearningEnabled 
+                        ? 'System is capturing Q&A pairs from chat for review' 
+                        : 'Auto-capture is paused - no new FAQs will be queued'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {autoLearningUpdatedAt && (
+                    <span className="text-xs text-slate-500 hidden md:block">
+                      Last updated: {new Date(autoLearningUpdatedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                  <button
+                    onClick={toggleAutoLearning}
+                    disabled={autoLearningLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      autoLearningEnabled 
+                        ? 'bg-emerald-500 focus:ring-emerald-500' 
+                        : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle auto-learning</span>
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${
+                        autoLearningEnabled ? 'translate-x-8' : 'translate-x-1'
+                      }`}
+                    >
+                      {autoLearningLoading && (
+                        <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
+                      )}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Web Fallback Control */}
+            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
+              webFallbackEnabled 
+                ? 'bg-gradient-to-r from-indigo-500/10 to-blue-500/10 border-indigo-500/30' 
+                : 'bg-gradient-to-r from-slate-500/10 to-slate-600/10 border-slate-500/30'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`p-3 rounded-xl ${
+                    webFallbackEnabled 
+                      ? 'bg-indigo-500/20' 
+                      : 'bg-slate-500/20'
+                  }`}>
+                    <Globe className={`w-6 h-6 ${webFallbackEnabled ? 'text-indigo-400' : 'text-slate-400'}`} />
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold flex items-center gap-2">
+                      Web Search Fallback
+                      <span className={`px-2 py-0.5 text-xs rounded-full ${
+                        webFallbackEnabled 
+                          ? 'bg-indigo-500/20 text-indigo-400' 
+                          : 'bg-slate-500/20 text-slate-400'
+                      }`}>
+                        {webFallbackEnabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      {webFallbackEnabled
+                        ? 'If RAG has no result for NEET queries, system will try web search as fallback'
+                        : 'System uses RAG-only mode and returns the standard "not in database" message'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {webFallbackUpdatedAt && (
+                    <span className="text-xs text-slate-500 hidden md:block">
+                      Last updated: {new Date(webFallbackUpdatedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                  <button
+                    onClick={toggleWebFallback}
+                    disabled={webFallbackLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      webFallbackEnabled 
+                        ? 'bg-indigo-500 focus:ring-indigo-500' 
+                        : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle web fallback</span>
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${
+                        webFallbackEnabled ? 'translate-x-8' : 'translate-x-1'
+                      }`}
+                    >
+                      {webFallbackLoading && (
+                        <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
+                      )}
+                    </span>
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Actions & Filters */}

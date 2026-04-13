@@ -11,15 +11,12 @@ export interface User {
   email: string;
   full_name: string;
   phone: string | null;
-  age: number | null;
   role: UserRole;
   is_active: boolean;
   is_verified: boolean;
-  target_exams: string[];
   preferences?: {
     preferred_state?: string;
     category?: string;
-    target_colleges?: string[];
   };
   created_at: string;
 }
@@ -38,6 +35,10 @@ export interface Source {
   file_name: string;
   page?: number;
   text_snippet: string;
+  /** Admin upload sub-category (whole document): fees, eligibility, comprehensive, … */
+  doc_topic?: string | null;
+  /** AI label for this chunk’s subject (page-wise) */
+  chunk_category?: string | null;
 }
 
 // Chat message

@@ -5,6 +5,7 @@ from .pending_qa import PendingQA, QAStatus
 from .activity_log import ActivityLog, ActionType
 from .indexed_document import IndexedDocument
 from .faq import FAQ
+from .system_settings import SystemSettings, SettingsKeys
 
 __all__ = [
     "User", "UserRole",
@@ -12,5 +13,6 @@ __all__ = [
     "PendingQA", "QAStatus",
     "ActivityLog", "ActionType",
     "IndexedDocument",
-    "FAQ"
+    "FAQ",
+    "SystemSettings", "SettingsKeys"
 ]

@@ -200,6 +200,59 @@ export async function logout(access_token: string): Promise<void> {
   });
 }
 
+/** Forgot password step 1: OTP sent to registered phone */
+export async function requestForgotPassword(identifier: string): Promise<{
+  success: boolean;
+  message: string;
+  phone_last4?: string | null;
+  otp?: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/auth/forgot-password/request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier: identifier.trim() }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Request failed' }));
+    throw new Error(error.detail || 'Request failed');
+  }
+  return response.json();
+}
+
+/** Forgot password step 2: verify OTP → reset_token */
+export async function verifyForgotPasswordOtp(
+  phone: string,
+  otp: string
+): Promise<{ success: boolean; reset_token: string }> {
+  const response = await fetch(`${API_BASE_URL}/auth/forgot-password/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone, otp }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Verification failed' }));
+    throw new Error(error.detail || 'Verification failed');
+  }
+  return response.json();
+}
+
+/** Forgot password step 3: set new password */
+export async function resetPasswordWithToken(
+  resetToken: string,
+  newPassword: string
+): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${API_BASE_URL}/auth/forgot-password/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reset_token: resetToken, new_password: newPassword }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Reset failed' }));
+    throw new Error(error.detail || 'Reset failed');
+  }
+  return response.json();
+}
+
 /**
  * Change password
  */

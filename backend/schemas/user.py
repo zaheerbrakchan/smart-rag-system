@@ -4,7 +4,7 @@ Similar to @RequestBody/@ResponseBody DTOs in Spring Boot
 """
 
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, EmailStr, Field, field_validator
 import re
 
@@ -18,12 +18,9 @@ class UserRegister(BaseModel):
     password: str = Field(..., min_length=8, max_length=100)
     full_name: str = Field(..., min_length=2, max_length=100)
     phone: Optional[str] = Field(None, max_length=20)
-    age: Optional[int] = Field(None, ge=10, le=100)
-    target_exams: Optional[List[str]] = Field(default_factory=list)
     
     # Student preferences for smart query routing
-    preferred_state: Optional[str] = Field(None, description="Primary state preference for counseling")
-    target_colleges: Optional[List[str]] = Field(default_factory=list, description="Target college names")
+    preferred_state: Optional[str] = Field(None, description="Home state for counseling")
     category: Optional[str] = Field(None, description="Category: General/OBC/SC/ST/EWS")
     
     # OTP verification token
@@ -35,17 +32,6 @@ class UserRegister(BaseModel):
         if not re.match(r'^[a-zA-Z0-9_]+$', v):
             raise ValueError('Username can only contain letters, numbers, and underscores')
         return v.lower()
-    
-    @field_validator('password')
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        if not re.search(r'[A-Z]', v):
-            raise ValueError('Password must contain at least one uppercase letter')
-        if not re.search(r'[a-z]', v):
-            raise ValueError('Password must contain at least one lowercase letter')
-        if not re.search(r'\d', v):
-            raise ValueError('Password must contain at least one digit')
-        return v
     
     @field_validator('phone')
     @classmethod
@@ -68,9 +54,7 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=2, max_length=100)
     phone: Optional[str] = None
-    age: Optional[int] = Field(None, ge=10, le=100)
     role: str = Field(default="student")
-    target_exams: Optional[List[str]] = Field(default_factory=list)
     preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
     profile_data: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
@@ -79,11 +63,9 @@ class UserUpdate(BaseModel):
     """Admin: update user request"""
     full_name: Optional[str] = Field(None, min_length=2, max_length=100)
     phone: Optional[str] = None
-    age: Optional[int] = Field(None, ge=10, le=100)
     role: Optional[str] = None
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
-    target_exams: Optional[List[str]] = None
     preferences: Optional[Dict[str, Any]] = None
     profile_data: Optional[Dict[str, Any]] = None
 
@@ -92,8 +74,6 @@ class UserProfileUpdate(BaseModel):
     """User self-update profile"""
     full_name: Optional[str] = Field(None, min_length=2, max_length=100)
     phone: Optional[str] = None
-    age: Optional[int] = Field(None, ge=10, le=100)
-    target_exams: Optional[List[str]] = None
     preferences: Optional[Dict[str, Any]] = None
     profile_data: Optional[Dict[str, Any]] = None
 

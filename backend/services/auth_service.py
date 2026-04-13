@@ -260,3 +260,40 @@ class AuthService:
             
         except JWTError:
             return False
+
+    # ============== PASSWORD RESET (FORGOT PASSWORD) TOKENS ==============
+
+    PASSWORD_RESET_TOKEN_MINUTES = 15
+
+    @staticmethod
+    def create_password_reset_token(user_id: int, phone: str) -> str:
+        """
+        Short-lived JWT after OTP verification for password reset.
+        Not a login token — only valid for POST /auth/forgot-password/reset.
+        """
+        to_encode = {
+            "sub": str(user_id),
+            "phone": phone,
+            "type": "password_reset",
+            "exp": datetime.utcnow()
+            + timedelta(minutes=AuthService.PASSWORD_RESET_TOKEN_MINUTES),
+            "iat": datetime.utcnow(),
+        }
+        return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+    @staticmethod
+    def verify_password_reset_token(token: str) -> Optional[Dict[str, Any]]:
+        """Returns { user_id, phone } if valid, else None."""
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            if payload.get("type") != "password_reset":
+                return None
+            uid = payload.get("sub")
+            if not uid:
+                return None
+            return {
+                "user_id": int(uid),
+                "phone": payload.get("phone"),
+            }
+        except (JWTError, TypeError, ValueError):
+            return None

@@ -9,14 +9,12 @@ interface ChatWindowProps {
   messages: Message[];
   isLoading: boolean;
   messagesEndRef: RefObject<HTMLDivElement>;
-  onClarificationSelect?: (option: string) => void;
 }
 
 export default function ChatWindow({
   messages,
   isLoading,
   messagesEndRef,
-  onClarificationSelect,
 }: ChatWindowProps) {
   // Check if the last assistant message has content (means it's streaming)
   const lastMessage = messages[messages.length - 1];
@@ -29,11 +27,7 @@ export default function ChatWindow({
     <div className="h-full overflow-y-auto px-4 py-6">
       <div className="max-w-4xl mx-auto space-y-6">
         {messages.map((message) => (
-          <MessageBubble 
-            key={message.id} 
-            message={message} 
-            onClarificationSelect={onClarificationSelect}
-          />
+          <MessageBubble key={message.id} message={message} />
         ))}
 
         {/* Loading indicator - only show when waiting for first response */}

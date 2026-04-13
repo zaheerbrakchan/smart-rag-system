@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 from database.connection import get_db
 from models.user import User, UserRole
@@ -40,13 +40,10 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=10, max_length=15)
-    age: Optional[int] = Field(None, ge=10, le=100)
-    target_exams: Optional[List[str]] = Field(default_factory=list)
     verification_token: str = Field(..., description="Token received after OTP verification")
     
     # Student preferences for personalized experience
-    preferred_state: Optional[str] = Field(None, description="Primary state for counseling info")
-    target_colleges: Optional[List[str]] = Field(default_factory=list, description="Target college names")
+    preferred_state: Optional[str] = Field(None, description="Home state for counseling info")
     category: Optional[str] = Field(None, description="Category: General/OBC/SC/ST/EWS")
 
 
@@ -64,6 +61,21 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Username or email for the account to reset."""
+    identifier: str = Field(..., min_length=3, max_length=255)
+
+
+class ForgotPasswordVerifyRequest(BaseModel):
+    phone: str = Field(..., min_length=10, max_length=15)
+    otp: str = Field(..., min_length=4, max_length=8)
+
+
+class ForgotPasswordResetRequest(BaseModel):
+    reset_token: str = Field(..., min_length=20)
+    new_password: str = Field(..., min_length=8)
+
+
 # ============== RESPONSE SCHEMAS ==============
 
 class UserResponse(BaseModel):
@@ -72,11 +84,9 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     phone: Optional[str]
-    age: Optional[int]
     role: str
     is_active: bool
     is_verified: bool
-    target_exams: List[str]
     preferences: Optional[Dict[str, Any]] = None
     created_at: datetime
     
@@ -180,8 +190,6 @@ async def register(
     preferences = {}
     if request.preferred_state:
         preferences["preferred_state"] = request.preferred_state
-    if request.target_colleges:
-        preferences["target_colleges"] = request.target_colleges
     if request.category:
         preferences["category"] = request.category
     
@@ -191,11 +199,9 @@ async def register(
         password_hash=get_password_hash(request.password),
         full_name=request.full_name,
         phone=request.phone,
-        age=request.age,
         role=UserRole.STUDENT,
         is_active=True,
         is_verified=True,  # Verified via OTP
-        target_exams=request.target_exams or [],
         preferences=preferences if preferences else {}
     )
     
@@ -228,11 +234,9 @@ async def register(
             email=user.email,
             full_name=user.full_name,
             phone=user.phone,
-            age=user.age,
             role=user.role.value,
             is_active=user.is_active,
             is_verified=user.is_verified,
-            target_exams=user.target_exams or [],
             preferences=user.preferences or {},
             created_at=user.created_at
         )
@@ -309,11 +313,9 @@ async def login(
             email=user.email,
             full_name=user.full_name,
             phone=user.phone,
-            age=user.age,
             role=user.role.value,
             is_active=user.is_active,
             is_verified=user.is_verified,
-            target_exams=user.target_exams or [],
             preferences=user.preferences or {},
             created_at=user.created_at
         )
@@ -349,11 +351,9 @@ async def get_current_user_info(
         email=current_user.email,
         full_name=current_user.full_name,
         phone=current_user.phone,
-        age=current_user.age,
         role=current_user.role.value,
         is_active=current_user.is_active,
         is_verified=current_user.is_verified,
-        target_exams=current_user.target_exams or [],
         preferences=current_user.preferences or {},
         created_at=current_user.created_at
     )
@@ -380,6 +380,131 @@ async def logout(
     )
     
     return {"message": "Logged out successfully"}
+
+
+def _mask_phone_hint(phone: str) -> str:
+    """Last 4 digits only — avoids leaking full number."""
+    p = phone.replace(" ", "").strip()
+    if len(p) >= 4:
+        return f"******{p[-4:]}"
+    return "******"
+
+
+@router.post("/forgot-password/request")
+async def forgot_password_request(
+    request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Look up account by username or email and send OTP to the registered mobile number.
+    Response is generic if account is missing (no user enumeration).
+    """
+    user_repo = UserRepository(db)
+    user = await user_repo.find_by_username_or_email(request.identifier.strip())
+
+    generic_ok = {
+        "success": True,
+        "message": "If an account exists for this email or username, an OTP has been sent to the registered mobile number.",
+    }
+
+    if not user:
+        return generic_ok
+
+    if not user.phone or not str(user.phone).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No mobile number on file for this account. Please contact support.",
+        )
+
+    result = OTPService.send_otp(user.phone, purpose="password_reset")
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=result["message"],
+        )
+
+    formatted = OTPService._format_phone(user.phone)
+    return {
+        "success": True,
+        "message": f"OTP sent to registered number ending {_mask_phone_hint(formatted)}",
+        "phone_last4": formatted[-4:] if len(formatted) >= 4 else None,
+        **({"otp": result["otp"]} if result.get("otp") else {}),
+    }
+
+
+@router.post("/forgot-password/verify")
+async def forgot_password_verify(
+    request: ForgotPasswordVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Verify OTP for password reset; returns a short-lived reset_token (JWT).
+    """
+    result = OTPService.verify_otp(
+        request.phone, request.otp, purpose="password_reset"
+    )
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result["message"],
+        )
+
+    user_repo = UserRepository(db)
+    user = await user_repo.find_by_normalized_phone(request.phone)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No account matches this phone number.",
+        )
+    formatted = OTPService._format_phone(request.phone)
+    token = AuthService.create_password_reset_token(user.id, formatted)
+    return {"success": True, "reset_token": token}
+
+
+@router.post("/forgot-password/reset")
+async def forgot_password_reset(
+    request: ForgotPasswordResetRequest,
+    req: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a new password using reset_token from /forgot-password/verify."""
+    payload = AuthService.verify_password_reset_token(request.reset_token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset session. Please start again.",
+        )
+
+    user_repo = UserRepository(db)
+    activity_repo = ActivityLogRepository(db)
+    user = await user_repo.get_by_id(payload["user_id"])
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account not found or deactivated.",
+        )
+
+    expected_phone = OTPService._format_phone(payload["phone"])
+    if user.phone:
+        actual = OTPService._format_phone(user.phone)
+        if actual != expected_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset session.",
+            )
+
+    user.password_hash = get_password_hash(request.new_password)
+    await user_repo.update(user)
+    OTPService.clear_otp(expected_phone)
+
+    await activity_repo.log_action(
+        action_type=ActionType.PASSWORD_CHANGE,
+        description=f"Password reset via OTP for: {user.username}",
+        user_id=user.id,
+        ip_address=req.client.host if req.client else None,
+    )
+
+    return {"success": True, "message": "Password updated. You can sign in now."}
 
 
 @router.post("/change-password")
