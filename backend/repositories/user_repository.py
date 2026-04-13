@@ -44,6 +44,21 @@ class UserRepository(BaseRepository[User]):
         )
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
+
+    async def find_by_normalized_phone(self, phone: str) -> Optional[User]:
+        """Find user by phone, comparing E.164-normalized values."""
+        from services.otp_service import OTPService
+
+        target = OTPService._format_phone(phone)
+        query = select(User).where(User.phone.isnot(None))
+        result = await self.session.execute(query)
+        for user in result.scalars().all():
+            try:
+                if OTPService._format_phone(user.phone) == target:
+                    return user
+            except Exception:
+                continue
+        return None
     
     async def exists_by_username(self, username: str) -> bool:
         """Check if username exists"""

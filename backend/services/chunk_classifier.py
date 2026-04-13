@@ -1,6 +1,14 @@
 """
 Chunk Classifier Service
-Classifies document chunks into proper categories during indexing
+Classifies document chunks into proper categories during indexing.
+
+Naming (do not conflate with admin upload metadata):
+- **doc_topic** (set on the Document at upload/reindex): the admin "sub-category" for the
+  *whole file* (e.g. fees & payments vs comprehensive) — stored in vector metadata as ``doc_topic``.
+- **chunk_category** / **chunk_section** / **chunk_importance** (set here): *page/chunk-level*
+  labels describing what this slice of text is about (exam_info, seat_matrix, …).
+
+Semantic search still uses embeddings; these labels help citations, analytics, and optional filters.
 """
 
 import os
@@ -117,11 +125,14 @@ STATE_BROCHURE_CATEGORIES = {
         ]
     },
     "fee_structure": {
-        "description": "Tuition fee, NRI fee, management fee",
+        "description": "Tuition fee, NRI fee, management fee, college-wise fee tables",
         "keywords": [
             "fee structure", "tuition fee", "nri fee", "nri quota fee",
             "management fee", "government college fee", "private college fee",
-            "hostel fee", "annual fee", "semester fee"
+            "hostel fee", "annual fee", "semester fee",
+            "government medical college", "medical college", "admission fee",
+            "university charges", "security fee", "refundable", "mbbs 1st year",
+            "net amount", "institutional", "pg diploma", "aiims"
         ]
     }
 }
@@ -140,10 +151,11 @@ def classify_by_keywords(text: str, document_type: str) -> Optional[str]:
     # Select category set based on document type
     if document_type == "nta_bulletin":
         categories = NTA_BULLETIN_CATEGORIES
-    elif document_type == "state_counseling":
+    elif document_type in ("state_counseling", "college_info", "cutoffs", "other"):
+        # college_info = fee/college PDFs — share state-brochure keyword buckets (fees, seats, …)
         categories = STATE_BROCHURE_CATEGORIES
     else:
-        return "general"
+        return None
     
     # Count keyword matches per category
     scores = {}
@@ -190,11 +202,19 @@ def classify_by_llm(text: str, document_type: str) -> Dict[str, any]:
 - state_reservation: State specific reservation categories and communities
 - counselling_process: State counselling rounds, document verification, allotment
 - eligibility: State domicile rules, nativity requirements
-- fee_structure: Tuition fee, NRI quota fee, management fee
+- fee_structure: Tuition fee, college-wise fees, hostel, NRI quota fee, MBBS year-wise fees
 - general: Anything that doesn't fit above categories
 """
-    
-    prompt = f"""Classify this document chunk from a NEET {'NTA Bulletin' if document_type == 'nta_bulletin' else 'State Counselling Brochure'}.
+
+    doc_label = "NTA Bulletin"
+    if document_type == "nta_bulletin":
+        doc_label = "NTA Bulletin"
+    elif document_type == "college_info":
+        doc_label = "State College / Fee Information Document"
+    else:
+        doc_label = "State Counselling Brochure"
+
+    prompt = f"""Classify this document chunk from a NEET {doc_label}.
 
 CHUNK TEXT:
 {text[:2000]}

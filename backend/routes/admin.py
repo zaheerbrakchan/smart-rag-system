@@ -9,11 +9,10 @@ import time
 from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from pydantic import BaseModel, EmailStr, Field
-from pinecone import Pinecone
-
 from database.connection import get_db
 from models.user import User, UserRole
 from models.indexed_document import IndexedDocument
@@ -22,59 +21,47 @@ from repositories.user_repository import UserRepository
 from repositories.activity_log_repository import ActivityLogRepository
 from services.auth_service import get_password_hash
 from dependencies.auth import get_current_admin
+from services.vector_store_factory import count_vectors_sync
+from services.pdf_extraction import extract_text_from_pdf
+from services.document_chunking import (
+    prepare_pages_for_indexing,
+    format_page_label,
+    get_chunk_settings_for_document,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-# Cached Pinecone connection
-_pinecone_index = None
-
 # Cache for expensive stats
 _stats_cache = {
-    "pinecone_vectors": {"value": 0, "expires": 0},
+    "pg_vectors": {"value": 0, "expires": 0},
     "dashboard_stats": {"value": None, "expires": 0}
 }
-PINECONE_CACHE_TTL = 300  # Cache Pinecone stats for 5 minutes
+PINECONE_CACHE_TTL = 300  # Cache vector table stats for 5 minutes
 DASHBOARD_CACHE_TTL = 30  # Cache dashboard stats for 30 seconds
 
-def get_cached_pinecone_index():
-    """Get or create cached Pinecone index connection"""
-    global _pinecone_index
-    if _pinecone_index is None:
-        api_key = os.getenv("PINECONE_API_KEY")
-        if api_key:
-            pc = Pinecone(api_key=api_key)
-            _pinecone_index = pc.Index("neet-assistant")
-    return _pinecone_index
 
 def get_cached_pinecone_vector_count(use_background_refresh: bool = True):
-    """Get Pinecone vector count with caching to avoid slow API calls"""
+    """Cached row count in pgvector table (name kept for minimal dashboard churn)."""
     global _stats_cache
     now = time.time()
-    
-    # Return cached value if not expired
-    if _stats_cache["pinecone_vectors"]["expires"] > now:
-        return _stats_cache["pinecone_vectors"]["value"]
-    
-    # If we need fast response and have a stale value, return it and refresh in background
-    if use_background_refresh and _stats_cache["pinecone_vectors"]["value"] > 0:
-        # Return stale value immediately, refresh in background later
-        return _stats_cache["pinecone_vectors"]["value"]
-    
-    # Fetch fresh value (blocking - only on first call or explicit refresh)
+
+    if _stats_cache["pg_vectors"]["expires"] > now:
+        return _stats_cache["pg_vectors"]["value"]
+
+    if use_background_refresh and _stats_cache["pg_vectors"]["value"] > 0:
+        return _stats_cache["pg_vectors"]["value"]
+
     try:
-        pc_index = get_cached_pinecone_index()
-        if pc_index:
-            stats = pc_index.describe_index_stats()
-            count = stats.get('total_vector_count', 0)
-            _stats_cache["pinecone_vectors"] = {
-                "value": count,
-                "expires": now + PINECONE_CACHE_TTL
-            }
-            return count
+        count = count_vectors_sync()
+        _stats_cache["pg_vectors"] = {
+            "value": count,
+            "expires": now + PINECONE_CACHE_TTL,
+        }
+        return count
     except Exception as e:
-        print(f"Warning: Could not fetch Pinecone stats: {e}")
-    
-    return _stats_cache["pinecone_vectors"]["value"]  # Return last known value
+        print(f"Warning: Could not fetch pgvector stats: {e}")
+
+    return _stats_cache["pg_vectors"]["value"]
 
 # ============== REQUEST/RESPONSE SCHEMAS ==============
 
@@ -115,6 +102,24 @@ class PaginatedUsersResponse(BaseModel):
     total_pages: int
 
 
+def _to_user_list_response(u: User) -> UserListResponse:
+    """Map User ORM object to response, tolerating removed legacy columns."""
+    return UserListResponse(
+        id=u.id,
+        username=u.username,
+        email=u.email,
+        full_name=u.full_name,
+        phone=getattr(u, "phone", None),
+        age=getattr(u, "age", None),
+        role=u.role.value if hasattr(u.role, "value") else str(u.role),
+        is_active=u.is_active,
+        is_verified=u.is_verified,
+        target_exams=getattr(u, "target_exams", []) or [],
+        created_at=u.created_at,
+        last_login_at=getattr(u, "last_login_at", None),
+    )
+
+
 class DashboardStatsResponse(BaseModel):
     total_users: int
     active_users: int
@@ -142,6 +147,8 @@ class DocumentListResponse(BaseModel):
     is_active: bool
     index_status: str
     indexed_at: datetime
+    storage_path: Optional[str] = None
+    storage_url: Optional[str] = None
     uploaded_by: Optional[int]
     
     class Config:
@@ -238,20 +245,7 @@ async def get_dashboard_overview(
     recent_users = []
     if not isinstance(results[8], Exception):
         for u in results[8].scalars().all():
-            recent_users.append(UserListResponse(
-                id=u.id,
-                username=u.username,
-                email=u.email,
-                full_name=u.full_name,
-                phone=u.phone,
-                age=u.age,
-                role=u.role.value,
-                is_active=u.is_active,
-                is_verified=u.is_verified,
-                target_exams=u.target_exams or [],
-                created_at=u.created_at,
-                last_login_at=getattr(u, 'last_login_at', None)
-            ))
+            recent_users.append(_to_user_list_response(u))
     
     # Process recent documents
     recent_documents = []
@@ -273,6 +267,8 @@ async def get_dashboard_overview(
                 is_active=d.is_active,
                 index_status=d.index_status.value if hasattr(d.index_status, 'value') else str(d.index_status),
                 indexed_at=d.indexed_at,
+                storage_path=d.storage_path,
+                storage_url=d.storage_url,
                 uploaded_by=d.uploaded_by
             ))
     
@@ -411,20 +407,7 @@ async def list_users(
     users = result.scalars().all()
     
     return PaginatedUsersResponse(
-        users=[UserListResponse(
-            id=u.id,
-            username=u.username,
-            email=u.email,
-            full_name=u.full_name,
-            phone=u.phone,
-            age=u.age,
-            role=u.role.value,
-            is_active=u.is_active,
-            is_verified=u.is_verified,
-            target_exams=u.target_exams or [],
-            created_at=u.created_at,
-            last_login_at=getattr(u, 'last_login_at', None)
-        ) for u in users],
+        users=[_to_user_list_response(u) for u in users],
         total=total,
         page=page,
         page_size=page_size,
@@ -443,20 +426,7 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    return UserListResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        phone=user.phone,
-        age=user.age,
-        role=user.role.value,
-        is_active=user.is_active,
-        is_verified=user.is_verified,
-        target_exams=user.target_exams or [],
-        created_at=user.created_at,
-        last_login_at=getattr(user, 'last_login_at', None)
-    )
+    return _to_user_list_response(user)
 
 
 @router.patch("/users/{user_id}", response_model=UserListResponse)
@@ -491,7 +461,7 @@ async def update_user(
         user.email = request.email.lower()
     if request.phone is not None:
         user.phone = request.phone
-    if request.age is not None:
+    if request.age is not None and hasattr(user, "age"):
         user.age = request.age
     if request.role is not None:
         # Only super_admin can promote to admin/super_admin
@@ -510,26 +480,13 @@ async def update_user(
         user.is_active = request.is_active
     if request.is_verified is not None:
         user.is_verified = request.is_verified
-    if request.target_exams is not None:
+    if request.target_exams is not None and hasattr(user, "target_exams"):
         user.target_exams = request.target_exams
     
     await db.commit()
     await db.refresh(user)
     
-    return UserListResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        phone=user.phone,
-        age=user.age,
-        role=user.role.value,
-        is_active=user.is_active,
-        is_verified=user.is_verified,
-        target_exams=user.target_exams or [],
-        created_at=user.created_at,
-        last_login_at=getattr(user, 'last_login_at', None)
-    )
+    return _to_user_list_response(user)
 
 
 @router.delete("/users/{user_id}")
@@ -688,8 +645,8 @@ async def reindex_document(
     current_admin: User = Depends(get_current_admin)
 ):
     """
-    Reindex a document - downloads from Supabase, reclassifies chunks with new categories,
-    deletes old vectors from Pinecone, and re-uploads with updated metadata.
+    Reindex a document - downloads from object storage, reclassifies chunks,
+    deletes old vectors from pgvector, and re-uploads with updated metadata.
     """
     import tempfile
     import asyncio
@@ -698,18 +655,27 @@ async def reindex_document(
     from llama_index.core import Document, VectorStoreIndex, Settings, StorageContext
     from llama_index.embeddings.openai import OpenAIEmbedding
     from llama_index.core.node_parser import SentenceSplitter
-    from llama_index.vector_stores.pinecone import PineconeVectorStore
+    from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, FilterOperator
     from services.chunk_classifier import classify_chunk
+    from services.vector_store_factory import get_vector_store
+    from services.r2_storage import get_pdf_from_r2, build_storage_path_from_metadata
     
     doc = await db.get(IndexedDocument, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Check for storage URL - required for reindexing
-    if not doc.storage_url:
+    can_fetch = (
+        doc.storage_path
+        or doc.storage_url
+        or (doc.file_id and doc.original_filename)
+    )
+    if not can_fetch:
         raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot reindex: Document '{doc.original_filename}' was uploaded before cloud storage was enabled. Please delete and re-upload this document to enable reindexing."
+            status_code=400,
+            detail=(
+                f"Cannot reindex: Document '{doc.original_filename}' has no storage reference. "
+                "Delete and re-upload if it predates cloud storage."
+            ),
         )
     
     temp_file_path = None
@@ -719,37 +685,81 @@ async def reindex_document(
         doc.index_status = "processing"
         await db.commit()
         
-        # 1. Download PDF from Supabase
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(doc.storage_url)
-            if response.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Failed to download document from storage (HTTP {response.status_code})")
-            
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-                tmp.write(response.content)
-                temp_file_path = Path(tmp.name)
+        # 1. Download PDF: prefer R2 S3 API (works with private buckets); public URL often returns 400/403
+        pdf_bytes = None
+        r2_paths_tried: list[str] = []
+        if doc.storage_path:
+            r2_paths_tried.append(doc.storage_path)
+            pdf_bytes = await get_pdf_from_r2(doc.storage_path)
+        if not pdf_bytes and doc.file_id and doc.original_filename:
+            inferred = build_storage_path_from_metadata(
+                doc.state, doc.document_type, doc.file_id, doc.original_filename
+            )
+            if inferred not in r2_paths_tried:
+                r2_paths_tried.append(inferred)
+                pdf_bytes = await get_pdf_from_r2(inferred)
+        if pdf_bytes:
+            print(f"Downloaded PDF from R2 ({r2_paths_tried[-1] if r2_paths_tried else 'key'})")
+        elif doc.storage_url:
+            import httpx
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                response = await client.get(doc.storage_url)
+                if response.status_code == 200:
+                    pdf_bytes = response.content
+                    print("Downloaded PDF via public storage_url (fallback)")
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"Could not fetch PDF from R2 or public URL. "
+                            f"Public URL returned HTTP {response.status_code}. "
+                            "Check R2_PUBLIC_BASE_URL, bucket access, and that R2 credentials match this bucket."
+                        ),
+                    )
+        if not pdf_bytes:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Could not download PDF from R2 (check R2_BUCKET_NAME, keys, and credentials) "
+                    "and no usable public URL fallback."
+                ),
+            )
         
-        print(f"Downloaded document to {temp_file_path}")
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            temp_file_path = Path(tmp.name)
         
-        # 2. Extract text from PDF
-        pages = []
-        reader = PdfReader(str(temp_file_path))
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text()
-            if text and text.strip():
-                pages.append({"text": text, "page_num": page_num + 1})
+        print(f"Saved document to {temp_file_path}")
         
+        # 2. Extract text (pdfplumber when available), drop blanks, merge fee pages for college_info+fees
+        pages_raw = extract_text_from_pdf(temp_file_path)
+        try:
+            total_pdf_pages = len(PdfReader(str(temp_file_path)).pages)
+        except Exception:
+            total_pdf_pages = max((p["page_num"] for p in pages_raw), default=0) if pages_raw else 0
+        pages = prepare_pages_for_indexing(pages_raw, doc.document_type, doc.category)
+
         if not pages:
-            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract text from PDF (all pages empty or too short)",
+            )
+
+        print(f"Prepared {len(pages)} indexing unit(s) from {total_pdf_pages} PDF page(s)")
         
-        print(f"Extracted {len(pages)} pages")
-        
-        # 3. Delete old vectors from Pinecone
-        pc_index = get_cached_pinecone_index()
-        if pc_index and doc.file_id:
-            pc_index.delete(filter={"file_id": {"$eq": doc.file_id}})
+        # 3. Delete old vectors from pgvector
+        vs = get_vector_store()
+        if doc.file_id:
+            mf = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="file_id",
+                        value=doc.file_id,
+                        operator=FilterOperator.EQ,
+                    )
+                ]
+            )
+            vs.delete_nodes(filters=mf)
             print(f"Deleted old vectors for file_id={doc.file_id}")
         
         # 4. Create new documents with metadata
@@ -760,24 +770,26 @@ async def reindex_document(
                 metadata={
                     "file_name": doc.original_filename,
                     "file_id": doc.file_id,
-                    "page_label": str(page_data["page_num"]),
+                    "page_label": format_page_label(page_data),
                     "state": doc.state,
                     "document_type": doc.document_type,
+                    "doc_topic": doc.category,
                     "year": doc.year,
                     "description": doc.description or "",
                     "reindexed_at": datetime.now().isoformat(),
-                }
+                },
             )
             documents.append(llama_doc)
         
-        # 5. Configure embedding and chunking
+        # 5. Configure embedding and chunking (larger windows for merged college fee text)
         Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
-        Settings.chunk_size = 1024
-        Settings.chunk_overlap = 100
-        
+        chunk_size, chunk_overlap = get_chunk_settings_for_document(doc.document_type, doc.category)
+        Settings.chunk_size = chunk_size
+        Settings.chunk_overlap = chunk_overlap
+
         node_parser = SentenceSplitter(
-            chunk_size=1024,
-            chunk_overlap=100,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             include_metadata=True,
             include_prev_next_rel=False,
         )
@@ -788,8 +800,8 @@ async def reindex_document(
         
         for i, node in enumerate(all_nodes):
             chunk_text = node.get_content()
-            node.metadata["text"] = chunk_text[:2000]
-            
+            # Chunk body lives on the node; avoid duplicating in metadata JSONB.
+
             # Use chunk classifier to get proper category
             classification = classify_chunk(
                 text=chunk_text,
@@ -797,20 +809,17 @@ async def reindex_document(
                 state=doc.state
             )
             
-            # Update metadata with classification
-            node.metadata["category"] = classification["category"]
-            node.metadata["section"] = classification["section"]
-            node.metadata["importance"] = classification["importance"]
+            node.metadata["chunk_category"] = classification["category"]
+            node.metadata["chunk_section"] = classification["section"]
+            node.metadata["chunk_importance"] = classification["importance"]
             
             if (i + 1) % 20 == 0:
                 print(f"Classified {i + 1}/{len(all_nodes)} chunks...")
         
         print(f"Classified all {len(all_nodes)} chunks")
         
-        # 7. Index to Pinecone
-        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        pinecone_index = pc.Index("neet-assistant")
-        vector_store = PineconeVectorStore(pinecone_index=pinecone_index, text_key="text")
+        # 7. Index to pgvector
+        vector_store = get_vector_store()
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         
         BATCH_SIZE = 10
@@ -829,10 +838,10 @@ async def reindex_document(
                 import time
                 time.sleep(0.3)
         
-        print(f"Indexed {total_indexed} vectors to Pinecone")
+        print(f"Indexed {total_indexed} vectors to pgvector")
         
         # 8. Update document record
-        doc.total_pages = len(pages)
+        doc.total_pages = total_pdf_pages
         doc.total_vectors = total_indexed
         doc.index_status = "indexed"
         doc.updated_at = datetime.now()
@@ -840,7 +849,7 @@ async def reindex_document(
         # Store classification stats in extra_metadata
         category_counts = {}
         for node in all_nodes:
-            cat = node.metadata.get("category", "general")
+            cat = node.metadata.get("chunk_category") or node.metadata.get("category", "general")
             category_counts[cat] = category_counts.get(cat, 0) + 1
         
         doc.extra_metadata = {
@@ -859,6 +868,10 @@ async def reindex_document(
             "category_distribution": category_counts
         }
         
+    except HTTPException:
+        doc.index_status = "failed"
+        await db.commit()
+        raise
     except Exception as e:
         # Revert status on failure
         doc.index_status = "failed"
@@ -880,32 +893,55 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(get_current_admin)
 ):
-    """Delete a document - removes from Supabase Storage, Pinecone vectors, and database"""
+    """Delete a document - removes from R2 storage, pgvector rows, and database"""
     doc = await db.get(IndexedDocument, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
     errors = []
     
-    # 1. Delete from Supabase Storage
-    if doc.storage_path:
+    # 1. Delete from R2 object storage
+    from services.r2_storage import (
+        delete_pdf_from_r2,
+        build_storage_path_from_metadata,
+    )
+    storage_path_to_delete = doc.storage_path
+    if not storage_path_to_delete and doc.file_id and doc.original_filename:
+        storage_path_to_delete = build_storage_path_from_metadata(
+            doc.state, doc.document_type, doc.file_id, doc.original_filename
+        )
+        print(
+            f"ℹ️ storage_path was empty; trying inferred path: {storage_path_to_delete}"
+        )
+    if storage_path_to_delete:
         try:
-            from services.supabase_storage import delete_pdf_from_supabase
-            await delete_pdf_from_supabase(doc.storage_path)
-            print(f"✅ Deleted from Supabase: {doc.storage_path}")
+            await delete_pdf_from_r2(storage_path_to_delete)
+            print(f"✅ Deleted from R2: {storage_path_to_delete}")
         except Exception as e:
-            errors.append(f"Supabase storage: {str(e)}")
-            print(f"⚠️ Supabase delete failed: {e}")
-    
-    # 2. Delete vectors from Pinecone
+            errors.append(f"R2 storage: {str(e)}")
+            print(f"⚠️ R2 delete failed: {e}")
+
+    # 2. Delete vectors from pgvector
     try:
-        pc_index = get_cached_pinecone_index()
-        if pc_index and doc.file_id:
-            pc_index.delete(filter={"file_id": {"$eq": doc.file_id}})
-            print(f"✅ Deleted vectors from Pinecone: file_id={doc.file_id}")
+        from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, FilterOperator
+        from services.vector_store_factory import get_vector_store
+
+        if doc.file_id:
+            vs = get_vector_store()
+            mf = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key="file_id",
+                        value=doc.file_id,
+                        operator=FilterOperator.EQ,
+                    )
+                ]
+            )
+            vs.delete_nodes(filters=mf)
+            print(f"✅ Deleted vectors from pgvector: file_id={doc.file_id}")
     except Exception as e:
-        errors.append(f"Pinecone: {str(e)}")
-        print(f"⚠️ Pinecone delete failed: {e}")
+        errors.append(f"pgvector: {str(e)}")
+        print(f"⚠️ pgvector delete failed: {e}")
     
     # 3. Hard delete from database (not soft delete)
     await db.delete(doc)
@@ -916,6 +952,51 @@ async def delete_document(
         "message": f"Document {doc.filename} has been permanently deleted",
         "warnings": errors if errors else None
     }
+
+
+@router.get("/documents/{doc_id}/file")
+async def get_document_file(
+    doc_id: int,
+    download: bool = Query(False, description="Set true to force file download"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Serve document PDF from R2 via authenticated admin endpoint."""
+    from services.r2_storage import get_pdf_from_r2, build_storage_path_from_metadata
+
+    doc = await db.get(IndexedDocument, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    storage_path = doc.storage_path
+    if not storage_path and doc.file_id and doc.original_filename:
+        storage_path = build_storage_path_from_metadata(
+            doc.state, doc.document_type, doc.file_id, doc.original_filename
+        )
+
+    if not storage_path:
+        raise HTTPException(
+            status_code=400,
+            detail="This document has no storage path and cannot be fetched."
+        )
+
+    pdf_bytes = await get_pdf_from_r2(storage_path)
+    if not pdf_bytes:
+        raise HTTPException(
+            status_code=404,
+            detail="Document file not found in storage."
+        )
+
+    disposition = "attachment" if download else "inline"
+    safe_name = (doc.original_filename or "document.pdf").replace('"', "")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{safe_name}"'
+        },
+    )
 
 
 # ============== ACTIVITY LOG ROUTES ==============

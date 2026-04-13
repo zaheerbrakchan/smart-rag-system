@@ -18,8 +18,12 @@ from database.connection import get_db
 from models.user import User
 from models.pending_qa import PendingQA, QAStatus
 from dependencies.auth import get_current_admin
-from pinecone import Pinecone
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.schema import TextNode
+from llama_index.core.vector_stores import VectorStoreQuery
+from llama_index.core.vector_stores.types import VectorStoreQueryMode
+from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, FilterOperator
+from services.vector_store_factory import get_vector_store
 
 router = APIRouter(prefix="/faq", tags=["FAQ"])
 
@@ -101,22 +105,11 @@ class FAQSearchResult(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
-def get_pinecone_index():
-    """Get Pinecone index for FAQ vectors"""
-    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-    index_name = os.getenv("PINECONE_INDEX_NAME", "neet-assistant")
-    return pc.Index(index_name)
-
-
 async def vectorize_and_store_faq(faq: PendingQA) -> str:
-    """Vectorize FAQ question and store in Pinecone with special metadata"""
-    # Generate embedding for the question
+    """Vectorize FAQ question and store in pgvector with special metadata."""
     embedding = get_embed_model().get_text_embedding(faq.question)
-    
-    # Generate unique vector ID
     vector_id = f"faq_{faq.id}_{uuid.uuid4().hex[:8]}"
-    
-    # Prepare metadata
+
     metadata = {
         "is_faq": True,
         "faq_id": faq.id,
@@ -125,57 +118,64 @@ async def vectorize_and_store_faq(faq: PendingQA) -> str:
         "state": faq.detected_state or "All-India",
         "exam": faq.detected_exam or "NEET",
         "category": faq.detected_category or "general",
-        "document_type": "faq"
+        "document_type": "faq",
     }
-    
-    # Store in Pinecone
-    pc_index = get_pinecone_index()
-    pc_index.upsert(vectors=[(vector_id, embedding, metadata)])
-    
+
+    node = TextNode(
+        id_=vector_id,
+        text=faq.question,
+        metadata=metadata,
+        embedding=embedding,
+    )
+    vs = get_vector_store()
+    await vs.async_add([node])
     return vector_id
 
 
 async def search_faq(query: str, state_filter: Optional[str] = None, top_k: int = 3) -> List[dict]:
-    """Search FAQ vectors in Pinecone"""
+    """Search FAQ vectors in pgvector.
+
+    IMPORTANT: Do not filter on ``is_faq`` (boolean). LlamaIndex's Postgres SQL builder
+    turns ``True`` into ``float(1.0)`` and compares ``(metadata_->>'is_faq')::float``,
+    but JSONB booleans extract as the text ``'true'``, which breaks the filter—so
+    FAQ search returned no rows. Filter on string ``document_type == 'faq'`` instead
+    (same metadata we set in ``vectorize_and_store_faq``). ``state_filter`` is unused;
+    state lives in metadata for display only.
+    """
     try:
-        # Generate query embedding
         query_embedding = get_embed_model().get_text_embedding(query)
-        
-        # Use simple filter - just get FAQs (state filtering done post-query if needed)
-        # Complex $and/$or filters not supported in newer Pinecone SDK
-        filter_dict = {"is_faq": True}
-        
-        # Query Pinecone
-        pc_index = get_pinecone_index()
-        results = pc_index.query(
-            vector=query_embedding,
-            top_k=top_k,
-            filter=filter_dict,
-            include_metadata=True
+
+        mf = MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key="document_type",
+                    value="faq",
+                    operator=FilterOperator.EQ,
+                )
+            ]
         )
-        
+        vs = get_vector_store()
+        vq = VectorStoreQuery(
+            query_embedding=query_embedding,
+            similarity_top_k=top_k,
+            filters=mf,
+            mode=VectorStoreQueryMode.DEFAULT,
+        )
+        result = await vs.aquery(vq)
+
         matches = []
-        # Handle both dict and QueryResponse object
-        result_matches = results.get("matches", []) if isinstance(results, dict) else getattr(results, 'matches', [])
-        
-        for match in result_matches:
-            # Handle both dict and Match object
-            if isinstance(match, dict):
-                metadata = match.get("metadata", {})
-                score = match.get("score", 0)
-            else:
-                metadata = match.metadata if hasattr(match, 'metadata') else {}
-                score = match.score if hasattr(match, 'score') else 0
-            
+        for i, node in enumerate(result.nodes):
+            score = result.similarities[i] if i < len(result.similarities) else 0
+            metadata = dict(node.metadata) if node.metadata else {}
             matches.append({
                 "faq_id": metadata.get("faq_id"),
                 "question": metadata.get("question", ""),
                 "answer": metadata.get("answer", ""),
                 "state": metadata.get("state"),
                 "category": metadata.get("category"),
-                "score": score
+                "score": float(score),
             })
-        
+
         return matches
     except Exception as e:
         print(f"FAQ search error: {e}")
@@ -402,34 +402,40 @@ async def review_faq(
     
     if request.action == "approve":
         faq.status = QAStatus.APPROVED
-        
-        # Vectorize and store in Pinecone
+
         try:
+            if faq.faq_vector_id:
+                try:
+                    get_vector_store().delete_nodes(node_ids=[faq.faq_vector_id])
+                except Exception:
+                    pass
             vector_id = await vectorize_and_store_faq(faq)
             faq.faq_vector_id = vector_id
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Could not vectorize FAQ: {e}")
-    
+
     elif request.action == "reject":
         faq.status = QAStatus.REJECTED
-        
-        # Remove from Pinecone if exists
+
         if faq.faq_vector_id:
             try:
-                pc_index = get_pinecone_index()
-                pc_index.delete(ids=[faq.faq_vector_id])
-            except:
+                get_vector_store().delete_nodes(node_ids=[faq.faq_vector_id])
+            except Exception:
                 pass
             faq.faq_vector_id = None
-    
+
     elif request.action == "modify":
         if not request.modified_answer:
             raise HTTPException(status_code=400, detail="modified_answer required for modify action")
         faq.status = QAStatus.MODIFIED
         faq.modified_answer = request.modified_answer
-        
-        # Vectorize with modified answer
+
         try:
+            if faq.faq_vector_id:
+                try:
+                    get_vector_store().delete_nodes(node_ids=[faq.faq_vector_id])
+                except Exception:
+                    pass
             vector_id = await vectorize_and_store_faq(faq)
             faq.faq_vector_id = vector_id
         except Exception as e:
@@ -461,11 +467,9 @@ async def delete_faq(
     if not faq:
         raise HTTPException(status_code=404, detail="FAQ not found")
     
-    # Remove from Pinecone if exists
     if faq.faq_vector_id:
         try:
-            pc_index = get_pinecone_index()
-            pc_index.delete(ids=[faq.faq_vector_id])
+            get_vector_store().delete_nodes(node_ids=[faq.faq_vector_id])
         except Exception as e:
             print(f"Warning: Could not delete FAQ vector: {e}")
     
@@ -556,9 +560,8 @@ async def revectorize_all_faqs(
             # Delete old vector if exists
             if faq.faq_vector_id:
                 try:
-                    pc_index = get_pinecone_index()
-                    pc_index.delete(ids=[faq.faq_vector_id])
-                except:
+                    get_vector_store().delete_nodes(node_ids=[faq.faq_vector_id])
+                except Exception:
                     pass
             
             # Re-vectorize
@@ -575,4 +578,136 @@ async def revectorize_all_faqs(
         "message": f"Re-vectorized {success_count}/{len(faqs)} FAQs",
         "count": success_count,
         "errors": errors if errors else None
+    }
+
+
+# ============== AUTO-LEARNING SETTINGS ==============
+
+from models.system_settings import SystemSettings, SettingsKeys
+
+
+async def get_auto_learning_status(db: AsyncSession) -> bool:
+    """Get current auto-learning enabled status from database"""
+    setting = await db.get(SystemSettings, SettingsKeys.AUTO_LEARNING_ENABLED)
+    if setting is None:
+        return True  # Default: enabled
+    return setting.value.lower() == "true"
+
+
+async def get_web_search_fallback_status(db: AsyncSession) -> bool:
+    """Get current web search fallback status from database."""
+    setting = await db.get(SystemSettings, SettingsKeys.WEB_SEARCH_FALLBACK_ENABLED)
+    if setting is None:
+        return False  # Default: disabled
+    return setting.value.lower() == "true"
+
+
+@router.get("/settings/auto-learning")
+async def get_auto_learning_setting(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get auto-learning configuration"""
+    is_enabled = await get_auto_learning_status(db)
+    
+    # Get last update info
+    setting = await db.get(SystemSettings, SettingsKeys.AUTO_LEARNING_ENABLED)
+    
+    return {
+        "enabled": is_enabled,
+        "updated_at": setting.updated_at.isoformat() if setting else None,
+        "updated_by": setting.updated_by if setting else None,
+        "description": "When enabled, the system automatically captures Q&A pairs from RAG responses for admin review."
+    }
+
+
+@router.post("/settings/auto-learning")
+async def toggle_auto_learning(
+    enable: bool = Query(..., description="Enable or disable auto-learning"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Toggle auto-learning on/off"""
+    from datetime import datetime
+    
+    setting = await db.get(SystemSettings, SettingsKeys.AUTO_LEARNING_ENABLED)
+    
+    if setting is None:
+        # Create new setting
+        setting = SystemSettings(
+            key=SettingsKeys.AUTO_LEARNING_ENABLED,
+            value=str(enable).lower(),
+            description="Enable/disable automatic FAQ learning from RAG responses",
+            updated_by=current_admin.id
+        )
+        db.add(setting)
+    else:
+        # Update existing
+        setting.value = str(enable).lower()
+        setting.updated_by = current_admin.id
+    
+    await db.commit()
+    await db.refresh(setting)
+    
+    status = "enabled" if enable else "paused"
+    return {
+        "success": True,
+        "enabled": enable,
+        "message": f"Auto-learning has been {status}",
+        "updated_at": setting.updated_at.isoformat(),
+        "updated_by": current_admin.id
+    }
+
+
+@router.get("/settings/web-search-fallback")
+async def get_web_search_fallback_setting(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get web search fallback configuration."""
+    is_enabled = await get_web_search_fallback_status(db)
+    setting = await db.get(SystemSettings, SettingsKeys.WEB_SEARCH_FALLBACK_ENABLED)
+
+    return {
+        "enabled": is_enabled,
+        "updated_at": setting.updated_at.isoformat() if setting else None,
+        "updated_by": setting.updated_by if setting else None,
+        "description": (
+            "When enabled, the system can perform web search ONLY when a NEET in-domain query "
+            "has no relevant information in RAG."
+        )
+    }
+
+
+@router.post("/settings/web-search-fallback")
+async def toggle_web_search_fallback(
+    enable: bool = Query(..., description="Enable or disable web-search fallback"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Toggle web-search fallback on/off."""
+    setting = await db.get(SystemSettings, SettingsKeys.WEB_SEARCH_FALLBACK_ENABLED)
+
+    if setting is None:
+        setting = SystemSettings(
+            key=SettingsKeys.WEB_SEARCH_FALLBACK_ENABLED,
+            value=str(enable).lower(),
+            description="Enable/disable web search fallback when RAG has no relevant context",
+            updated_by=current_admin.id
+        )
+        db.add(setting)
+    else:
+        setting.value = str(enable).lower()
+        setting.updated_by = current_admin.id
+
+    await db.commit()
+    await db.refresh(setting)
+
+    status = "enabled" if enable else "disabled"
+    return {
+        "success": True,
+        "enabled": enable,
+        "message": f"Web-search fallback has been {status}",
+        "updated_at": setting.updated_at.isoformat(),
+        "updated_by": current_admin.id
     }

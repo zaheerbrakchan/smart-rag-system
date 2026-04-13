@@ -3,51 +3,30 @@
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Message, Source } from '@/types';
-import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, CheckCircle2, BookOpen, HelpCircle, MapPin } from 'lucide-react';
 
-// All Indian states for NEET counselling
-const INDIAN_STATES = [
-  "Andhra Pradesh",
-  "Arunachal Pradesh",
-  "Assam",
-  "Bihar",
-  "Chhattisgarh",
-  "Delhi",
-  "Goa",
-  "Gujarat",
-  "Haryana",
-  "Himachal Pradesh",
-  "Jammu & Kashmir",
-  "Jharkhand",
-  "Karnataka",
-  "Kerala",
-  "Madhya Pradesh",
-  "Maharashtra",
-  "Manipur",
-  "Meghalaya",
-  "Mizoram",
-  "Nagaland",
-  "Odisha",
-  "Punjab",
-  "Rajasthan",
-  "Sikkim",
-  "Tamil Nadu",
-  "Telangana",
-  "Tripura",
-  "Uttar Pradesh",
-  "Uttarakhand",
-  "West Bengal",
-];
+function topicLabel(code: string | null | undefined): string {
+  if (!code) return '';
+  return code.replace(/_/g, ' ');
+}
+import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, CheckCircle2, BookOpen } from 'lucide-react';
 
 interface MessageBubbleProps {
   message: Message;
-  onClarificationSelect?: (option: string) => void;
 }
 
-export default function MessageBubble({ message, onClarificationSelect }: MessageBubbleProps) {
+/** True when the model likely refused or said it could not answer (avoid "Verified" in that case). */
+function isLikelyRefusalOrNoInfo(content: string): boolean {
+  const t = content.toLowerCase();
+  if (t.includes('not available')) return true;
+  if (t.includes('could not find') || t.includes("couldn't find")) return true;
+  if (t.includes('no information') && t.includes('sorry')) return true;
+  if (t.includes("don't have") && (t.includes('information') || t.includes('details'))) return true;
+  if (t.includes('unable to find') || t.includes('cannot answer')) return true;
+  return false;
+}
+
+export default function MessageBubble({ message }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
-  const [showStateDropdown, setShowStateDropdown] = useState(false);
-  const [selectedState, setSelectedState] = useState('');
   const isUser = message.role === 'user';
 
   // Don't render empty assistant messages (they're being streamed)
@@ -64,8 +43,6 @@ export default function MessageBubble({ message, onClarificationSelect }: Messag
             ? 'bg-gradient-to-br from-gray-700 to-gray-800'
             : message.isError
             ? 'bg-gradient-to-br from-red-500 to-red-600'
-            : message.needsClarification
-            ? 'bg-gradient-to-br from-amber-500 to-orange-500'
             : 'bg-gradient-to-br from-blue-600 to-indigo-600'
         }`}
       >
@@ -73,8 +50,6 @@ export default function MessageBubble({ message, onClarificationSelect }: Messag
           <User className="w-5 h-5 text-white" />
         ) : message.isError ? (
           <AlertCircle className="w-5 h-5 text-white" />
-        ) : message.needsClarification ? (
-          <HelpCircle className="w-5 h-5 text-white" />
         ) : (
           <GraduationCap className="w-5 h-5 text-white" />
         )}
@@ -93,8 +68,6 @@ export default function MessageBubble({ message, onClarificationSelect }: Messag
               ? 'bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-tr-sm'
               : message.isError
               ? 'bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 text-red-800 dark:text-red-300 rounded-tl-sm'
-              : message.needsClarification
-              ? 'bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-amber-900 dark:text-amber-200 rounded-tl-sm'
               : 'bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 text-gray-800 dark:text-gray-200 rounded-tl-sm shadow-md dark:shadow-lg dark:shadow-black/10'
           }`}
         >
@@ -105,85 +78,24 @@ export default function MessageBubble({ message, onClarificationSelect }: Messag
               <ReactMarkdown>{message.content}</ReactMarkdown>
             </div>
           )}
-          
-          {/* Clarification Options */}
-          {message.needsClarification && message.clarificationOptions && onClarificationSelect && (
-            <div className="mt-4 space-y-2">
-              <p className="text-sm font-medium text-amber-800 dark:text-amber-300 mb-3">Select an option:</p>
-              <div className="flex flex-wrap gap-2">
-                {message.clarificationOptions.map((option, index) => {
-                  // Special handling for "Other State" option
-                  if (option === "Other State") {
-                    return (
-                      <div key={index} className="relative">
-                        {!showStateDropdown ? (
-                          <button
-                            onClick={() => setShowStateDropdown(true)}
-                            className="px-4 py-2 bg-white dark:bg-slate-700 border border-amber-300 dark:border-amber-500 rounded-lg text-sm font-medium text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors shadow-sm flex items-center gap-2"
-                          >
-                            <MapPin className="w-4 h-4" />
-                            {option}
-                          </button>
-                        ) : (
-                          <div className="flex items-center gap-2">
-                            <select
-                              value={selectedState}
-                              onChange={(e) => setSelectedState(e.target.value)}
-                              className="px-3 py-2 bg-white dark:bg-slate-700 border border-amber-300 dark:border-amber-500 rounded-lg text-sm text-amber-800 dark:text-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                            >
-                              <option value="">Select State...</option>
-                              {INDIAN_STATES.map((state) => (
-                                <option key={state} value={state}>{state}</option>
-                              ))}
-                            </select>
-                            <button
-                              onClick={() => {
-                                if (selectedState) {
-                                  onClarificationSelect(selectedState);
-                                }
-                              }}
-                              disabled={!selectedState}
-                              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors shadow-sm"
-                            >
-                              Go
-                            </button>
-                            <button
-                              onClick={() => {
-                                setShowStateDropdown(false);
-                                setSelectedState('');
-                              }}
-                              className="px-3 py-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 text-sm"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-                  
-                  return (
-                    <button
-                      key={index}
-                      onClick={() => onClarificationSelect(option)}
-                      className="px-4 py-2 bg-white dark:bg-slate-700 border border-amber-300 dark:border-amber-500 rounded-lg text-sm font-medium text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors shadow-sm"
-                    >
-                      {option}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Source indicator for assistant - only show when there's actual content and not clarification */}
         {!isUser && !message.isError && !message.needsClarification && message.content && message.content.trim() !== '' && (
           <div className="mt-2 flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-full">
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-              <span className="text-xs font-medium text-green-700 dark:text-green-400">Verified from Official Document</span>
-            </div>
+            {isLikelyRefusalOrNoInfo(message.content) ? (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full">
+                <BookOpen className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
+                <span className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                  References from official PDFs — excerpts may not list every detail you asked for
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-full">
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
+                <span className="text-xs font-medium text-green-700 dark:text-green-400">Verified from Official Document</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -240,6 +152,26 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
           </span>
         )}
       </div>
+      {(source.doc_topic || source.chunk_category) && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {source.doc_topic && (
+            <span
+              className="px-2 py-0.5 bg-violet-100 dark:bg-violet-500/20 text-violet-800 dark:text-violet-200 text-xs rounded-full"
+              title="Document scope (set when uploading)"
+            >
+              Doc: {topicLabel(source.doc_topic)}
+            </span>
+          )}
+          {source.chunk_category && (
+            <span
+              className="px-2 py-0.5 bg-slate-200 dark:bg-slate-600/40 text-slate-800 dark:text-slate-200 text-xs rounded-full"
+              title="Chunk topic (AI, page-wise)"
+            >
+              Chunk: {topicLabel(source.chunk_category)}
+            </span>
+          )}
+        </div>
+      )}
       <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed line-clamp-3">{source.text_snippet}</p>
     </div>
   );

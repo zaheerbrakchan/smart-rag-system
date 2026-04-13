@@ -4,20 +4,21 @@ import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ChatWindow from '@/components/ChatWindow';
+import ChatSidebar from '@/components/ChatSidebar';
 import ThemeToggle from '@/components/ThemeToggle';
 import { Message, ModelType } from '@/types';
-import { streamChatMessage, UserPreferences } from '@/services/api';
+import { streamChatMessage, UserPreferences, getConversation } from '@/services/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { 
   GraduationCap, Send, Sparkles, BookOpen, Calendar, FileCheck, 
   HelpCircle, Shield, RotateCcw, Settings, LogIn, UserPlus, 
-  User, LogOut, ChevronDown 
+  User, LogOut, ChevronDown, Menu 
 } from 'lucide-react';
 
 export default function Home() {
   const router = useRouter();
-  const { user, isAuthenticated, isLoading: authLoading, logout } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading, logout, token } = useAuth();
   const { theme } = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -25,6 +26,9 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [pendingClarification, setPendingClarification] = useState<{question: string, messageId: string} | null>(null);
+  const [conversationId, setConversationId] = useState<number | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Redirect to login if not authenticated
@@ -39,35 +43,51 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async (clarifiedScope?: string) => {
-    // Use pending question if this is a clarification response, otherwise use input
-    const question = clarifiedScope && pendingClarification 
-      ? pendingClarification.question 
-      : inputValue.trim();
-    
-    if (!question || isLoading) return;
+  const handleSendMessage = async () => {
+    const trimmed = inputValue.trim();
+    const pending = pendingClarification;
 
-    // If this is a new question (not clarification), add user message
-    if (!clarifiedScope) {
+    if (isLoading) return;
+
+    let question: string;
+    let clarifiedScope: string | undefined;
+    let assistantMessageId: string;
+
+    if (pending) {
+      if (!trimmed) return;
+      question = pending.question;
+      clarifiedScope = trimmed;
+      assistantMessageId = pending.messageId;
+
       const userMessage: Message = {
         id: Date.now().toString(),
         role: 'user',
-        content: question,
+        content: trimmed,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, userMessage]);
       setInputValue('');
-    }
-    
-    setIsLoading(true);
+      setPendingClarification(null);
 
-    // Create assistant message placeholder for streaming
-    const assistantMessageId = clarifiedScope && pendingClarification 
-      ? pendingClarification.messageId  // Reuse the same message for clarification
-      : (Date.now() + 1).toString();
-    
-    // Only create new message if not clarification
-    if (!clarifiedScope) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: '', needsClarification: false, clarificationOptions: undefined }
+            : msg
+        )
+      );
+    } else {
+      if (!trimmed) return;
+      question = trimmed;
+      clarifiedScope = undefined;
+      assistantMessageId = (Date.now() + 1).toString();
+
+      const userMessage: Message = {
+        id: Date.now().toString(),
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date(),
+      };
       const assistantMessage: Message = {
         id: assistantMessageId,
         role: 'assistant',
@@ -75,20 +95,11 @@ export default function Home() {
         timestamp: new Date(),
         sources: [],
       };
-      setMessages((prev) => [...prev, assistantMessage]);
-    } else {
-      // Clear the clarification message and prepare for real response
-      setMessages((prev) => 
-        prev.map((msg) => 
-          msg.id === assistantMessageId 
-            ? { ...msg, content: '', needsClarification: false, clarificationOptions: undefined }
-            : msg
-        )
-      );
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      setInputValue('');
     }
-    
-    // Clear pending clarification
-    setPendingClarification(null);
+
+    setIsLoading(true);
 
     try {
       // Build user preferences for smart routing
@@ -122,8 +133,11 @@ export default function Home() {
             )
           );
         },
-        // onDone
-        (filters) => {
+        // onDone - update model and conversation ID
+        (filters, newConversationId) => {
+          if (newConversationId && newConversationId !== conversationId) {
+            setConversationId(newConversationId);
+          }
           setMessages((prev) => 
             prev.map((msg) => 
               msg.id === assistantMessageId 
@@ -145,21 +159,29 @@ export default function Home() {
         userPreferences,
         clarifiedScope,
         // onClarificationNeeded
-        (options, message) => {
+        (_options, message) => {
           setPendingClarification({ question, messageId: assistantMessageId });
-          setMessages((prev) => 
-            prev.map((msg) => 
-              msg.id === assistantMessageId 
-                ? { 
-                    ...msg, 
-                    content: message, 
-                    needsClarification: true, 
-                    clarificationOptions: options,
-                    originalQuestion: question
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    content: message,
+                    needsClarification: true,
+                    originalQuestion: question,
                   }
                 : msg
             )
           );
+        },
+        // conversationId and userId
+        conversationId || undefined,
+        user?.id,
+        // onTitle - refresh sidebar when title is generated
+        (title, convId) => {
+          if (convId) {
+            setSidebarKey(prev => prev + 1);
+          }
         }
       );
     } catch (error) {
@@ -182,29 +204,46 @@ export default function Home() {
     }
   };
 
-  const handleClarificationSelection = (option: string) => {
-    // Parse the option to determine the clarified scope
-    let clarifiedScope = 'central';
+  // Load a conversation from sidebar
+  const handleSelectConversation = async (id: number) => {
+    if (!token || id === conversationId) return;
     
-    if (option.includes('Central') || option.includes('AIQ') || option.includes('All India')) {
-      clarifiedScope = 'central';
-    } else if (option.includes('My State') || option.includes('preference')) {
-      clarifiedScope = 'preference';
-    } else if (option.includes('Other State')) {
-      // Should not reach here anymore since we use dropdown
-      clarifiedScope = 'central';
-    } else {
-      // Direct state name from dropdown (e.g., "Karnataka", "Tamil Nadu")
-      // Pass it directly as the scope
-      clarifiedScope = option;
+    try {
+      setIsLoading(true);
+      const conv = await getConversation(token, id);
+      
+      // Convert API messages to our Message format
+      const loadedMessages: Message[] = conv.messages.map((m) => ({
+        id: m.id.toString(),
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        timestamp: new Date(m.created_at),
+        sources: m.sources || undefined,
+      }));
+      
+      setMessages(loadedMessages);
+      setConversationId(id);
+      setPendingClarification(null);
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+    } finally {
+      setIsLoading(false);
     }
-    
-    handleSendMessage(clarifiedScope);
+  };
+
+  // Start new chat
+  const handleNewChat = () => {
+    setMessages([]);
+    setConversationId(null);
+    setPendingClarification(null);
+    setInputValue('');
   };
 
   const clearChat = () => {
     setMessages([]);
     setPendingClarification(null);
+    setConversationId(null);  // Reset conversation for new chat
+    setSidebarKey(prev => prev + 1); // Refresh sidebar to show new conversation
   };
 
   // Show loading only while checking auth status
@@ -222,7 +261,21 @@ export default function Home() {
   }
 
   return (
-    <main className="flex flex-col h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
+    <div className="flex h-screen overflow-hidden">
+      {/* Chat History Sidebar */}
+      {isAuthenticated && token && (
+        <ChatSidebar
+          key={sidebarKey}
+          token={token}
+          currentConversationId={conversationId}
+          onSelectConversation={handleSelectConversation}
+          onNewChat={handleNewChat}
+          isCollapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        />
+      )}
+      
+      <main className="flex flex-col flex-1 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
       {/* Header */}
       <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
@@ -429,7 +482,6 @@ export default function Home() {
             messages={messages}
             isLoading={isLoading}
             messagesEndRef={messagesEndRef}
-            onClarificationSelect={handleClarificationSelection}
           />
         )}
       </div>
@@ -443,7 +495,11 @@ export default function Home() {
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask any question about NEET UG 2026..."
+                placeholder={
+                  pendingClarification
+                    ? 'Reply in your own words — e.g. All India / MCC, or name a state…'
+                    : 'Ask any question about NEET UG 2026...'
+                }
                 className="w-full px-5 py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500"
                 rows={1}
                 disabled={isLoading}
@@ -473,6 +529,7 @@ export default function Home() {
         </div>
       </div>
     </main>
+    </div>
   );
 }
 

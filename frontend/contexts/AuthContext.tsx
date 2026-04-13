@@ -6,6 +6,7 @@ import * as authApi from '@/services/authApi';
 
 interface AuthContextType {
   user: User | null;
+  token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<void>;
@@ -21,8 +22,6 @@ interface RegisterData {
   password: string;
   full_name: string;
   phone: string;
-  age?: number;
-  target_exams?: string[];
   verification_token: string;
   preferred_state?: string;
   category?: string;
@@ -35,6 +34,7 @@ const USER_KEY = 'auth_user';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Load user from localStorage on mount
@@ -57,6 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           try {
             const currentUser = await authApi.getCurrentUser(tokens.access_token);
             setUser(currentUser);
+            setToken(tokens.access_token);
           } catch (error) {
             // Token expired, try refresh
             try {
@@ -67,10 +68,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               }));
               const currentUser = await authApi.getCurrentUser(newTokens.access_token);
               setUser(currentUser);
+              setToken(newTokens.access_token);
             } catch (refreshError) {
               // Refresh failed, clear storage
               localStorage.removeItem(TOKEN_KEY);
               localStorage.removeItem(USER_KEY);
+              setToken(null);
             }
           }
         }
@@ -96,6 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(USER_KEY, JSON.stringify(response.user));
     
     setUser(response.user);
+    setToken(response.access_token);
   };
 
   const register = async (data: RegisterData) => {
@@ -109,6 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(USER_KEY, JSON.stringify(response.user));
     
     setUser(response.user);
+    setToken(response.access_token);
   };
 
   const logout = () => {
@@ -123,6 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     setUser(null);
+    setToken(null);
   };
 
   const sendOtp = async (phone: string) => {
@@ -137,6 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
+        token,
         isLoading,
         isAuthenticated: !!user,
         login,

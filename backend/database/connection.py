@@ -9,13 +9,24 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 from dotenv import load_dotenv
 
+from services.db_url import async_url_for_neon, is_local_postgres_host
+
 load_dotenv()
 
-# Database URL - supports both sync and async
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/neet_assistant"
+_raw_db_url = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/neet_assistant",
 )
+# Database URL — sslmode stripped from query; TLS set via connect_args for asyncpg (Neon, etc.)
+DATABASE_URL = async_url_for_neon(_raw_db_url)
+
+
+def _asyncpg_connect_args() -> dict:
+    args: dict = {"timeout": 30, "command_timeout": 30}
+    # Remote hosts (Neon, Supabase pooler, RDS) require TLS; asyncpg uses ssl=, not sslmode=
+    if not is_local_postgres_host(_raw_db_url):
+        args["ssl"] = True
+    return args
 
 # For Alembic (sync operations)
 SYNC_DATABASE_URL = DATABASE_URL.replace("+asyncpg", "")
@@ -31,10 +42,7 @@ engine = create_async_engine(
     pool_recycle=300,  # Recycle connections after 5 minutes
     pool_pre_ping=True,  # Verify connection before using
     future=True,
-    connect_args={
-        "timeout": 30,  # Connection timeout in seconds
-        "command_timeout": 30  # Query timeout
-    }
+    connect_args=_asyncpg_connect_args(),
 )
 
 # Session factory
@@ -73,7 +81,9 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    """Initialize database tables"""
+    """Initialize database tables (import package so every model registers on Base.metadata)."""
+    import models  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
