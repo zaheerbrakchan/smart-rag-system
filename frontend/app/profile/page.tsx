@@ -73,7 +73,7 @@ export default function ProfilePage() {
               </div>
               <div className="ml-6 pb-2">
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white">{user?.full_name}</h2>
-                <p className="text-gray-500 dark:text-gray-400">@{user?.username}</p>
+                <p className="text-gray-500 dark:text-gray-400">{user?.phone || 'Student Account'}</p>
                 <span className={`inline-block mt-2 px-3 py-1 text-sm font-medium rounded-full capitalize ${
                   user?.role === 'admin' || user?.role === 'super_admin' 
                     ? 'bg-purple-100 dark:bg-purple-500/20 text-purple-700 dark:text-purple-400' 
@@ -126,8 +126,8 @@ export default function ProfilePage() {
                   <Mail className="w-5 h-5 text-green-600 dark:text-green-400" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Email</p>
-                  <p className="font-medium text-gray-800 dark:text-white">{user?.email}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Phone</p>
+                  <p className="font-medium text-gray-800 dark:text-white">{user?.phone || 'Not provided'}</p>
                 </div>
               </div>
               

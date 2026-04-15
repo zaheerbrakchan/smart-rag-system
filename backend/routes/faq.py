@@ -602,6 +602,18 @@ async def get_web_search_fallback_status(db: AsyncSession) -> bool:
     return setting.value.lower() == "true"
 
 
+async def get_cutoff_college_result_limit(db: AsyncSession) -> int:
+    """Get current cutoff result row limit."""
+    setting = await db.get(SystemSettings, SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT)
+    if setting is None:
+        return 10
+    try:
+        value = int(setting.value)
+    except (TypeError, ValueError):
+        return 10
+    return max(1, min(200, value))
+
+
 @router.get("/settings/auto-learning")
 async def get_auto_learning_setting(
     db: AsyncSession = Depends(get_db),
@@ -708,6 +720,53 @@ async def toggle_web_search_fallback(
         "success": True,
         "enabled": enable,
         "message": f"Web-search fallback has been {status}",
+        "updated_at": setting.updated_at.isoformat(),
+        "updated_by": current_admin.id
+    }
+
+
+@router.get("/settings/cutoff-result-limit")
+async def get_cutoff_result_limit_setting(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get cutoff SQL result limit configuration."""
+    value = await get_cutoff_college_result_limit(db)
+    setting = await db.get(SystemSettings, SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT)
+    return {
+        "limit": value,
+        "updated_at": setting.updated_at.isoformat() if setting else None,
+        "updated_by": setting.updated_by if setting else None,
+        "description": "Maximum number of cutoff rows shown to user from SQL output."
+    }
+
+
+@router.post("/settings/cutoff-result-limit")
+async def update_cutoff_result_limit(
+    limit: int = Query(..., ge=1, le=200, description="Cutoff result limit (1-200)"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Update cutoff SQL result limit configuration."""
+    setting = await db.get(SystemSettings, SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT)
+    if setting is None:
+        setting = SystemSettings(
+            key=SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT,
+            value=str(limit),
+            description="Maximum number of cutoff rows shown to user from SQL output",
+            updated_by=current_admin.id
+        )
+        db.add(setting)
+    else:
+        setting.value = str(limit)
+        setting.updated_by = current_admin.id
+
+    await db.commit()
+    await db.refresh(setting)
+    return {
+        "success": True,
+        "limit": limit,
+        "message": f"Cutoff result limit updated to {limit}",
         "updated_at": setting.updated_at.isoformat(),
         "updated_by": current_admin.id
     }

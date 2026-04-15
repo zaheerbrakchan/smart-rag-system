@@ -7,7 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
 import { 
-  GraduationCap, Phone, User, Lock, Eye, EyeOff, 
+  GraduationCap, Phone, User,
   ArrowRight, CheckCircle, Loader2, AlertCircle 
 } from 'lucide-react';
 
@@ -20,7 +20,6 @@ export default function RegisterPage() {
   const [step, setStep] = useState<Step>('phone');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   
   // Form data
   const [phone, setPhone] = useState('+91 ');
@@ -28,13 +27,10 @@ export default function RegisterPage() {
   const [devOtp, setDevOtp] = useState(''); // For dev mode
   const [verificationToken, setVerificationToken] = useState(''); // Token from OTP verification
   const [formData, setFormData] = useState({
-    username: '',
-    password: '',
-    confirmPassword: '',
     full_name: '',
-    home_state: '',
-    category: '',
-    customCategory: '',
+    email: '',
+    state_or_ut: '',
+    city: '',
   });
   
   // OTP countdown
@@ -103,32 +99,17 @@ export default function RegisterPage() {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    
-    // Validation
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
-      return;
-    }
-    
-    if (formData.password.length < 8) {
-      setError('Password must be at least 8 characters');
-      return;
-    }
-    
+
     setIsLoading(true);
     
     try {
-      const finalCategory = formData.category === 'Other' ? formData.customCategory : formData.category;
-      
       await register({
-        username: formData.username.toLowerCase().replace(/[^a-z0-9_]/g, ''),
-        email: `${formData.username.toLowerCase().replace(/[^a-z0-9_]/g, '')}@neet.user`,
-        password: formData.password,
         full_name: formData.full_name,
         phone: phone,
         verification_token: verificationToken,
-        preferred_state: formData.home_state || undefined,
-        category: finalCategory || undefined,
+        email: formData.email || undefined,
+        state_or_ut: formData.state_or_ut || undefined,
+        city: formData.city || undefined,
       });
       
       router.push('/');
@@ -150,9 +131,9 @@ export default function RegisterPage() {
             </div>
             <div>
               <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                Get My University
+                Med Buddy
               </h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">NEET UG 2026 Assistant</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
             </div>
           </Link>
           
@@ -331,23 +312,6 @@ export default function RegisterPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="col-span-2">
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Username
-                      </label>
-                      <div className="relative">
-                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                        <input
-                          type="text"
-                          value={formData.username}
-                          onChange={(e) => setFormData({...formData, username: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')})}
-                          placeholder="johndoe"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                        />
-                      </div>
-                    </div>
-                    
-                    <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Full Name
                       </label>
                       <div className="relative">
@@ -365,56 +329,30 @@ export default function RegisterPage() {
                     
                     <div className="col-span-2">
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Password
+                        Email ID <span className="text-gray-400">(optional)</span>
                       </label>
                       <div className="relative">
-                        <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                         <input
-                          type={showPassword ? 'text' : 'password'}
-                          value={formData.password}
-                          onChange={(e) => setFormData({...formData, password: e.target.value})}
-                          placeholder="Min 8 characters"
-                          className="w-full pl-11 pr-12 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                          minLength={8}
+                          type="email"
+                          value={formData.email}
+                          onChange={(e) => setFormData({...formData, email: e.target.value})}
+                          placeholder="you@example.com"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                        >
-                          {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                        </button>
                       </div>
                     </div>
                     
                     <div className="col-span-2">
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Confirm Password
-                      </label>
-                      <div className="relative">
-                        <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                        <input
-                          type={showPassword ? 'text' : 'password'}
-                          value={formData.confirmPassword}
-                          onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})}
-                          placeholder="Confirm your password"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                        />
-                      </div>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Home State
+                        State / UT <span className="text-gray-400">(optional)</span>
                       </label>
                       <select
-                        value={formData.home_state}
-                        onChange={(e) => setFormData({...formData, home_state: e.target.value})}
+                        value={formData.state_or_ut}
+                        onChange={(e) => setFormData({...formData, state_or_ut: e.target.value})}
                         className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
-                        <option value="">Select State</option>
+                        <option value="">Select State / UT</option>
                         <option value="Andhra Pradesh">Andhra Pradesh</option>
                         <option value="Arunachal Pradesh">Arunachal Pradesh</option>
                         <option value="Assam">Assam</option>
@@ -448,41 +386,22 @@ export default function RegisterPage() {
                         <option value="West Bengal">West Bengal</option>
                       </select>
                     </div>
-                    
-                    <div>
+
+                    <div className="col-span-2">
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Category
+                        City <span className="text-gray-400">(optional)</span>
                       </label>
-                      <select
-                        value={formData.category}
-                        onChange={(e) => setFormData({...formData, category: e.target.value, customCategory: ''})}
-                        className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="">Select Category</option>
-                        <option value="General">General</option>
-                        <option value="OBC">OBC (Other Backward Classes)</option>
-                        <option value="SC">SC (Scheduled Caste)</option>
-                        <option value="ST">ST (Scheduled Tribe)</option>
-                        <option value="EWS">EWS (Economically Weaker Section)</option>
-                        <option value="Other">Other (Type manually)</option>
-                      </select>
-                    </div>
-                    
-                    {formData.category === 'Other' && (
-                      <div className="col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Enter Your Category
-                        </label>
+                      <div className="relative">
+                        <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                         <input
                           type="text"
-                          value={formData.customCategory}
-                          onChange={(e) => setFormData({...formData, customCategory: e.target.value})}
-                          placeholder="e.g., OBC-NCL, PwD, etc."
-                          className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
+                          value={formData.city}
+                          onChange={(e) => setFormData({...formData, city: e.target.value})}
+                          placeholder="Enter your city"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
-                    )}
+                    </div>
                   </div>
                   
                   {error && (

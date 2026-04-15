@@ -2,29 +2,28 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
 import { 
-  GraduationCap, User, Lock, Eye, EyeOff, 
+  GraduationCap, Phone,
   ArrowRight, Loader2, AlertCircle 
 } from 'lucide-react';
 
+type Step = 'phone' | 'otp';
+
 export default function LoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const { login, isAuthenticated, isLoading: authLoading } = useAuth();
-  const resetSuccess = searchParams.get('reset') === 'success';
+  const { login, sendOtp, verifyOtp, isAuthenticated, isLoading: authLoading } = useAuth();
   
+  const [step, setStep] = useState<Step>('phone');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  
-  const [formData, setFormData] = useState({
-    username: '',
-    password: '',
-  });
+  const [phone, setPhone] = useState('+91 ');
+  const [otp, setOtp] = useState('');
+  const [devOtp, setDevOtp] = useState('');
+  const [countdown, setCountdown] = useState(0);
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -33,13 +32,45 @@ export default function LoginPage() {
     }
   }, [authLoading, isAuthenticated, router]);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setIsLoading(true);
     
     try {
-      await login(formData.username, formData.password);
+      const result = await sendOtp(phone, 'login');
+      if (result.success) {
+        setStep('otp');
+        setCountdown(60);
+        if (result.otp) setDevOtp(result.otp);
+        const interval = setInterval(() => {
+          setCountdown((prev) => {
+            if (prev <= 1) {
+              clearInterval(interval);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send OTP');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerifyAndLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+
+    try {
+      const verified = await verifyOtp(phone, otp, 'login');
+      if (!verified.success || !verified.verification_token) {
+        throw new Error('OTP verification failed');
+      }
+      await login(phone, verified.verification_token);
       router.push('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
@@ -59,9 +90,9 @@ export default function LoginPage() {
             </div>
             <div>
               <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                Get My University
+                Med Buddy
               </h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">NEET UG 2026 Assistant</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
             </div>
           </Link>
           
@@ -85,72 +116,68 @@ export default function LoginPage() {
               <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl mb-3">
                 <GraduationCap className="w-7 h-7 text-white" />
               </div>
-              <h2 className="text-xl font-bold text-gray-800 dark:text-white">Welcome Back</h2>
-              <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Sign in to continue to Get My University</p>
+              <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In with OTP</h2>
+              <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Use your registered mobile number</p>
             </div>
             
-            <form onSubmit={handleLogin} className="space-y-4">
-              {resetSuccess && (
-                <div className="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-500/10 p-3 rounded-lg border border-green-200 dark:border-green-500/30">
-                  Password updated. You can sign in with your new password.
+            {step === 'phone' && (
+              <form onSubmit={handleSendOtp} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    Mobile Number
+                  </label>
+                  <div className="relative">
+                    <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="Enter registered mobile number"
+                      className="w-full pl-11 pr-4 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      required
+                    />
+                  </div>
                 </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Username or Email
-                </label>
-                <div className="relative">
-                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+
+                {error && (
+                  <div className="flex items-center gap-2 text-red-600 dark:text-red-400 text-sm bg-red-50 dark:bg-red-500/10 p-3 rounded-lg">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+                >
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Send OTP <ArrowRight className="w-5 h-5" /></>}
+                </button>
+              </form>
+            )}
+
+            {step === 'otp' && (
+              <form onSubmit={handleVerifyAndLogin} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    Enter OTP sent to {phone}
+                  </label>
                   <input
                     type="text"
-                    value={formData.username}
-                    onChange={(e) => setFormData({...formData, username: e.target.value})}
-                    placeholder="Enter username or email"
-                    className="w-full pl-11 pr-4 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="000000"
+                    className="w-full px-4 py-2.5 text-center text-2xl tracking-widest border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    maxLength={6}
                     required
                   />
                 </div>
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Password
-                </label>
-                <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={formData.password}
-                    onChange={(e) => setFormData({...formData, password: e.target.value})}
-                    placeholder="Enter your password"
-                    className="w-full pl-11 pr-12 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  >
-                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                  </button>
-                </div>
-              </div>
-              
-              <div className="flex items-center justify-between">
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4 text-blue-600 border-gray-300 dark:border-slate-600 rounded focus:ring-blue-500"
-                  />
-                  <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">Remember me</span>
-                </label>
-                <Link
-                  href="/forgot-password"
-                  className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
-                >
-                  Forgot password?
-                </Link>
-              </div>
+
+                {devOtp && (
+                  <div className="text-sm text-yellow-700 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-500/10 p-3 rounded-lg border border-yellow-200 dark:border-yellow-500/30">
+                    <strong>Dev OTP:</strong> {devOtp}
+                  </div>
+                )}
               
               {error && (
                 <div className="flex items-center gap-2 text-red-600 dark:text-red-400 text-sm bg-red-50 dark:bg-red-500/10 p-3 rounded-lg">
@@ -158,26 +185,42 @@ export default function LoginPage() {
                   {error}
                 </div>
               )}
-              
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
-              >
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>
-                    Sign In
-                    <ArrowRight className="w-5 h-5" />
-                  </>
-                )}
-              </button>
-            </form>
+
+                <button
+                  type="submit"
+                  disabled={isLoading || otp.length !== 6}
+                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+                >
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Verify OTP & Sign In <ArrowRight className="w-5 h-5" /></>}
+                </button>
+
+                <div className="text-center text-sm text-gray-500 dark:text-gray-400">
+                  {countdown > 0 ? (
+                    <span>Resend OTP in {countdown}s</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSendOtp}
+                      className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium"
+                    >
+                      Resend OTP
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => { setStep('phone'); setOtp(''); setError(''); }}
+                  className="w-full text-center text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                >
+                  Change phone number
+                </button>
+              </form>
+            )}
           </div>
           
           <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-4">
-            New to Get My University?{' '}
+            New to Med Buddy?{' '}
             <Link href="/register" className="text-blue-600 dark:text-blue-400 hover:underline font-medium">
               Create an account
             </Link>

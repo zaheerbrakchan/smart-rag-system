@@ -54,6 +54,7 @@ export async function streamChatMessage(
   userPreferences?: UserPreferences,
   clarifiedScope?: string,
   onClarificationNeeded?: (options: string[], message: string) => void,
+  onSuggestedReplies?: (replies: string[]) => void,
   conversationId?: number,
   userId?: number,
   onTitle?: (title: string, conversationId: number) => void
@@ -111,6 +112,8 @@ export async function streamChatMessage(
               onSources(data.sources);
             } else if (data.type === 'clarification_needed' && onClarificationNeeded) {
               onClarificationNeeded(data.options, data.message);
+            } else if (data.type === 'suggested_replies' && onSuggestedReplies) {
+              onSuggestedReplies(data.replies || []);
             } else if (data.type === 'done') {
               onDone(data.filters_applied, data.conversation_id);
             } else if (data.type === 'title' && onTitle) {

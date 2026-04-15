@@ -30,8 +30,6 @@ interface DashboardStats {
 
 interface User {
   id: number;
-  username: string;
-  email: string;
   full_name: string;
   phone: string | null;
   age: number | null;
@@ -92,7 +90,7 @@ interface FAQStats {
   rejected: number;
 }
 
-type TabType = 'overview' | 'users' | 'documents' | 'faqs';
+type TabType = 'overview' | 'users' | 'documents' | 'faqs' | 'configurations';
 
 export default function AdminPage() {
   const router = useRouter();
@@ -166,6 +164,10 @@ export default function AdminPage() {
   const [webFallbackEnabled, setWebFallbackEnabled] = useState<boolean>(false);
   const [webFallbackLoading, setWebFallbackLoading] = useState<boolean>(false);
   const [webFallbackUpdatedAt, setWebFallbackUpdatedAt] = useState<string | null>(null);
+  const [cutoffResultLimit, setCutoffResultLimit] = useState<number>(10);
+  const [cutoffResultLimitInput, setCutoffResultLimitInput] = useState<string>('10');
+  const [cutoffResultLimitLoading, setCutoffResultLimitLoading] = useState<boolean>(false);
+  const [cutoffResultLimitUpdatedAt, setCutoffResultLimitUpdatedAt] = useState<string | null>(null);
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = useState<{
@@ -423,6 +425,55 @@ export default function AdminPage() {
     }
   };
 
+  // Fetch cutoff result limit
+  const fetchCutoffResultLimit = useCallback(async () => {
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/cutoff-result-limit`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setCutoffResultLimit(data.limit);
+        setCutoffResultLimitInput(String(data.limit));
+        setCutoffResultLimitUpdatedAt(data.updated_at);
+      }
+    } catch (err) {
+      console.error('Failed to fetch cutoff result limit:', err);
+    }
+  }, []);
+
+  // Update cutoff result limit
+  const updateCutoffResultLimit = async () => {
+    const parsed = Number(cutoffResultLimitInput);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 200) {
+      setError('Cutoff result limit must be between 1 and 200');
+      return;
+    }
+    setCutoffResultLimitLoading(true);
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/cutoff-result-limit?limit=${parsed}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setCutoffResultLimit(data.limit);
+        setCutoffResultLimitInput(String(data.limit));
+        setCutoffResultLimitUpdatedAt(data.updated_at);
+        setSuccess(data.message);
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update cutoff result limit');
+      }
+    } catch (err) {
+      setError('Failed to update cutoff result limit');
+    } finally {
+      setCutoffResultLimitLoading(false);
+    }
+  };
+
   // Fetch metadata options
   const fetchMetadataOptions = useCallback(async () => {
     try {
@@ -453,14 +504,15 @@ export default function AdminPage() {
         fetchFaqs(false),
         fetchFaqStats(),
         fetchAutoLearningStatus(),
-        fetchWebFallbackStatus()
+        fetchWebFallbackStatus(),
+        fetchCutoffResultLimit()
       ]);
       setInitialLoadDone(true);
     };
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchCutoffResultLimit]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -510,8 +562,8 @@ export default function AdminPage() {
     }
   };
 
-  const handleDeleteUser = async (userId: number, username: string) => {
-    if (!confirm(`Are you sure you want to deactivate user "${username}"?`)) return;
+  const handleDeleteUser = async (userId: number, fullName: string) => {
+    if (!confirm(`Are you sure you want to deactivate user "${fullName}"?`)) return;
     
     try {
       const token = getAuthToken();
@@ -533,26 +585,8 @@ export default function AdminPage() {
     }
   };
 
-  const handleResetPassword = async (userId: number, username: string) => {
-    if (!confirm(`Reset password for "${username}"?`)) return;
-    
-    try {
-      const token = getAuthToken();
-      const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/reset-password`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setSuccess(`Password reset! Temp: ${data.temporary_password}`);
-      } else {
-        const err = await response.json();
-        setError(err.detail || 'Failed to reset password');
-      }
-    } catch (err) {
-      setError('Failed to reset password');
-    }
+  const handleResetPassword = async (_userId: number, _fullName: string) => {
+    setError('Password reset is disabled in OTP-only authentication mode.');
   };
 
   // Document actions
@@ -913,7 +947,7 @@ export default function AdminPage() {
             </div>
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-500 dark:text-slate-400">
-                <span className="text-blue-600 dark:text-blue-400">{user?.username}</span>
+                <span className="text-blue-600 dark:text-blue-400">{user?.full_name}</span>
               </span>
               <ThemeToggle />
               <button
@@ -922,6 +956,7 @@ export default function AdminPage() {
                   if (activeTab === 'users') fetchUsers();
                   if (activeTab === 'documents') fetchDocuments();
                   if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); fetchAutoLearningStatus(); fetchWebFallbackStatus(); }
+                  if (activeTab === 'configurations') { fetchAutoLearningStatus(); fetchWebFallbackStatus(); fetchCutoffResultLimit(); }
                 }}
                 className="p-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 rounded-lg"
               >
@@ -1058,7 +1093,8 @@ export default function AdminPage() {
             { id: 'overview', label: 'Overview', icon: BarChart3 },
             { id: 'users', label: 'Users', icon: Users },
             { id: 'documents', label: 'Documents', icon: FileText },
-            { id: 'faqs', label: 'FAQs', icon: MessageSquare, badge: faqStats?.pending_review }
+            { id: 'faqs', label: 'FAQs', icon: MessageSquare, badge: faqStats?.pending_review },
+            { id: 'configurations', label: 'Configurations', icon: Settings }
           ].map((tab) => (
             <button
               key={tab.id}
@@ -1238,12 +1274,12 @@ export default function AdminPage() {
                             </div>
                             <div>
                               <p className="text-white font-medium">{u.full_name}</p>
-                              <p className="text-slate-400 text-sm">@{u.username}</p>
+                              <p className="text-slate-400 text-sm">ID: {u.id}</p>
                             </div>
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <p className="text-slate-300 text-sm">{u.email}</p>
+                          <p className="text-slate-300 text-sm">{u.phone || 'No phone'}</p>
                           <p className="text-slate-500 text-sm">{u.phone || '-'}</p>
                         </td>
                         <td className="px-6 py-4">
@@ -1268,11 +1304,11 @@ export default function AdminPage() {
                             <button onClick={() => setEditingUser(u)} className="p-2 hover:bg-slate-600 rounded-lg" title="Edit">
                               <Edit2 className="w-4 h-4 text-slate-400" />
                             </button>
-                            <button onClick={() => handleResetPassword(u.id, u.username)} className="p-2 hover:bg-slate-600 rounded-lg" title="Reset Password">
+                            <button onClick={() => handleResetPassword(u.id, u.full_name)} className="p-2 hover:bg-slate-600 rounded-lg" title="Reset Password">
                               <Key className="w-4 h-4 text-slate-400" />
                             </button>
                             {u.role !== 'super_admin' && (
-                              <button onClick={() => handleDeleteUser(u.id, u.username)} className="p-2 hover:bg-red-500/10 rounded-lg" title="Deactivate">
+                              <button onClick={() => handleDeleteUser(u.id, u.full_name)} className="p-2 hover:bg-red-500/10 rounded-lg" title="Deactivate">
                                 <UserX className="w-4 h-4 text-red-400" />
                               </button>
                             )}
@@ -1529,136 +1565,6 @@ export default function AdminPage() {
               )}
             </div>
 
-            {/* Auto-Learning Control */}
-            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
-              autoLearningEnabled 
-                ? 'bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border-emerald-500/30' 
-                : 'bg-gradient-to-r from-amber-500/10 to-orange-500/10 border-amber-500/30'
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className={`p-3 rounded-xl ${
-                    autoLearningEnabled 
-                      ? 'bg-emerald-500/20' 
-                      : 'bg-amber-500/20'
-                  }`}>
-                    {autoLearningEnabled ? (
-                      <Sparkles className="w-6 h-6 text-emerald-400" />
-                    ) : (
-                      <AlertCircle className="w-6 h-6 text-amber-400" />
-                    )}
-                  </div>
-                  <div>
-                    <h3 className="text-white font-semibold flex items-center gap-2">
-                      Auto-Learning
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${
-                        autoLearningEnabled 
-                          ? 'bg-emerald-500/20 text-emerald-400' 
-                          : 'bg-amber-500/20 text-amber-400'
-                      }`}>
-                        {autoLearningEnabled ? 'Active' : 'Paused'}
-                      </span>
-                    </h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
-                      {autoLearningEnabled 
-                        ? 'System is capturing Q&A pairs from chat for review' 
-                        : 'Auto-capture is paused - no new FAQs will be queued'}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  {autoLearningUpdatedAt && (
-                    <span className="text-xs text-slate-500 hidden md:block">
-                      Last updated: {new Date(autoLearningUpdatedAt).toLocaleDateString()}
-                    </span>
-                  )}
-                  <button
-                    onClick={toggleAutoLearning}
-                    disabled={autoLearningLoading}
-                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
-                      autoLearningEnabled 
-                        ? 'bg-emerald-500 focus:ring-emerald-500' 
-                        : 'bg-slate-600 focus:ring-slate-500'
-                    }`}
-                  >
-                    <span className="sr-only">Toggle auto-learning</span>
-                    <span
-                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${
-                        autoLearningEnabled ? 'translate-x-8' : 'translate-x-1'
-                      }`}
-                    >
-                      {autoLearningLoading && (
-                        <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
-                      )}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Web Fallback Control */}
-            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
-              webFallbackEnabled 
-                ? 'bg-gradient-to-r from-indigo-500/10 to-blue-500/10 border-indigo-500/30' 
-                : 'bg-gradient-to-r from-slate-500/10 to-slate-600/10 border-slate-500/30'
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className={`p-3 rounded-xl ${
-                    webFallbackEnabled 
-                      ? 'bg-indigo-500/20' 
-                      : 'bg-slate-500/20'
-                  }`}>
-                    <Globe className={`w-6 h-6 ${webFallbackEnabled ? 'text-indigo-400' : 'text-slate-400'}`} />
-                  </div>
-                  <div>
-                    <h3 className="text-white font-semibold flex items-center gap-2">
-                      Web Search Fallback
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${
-                        webFallbackEnabled 
-                          ? 'bg-indigo-500/20 text-indigo-400' 
-                          : 'bg-slate-500/20 text-slate-400'
-                      }`}>
-                        {webFallbackEnabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
-                      {webFallbackEnabled
-                        ? 'If RAG has no result for NEET queries, system will try web search as fallback'
-                        : 'System uses RAG-only mode and returns the standard "not in database" message'}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  {webFallbackUpdatedAt && (
-                    <span className="text-xs text-slate-500 hidden md:block">
-                      Last updated: {new Date(webFallbackUpdatedAt).toLocaleDateString()}
-                    </span>
-                  )}
-                  <button
-                    onClick={toggleWebFallback}
-                    disabled={webFallbackLoading}
-                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
-                      webFallbackEnabled 
-                        ? 'bg-indigo-500 focus:ring-indigo-500' 
-                        : 'bg-slate-600 focus:ring-slate-500'
-                    }`}
-                  >
-                    <span className="sr-only">Toggle web fallback</span>
-                    <span
-                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${
-                        webFallbackEnabled ? 'translate-x-8' : 'translate-x-1'
-                      }`}
-                    >
-                      {webFallbackLoading && (
-                        <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
-                      )}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
             {/* Actions & Filters */}
             <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-4">
               <div className="flex flex-wrap gap-4 items-center">
@@ -1830,6 +1736,152 @@ export default function AdminPage() {
             )}
           </div>
         )}
+
+        {/* Configurations Tab */}
+        {activeTab === 'configurations' && (
+          <div className="space-y-6">
+            {/* Auto-Learning Control */}
+            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
+              autoLearningEnabled
+                ? 'bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border-emerald-500/30'
+                : 'bg-gradient-to-r from-amber-500/10 to-orange-500/10 border-amber-500/30'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`p-3 rounded-xl ${autoLearningEnabled ? 'bg-emerald-500/20' : 'bg-amber-500/20'}`}>
+                    {autoLearningEnabled ? (
+                      <Sparkles className="w-6 h-6 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-6 h-6 text-amber-400" />
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold flex items-center gap-2">
+                      FAQ Auto-Learning
+                      <span className={`px-2 py-0.5 text-xs rounded-full ${autoLearningEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                        {autoLearningEnabled ? 'Active' : 'Paused'}
+                      </span>
+                    </h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      {autoLearningEnabled
+                        ? 'System captures Q&A pairs from chat for FAQ review'
+                        : 'Auto-capture is paused - no new FAQs will be queued'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {autoLearningUpdatedAt && (
+                    <span className="text-xs text-slate-500 hidden md:block">
+                      Last updated: {new Date(autoLearningUpdatedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                  <button
+                    onClick={toggleAutoLearning}
+                    disabled={autoLearningLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      autoLearningEnabled ? 'bg-emerald-500 focus:ring-emerald-500' : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle auto-learning</span>
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${autoLearningEnabled ? 'translate-x-8' : 'translate-x-1'}`}>
+                      {autoLearningLoading && <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Web Fallback Control */}
+            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
+              webFallbackEnabled
+                ? 'bg-gradient-to-r from-indigo-500/10 to-blue-500/10 border-indigo-500/30'
+                : 'bg-gradient-to-r from-slate-500/10 to-slate-600/10 border-slate-500/30'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`p-3 rounded-xl ${webFallbackEnabled ? 'bg-indigo-500/20' : 'bg-slate-500/20'}`}>
+                    <Globe className={`w-6 h-6 ${webFallbackEnabled ? 'text-indigo-400' : 'text-slate-400'}`} />
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold flex items-center gap-2">
+                      Web Search Fallback
+                      <span className={`px-2 py-0.5 text-xs rounded-full ${webFallbackEnabled ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                        {webFallbackEnabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      {webFallbackEnabled
+                        ? 'If RAG has no result for NEET queries, system will try web search as fallback'
+                        : 'System uses RAG-only mode and returns the standard "not in database" message'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {webFallbackUpdatedAt && (
+                    <span className="text-xs text-slate-500 hidden md:block">
+                      Last updated: {new Date(webFallbackUpdatedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                  <button
+                    onClick={toggleWebFallback}
+                    disabled={webFallbackLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      webFallbackEnabled ? 'bg-indigo-500 focus:ring-indigo-500' : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle web fallback</span>
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${webFallbackEnabled ? 'translate-x-8' : 'translate-x-1'}`}>
+                      {webFallbackLoading && <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Cutoff Result Limit */}
+            <div className="rounded-2xl border border-blue-500/30 bg-gradient-to-r from-blue-500/10 to-indigo-500/10 p-4">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-xl bg-blue-500/20">
+                    <Database className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold">Cutoff College Result Limit</h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      Controls how many cutoff rows are returned and shown in student chat.
+                    </p>
+                    {cutoffResultLimitUpdatedAt && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        Last updated: {new Date(cutoffResultLimitUpdatedAt).toLocaleDateString()}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={cutoffResultLimitInput}
+                    onChange={(e) => setCutoffResultLimitInput(e.target.value)}
+                    className="w-28 px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={updateCutoffResultLimit}
+                    disabled={cutoffResultLimitLoading}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {cutoffResultLimitLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    Save
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3">
+                Current active value: <span className="text-slate-300 font-medium">{cutoffResultLimit}</span>
+              </p>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Edit User Modal */}
@@ -1886,7 +1938,7 @@ function StatCard({ title, value, icon: Icon, color, subtitle }: { title: string
 }
 
 function EditUserModal({ user, onClose, onSave, isSuperAdmin }: { user: User; onClose: () => void; onSave: (updates: Partial<User>) => void; isSuperAdmin: boolean; }) {
-  const [form, setForm] = useState({ full_name: user.full_name, email: user.email, phone: user.phone || '', age: user.age?.toString() || '', role: user.role, is_active: user.is_active, is_verified: user.is_verified });
+  const [form, setForm] = useState({ full_name: user.full_name, phone: user.phone || '', age: user.age?.toString() || '', role: user.role, is_active: user.is_active, is_verified: user.is_verified });
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1895,15 +1947,10 @@ function EditUserModal({ user, onClose, onSave, isSuperAdmin }: { user: User; on
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Edit User</h3>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg"><X className="w-4 h-4 text-gray-500 dark:text-slate-400" /></button>
         </div>
-        <form onSubmit={(e) => { e.preventDefault(); onSave({ full_name: form.full_name, email: form.email, phone: form.phone || null, age: form.age ? parseInt(form.age) : null, role: form.role, is_active: form.is_active, is_verified: form.is_verified }); }} className="p-6 space-y-4">
+        <form onSubmit={(e) => { e.preventDefault(); onSave({ full_name: form.full_name, phone: form.phone || null, age: form.age ? parseInt(form.age) : null, role: form.role, is_active: form.is_active, is_verified: form.is_verified }); }} className="p-6 space-y-4">
           <div>
             <label className="block text-sm text-gray-500 dark:text-slate-400 mb-1">Full Name</label>
             <input type="text" value={form.full_name} onChange={(e) => setForm(f => ({ ...f, full_name: e.target.value }))}
-              className="w-full px-4 py-2.5 bg-gray-50 dark:bg-slate-700/50 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-500 dark:text-slate-400 mb-1">Email</label>
-            <input type="email" value={form.email} onChange={(e) => setForm(f => ({ ...f, email: e.target.value }))}
               className="w-full px-4 py-2.5 bg-gray-50 dark:bg-slate-700/50 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
           </div>
           <div className="grid grid-cols-2 gap-4">

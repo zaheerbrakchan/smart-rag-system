@@ -48,3 +48,4 @@ class SettingsKeys:
     AUTO_LEARNING_MIN_CONFIDENCE = "auto_learning_min_confidence"
     FAQ_SCORE_THRESHOLD = "faq_score_threshold"
     WEB_SEARCH_FALLBACK_ENABLED = "web_search_fallback_enabled"
+    CUTOFF_COLLEGE_RESULT_LIMIT = "cutoff_college_result_limit"
