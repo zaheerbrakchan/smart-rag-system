@@ -33,12 +33,7 @@ class User(Base):
     # Primary Key
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     
-    # Authentication fields
-    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    
-    # Profile information
+    # Profile / identity information (OTP-only auth, no username/password/email columns)
     full_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     
@@ -99,7 +94,7 @@ class User(Base):
     )
     
     def __repr__(self) -> str:
-        return f"<User(id={self.id}, username='{self.username}', role={self.role.value})>"
+        return f"<User(id={self.id}, full_name='{self.full_name}', role={self.role.value})>"
     
     @property
     def is_admin(self) -> bool:
@@ -110,8 +105,6 @@ class User(Base):
         """Convert to dictionary (like DTO)"""
         data = {
             "id": self.id,
-            "username": self.username,
-            "email": self.email,
             "full_name": self.full_name,
             "phone": self.phone,
             "role": self.role.value,
@@ -122,8 +115,6 @@ class User(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
         }
-        if include_sensitive:
-            data["password_hash"] = self.password_hash
         return data
 
 

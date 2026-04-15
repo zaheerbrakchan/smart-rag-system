@@ -5,7 +5,7 @@ Data access layer for User entity
 
 from typing import Optional, List
 from datetime import datetime
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.user import User, UserRole
@@ -21,30 +21,6 @@ class UserRepository(BaseRepository[User]):
     def __init__(self, session: AsyncSession):
         super().__init__(User, session)
     
-    async def find_by_username(self, username: str) -> Optional[User]:
-        """Find user by username"""
-        query = select(User).where(User.username == username.lower())
-        result = await self.session.execute(query)
-        return result.scalar_one_or_none()
-    
-    async def find_by_email(self, email: str) -> Optional[User]:
-        """Find user by email"""
-        query = select(User).where(User.email == email.lower())
-        result = await self.session.execute(query)
-        return result.scalar_one_or_none()
-    
-    async def find_by_username_or_email(self, identifier: str) -> Optional[User]:
-        """Find user by username OR email (for login)"""
-        identifier = identifier.lower()
-        query = select(User).where(
-            or_(
-                User.username == identifier,
-                User.email == identifier
-            )
-        )
-        result = await self.session.execute(query)
-        return result.scalar_one_or_none()
-
     async def find_by_normalized_phone(self, phone: str) -> Optional[User]:
         """Find user by phone, comparing E.164-normalized values."""
         from services.otp_service import OTPService
@@ -59,22 +35,6 @@ class UserRepository(BaseRepository[User]):
             except Exception:
                 continue
         return None
-    
-    async def exists_by_username(self, username: str) -> bool:
-        """Check if username exists"""
-        query = select(func.count()).select_from(User).where(
-            User.username == username.lower()
-        )
-        result = await self.session.execute(query)
-        return (result.scalar() or 0) > 0
-    
-    async def exists_by_email(self, email: str) -> bool:
-        """Check if email exists"""
-        query = select(func.count()).select_from(User).where(
-            User.email == email.lower()
-        )
-        result = await self.session.execute(query)
-        return (result.scalar() or 0) > 0
     
     async def find_by_role(
         self, 
@@ -128,16 +88,12 @@ class UserRepository(BaseRepository[User]):
         skip: int = 0,
         limit: int = 100
     ) -> List[User]:
-        """Search users by name, username, or email"""
+        """Search users by name or phone."""
         search = f"%{query_str.lower()}%"
         query = (
             select(User)
             .where(
-                or_(
-                    User.username.ilike(search),
-                    User.email.ilike(search),
-                    User.full_name.ilike(search)
-                )
+                (User.full_name.ilike(search)) | (User.phone.ilike(search))
             )
             .order_by(User.created_at.desc())
             .offset(skip)

@@ -16,6 +16,54 @@ import {
   User, LogOut, ChevronDown, Menu 
 } from 'lucide-react';
 
+type GuidedIntent =
+  | 'neet_exam_guidance'
+  | 'counselling_process'
+  | 'college_shortlist'
+  | 'college_fee_structure';
+
+const STARTER_INTENT_MAP: Record<string, GuidedIntent> = {
+  'NEET exam guidance': 'neet_exam_guidance',
+  'Counselling process': 'counselling_process',
+  'College shortlist': 'college_shortlist',
+  'College fee structure': 'college_fee_structure',
+};
+
+const GUIDED_PROMPTS: Record<GuidedIntent, { message: string }> = {
+  neet_exam_guidance: {
+    message:
+      'Great choice. What would you like to know in NEET exam guidance?',
+  },
+  counselling_process: {
+    message:
+      'Sure — please type the state/UT counselling details you want to know.',
+  },
+  college_shortlist: {
+    message:
+      'To shortlist accurately, please share your NEET rank (or expected rank), category, and preferred state.',
+  },
+  college_fee_structure: {
+    message:
+      'Sure — tell me which state or college fee structure you want, and if possible mention college type.',
+  },
+};
+
+function buildGuidedQuestion(intent: GuidedIntent, userReply: string): string {
+  const detail = userReply.trim();
+  switch (intent) {
+    case 'neet_exam_guidance':
+      return `For NEET UG 2026, explain ${detail} in a clear, student-friendly way.`;
+    case 'counselling_process':
+      return `Explain NEET UG counselling process for ${detail}, including registration steps, key dates, required documents, and round-wise flow.`;
+    case 'college_shortlist':
+      return `Help me with college shortlisting based on this profile: ${detail}. Ask one follow-up only if essential details are missing.`;
+    case 'college_fee_structure':
+      return `Show college fee structure details for this preference: ${detail}. Include what is available in official counselling documents.`;
+    default:
+      return detail;
+  }
+}
+
 export default function Home() {
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading, logout, token } = useAuth();
@@ -26,6 +74,8 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [pendingClarification, setPendingClarification] = useState<{question: string, messageId: string} | null>(null);
+  const [guidedIntent, setGuidedIntent] = useState<GuidedIntent | null>(null);
+  const [allowStarterReplies, setAllowStarterReplies] = useState(true);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
@@ -43,11 +93,33 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async () => {
-    const trimmed = inputValue.trim();
+  const handleSendMessage = async (quickReply?: string) => {
+    const trimmed = (quickReply ?? inputValue).trim();
     const pending = pendingClarification;
 
     if (isLoading) return;
+
+    if (!pending && quickReply && STARTER_INTENT_MAP[quickReply]) {
+      const intent = STARTER_INTENT_MAP[quickReply];
+      const guide = GUIDED_PROMPTS[intent];
+      const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const userMessage: Message = {
+        id: `user-${turnId}`,
+        role: 'user',
+        content: quickReply,
+        timestamp: new Date(),
+      };
+      const assistantMessage: Message = {
+        id: `assistant-${turnId}`,
+        role: 'assistant',
+        content: guide.message,
+        timestamp: new Date(),
+      };
+      setGuidedIntent(intent);
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      setInputValue('');
+      return;
+    }
 
     let question: string;
     let clarifiedScope: string | undefined;
@@ -60,7 +132,7 @@ export default function Home() {
       assistantMessageId = pending.messageId;
 
       const userMessage: Message = {
-        id: Date.now().toString(),
+        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         role: 'user',
         content: trimmed,
         timestamp: new Date(),
@@ -72,22 +144,26 @@ export default function Home() {
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessageId
-            ? { ...msg, content: '', needsClarification: false, clarificationOptions: undefined }
+            ? { ...msg, content: '', needsClarification: false, clarificationOptions: undefined, suggestedReplies: undefined }
             : msg
         )
       );
     } else {
       if (!trimmed) return;
-      question = trimmed;
+      question = guidedIntent ? buildGuidedQuestion(guidedIntent, trimmed) : trimmed;
+      if (guidedIntent) {
+        setGuidedIntent(null);
+      }
       clarifiedScope = undefined;
-      assistantMessageId = (Date.now() + 1).toString();
-
+      // Must never collide: (Date.now()+1) then Date.now() can equal the assistant id if the clock ticks 1ms.
+      const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       const userMessage: Message = {
-        id: Date.now().toString(),
+        id: `user-${turnId}`,
         role: 'user',
         content: trimmed,
         timestamp: new Date(),
       };
+      assistantMessageId = `assistant-${turnId}`;
       const assistantMessage: Message = {
         id: assistantMessageId,
         role: 'assistant',
@@ -167,11 +243,29 @@ export default function Home() {
                     ...msg,
                     content: message,
                     needsClarification: true,
+                    clarificationOptions: _options || [],
+                    suggestedReplies: _options || [],
                     originalQuestion: question,
                   }
                 : msg
             )
           );
+        },
+        // onSuggestedReplies
+        (replies) => {
+          const starterReplies = (replies || []).filter((reply) => Boolean(STARTER_INTENT_MAP[reply]));
+          if (!allowStarterReplies || starterReplies.length === 0) {
+            return;
+          }
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? { ...msg, suggestedReplies: starterReplies }
+                : msg
+            )
+          );
+          setAllowStarterReplies(false);
         },
         // conversationId and userId
         conversationId || undefined,
@@ -194,6 +288,11 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleSuggestedReply = (reply: string) => {
+    if (isLoading) return;
+    void handleSendMessage(reply);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -223,6 +322,8 @@ export default function Home() {
       setMessages(loadedMessages);
       setConversationId(id);
       setPendingClarification(null);
+      setGuidedIntent(null);
+      setAllowStarterReplies(loadedMessages.length === 0);
     } catch (error) {
       console.error('Failed to load conversation:', error);
     } finally {
@@ -235,12 +336,16 @@ export default function Home() {
     setMessages([]);
     setConversationId(null);
     setPendingClarification(null);
+    setGuidedIntent(null);
+    setAllowStarterReplies(true);
     setInputValue('');
   };
 
   const clearChat = () => {
     setMessages([]);
     setPendingClarification(null);
+    setGuidedIntent(null);
+    setAllowStarterReplies(true);
     setConversationId(null);  // Reset conversation for new chat
     setSidebarKey(prev => prev + 1); // Refresh sidebar to show new conversation
   };
@@ -284,9 +389,9 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                Get My University
+                Med Buddy
               </h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">NEET UG 2026 Assistant</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
             </div>
           </div>
 
@@ -350,10 +455,6 @@ export default function Home() {
                         <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-slate-800 rounded-xl shadow-lg border border-gray-100 dark:border-slate-700 py-2 z-50">
                           <div className="px-4 py-3 border-b border-gray-100 dark:border-slate-700">
                             <p className="text-sm font-medium text-gray-800 dark:text-white">{user?.full_name}</p>
-                            <p className="text-xs text-gray-500 dark:text-gray-400">{user?.email}</p>
-                            <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-full capitalize">
-                              {user?.role}
-                            </span>
                           </div>
                           <Link
                             href="/profile"
@@ -415,10 +516,10 @@ export default function Home() {
             </div>
             
             <h2 className="text-3xl md:text-4xl font-bold text-gray-800 dark:text-white mb-3">
-              NEET UG 2026 <span className="bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">AI Assistant</span>
+              NEET UG 2026 <span className="bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Med Buddy</span>
             </h2>
             <p className="text-gray-600 dark:text-gray-300 max-w-xl mb-4 text-lg">
-              Your trusted companion for all NEET UG 2026 queries. Get instant, accurate answers from the official NTA Information Bulletin.
+              India&apos;s counselling companion for NEET UG aspirants. Get structured, reliable guidance on college shortlist, fee structures, NEET exam process, and counselling roadmap.
             </p>
             
             {/* Trust Badges */}
@@ -440,40 +541,40 @@ export default function Home() {
             {/* Quick Questions */}
             <div className="w-full max-w-3xl">
               <p className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                Popular Questions
+                Start With
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <QuickQuestion
-                  icon={<HelpCircle className="w-5 h-5" />}
-                  onClick={() => setInputValue('What is the eligibility criteria for NEET UG 2026?')}
-                >
-                  What is the eligibility criteria for NEET UG 2026?
-                </QuickQuestion>
-                <QuickQuestion
                   icon={<Calendar className="w-5 h-5" />}
-                  onClick={() => setInputValue('What are the important dates for NEET UG 2026?')}
+                  onClick={() => void handleSendMessage('NEET exam guidance')}
                 >
-                  What are the important dates for NEET UG 2026?
-                </QuickQuestion>
-                <QuickQuestion
-                  icon={<FileCheck className="w-5 h-5" />}
-                  onClick={() => setInputValue('What documents are required for NEET registration?')}
-                >
-                  What documents are required for registration?
+                  NEET exam guidance
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<BookOpen className="w-5 h-5" />}
-                  onClick={() => setInputValue('What is the NEET fee for Jammu and Kashmir NEET counselling 2025?')}
+                  onClick={() => void handleSendMessage('Counselling process')}
                 >
-                  What is the NEET fee for J&K counselling 2025?
+                  Counselling process
+                </QuickQuestion>
+                <QuickQuestion
+                  icon={<HelpCircle className="w-5 h-5" />}
+                  onClick={() => void handleSendMessage('College shortlist')}
+                >
+                  College shortlist
+                </QuickQuestion>
+                <QuickQuestion
+                  icon={<FileCheck className="w-5 h-5" />}
+                  onClick={() => void handleSendMessage('College fee structure')}
+                >
+                  College fee structure
                 </QuickQuestion>
               </div>
             </div>
 
             {/* Disclaimer */}
             <p className="text-xs text-gray-400 dark:text-gray-500 mt-8 max-w-lg">
-              Answers are generated from the official NEET UG 2026 Information Bulletin by NTA. 
-              Always verify critical information from the official NTA website.
+              Med Buddy is powered by Get My University. Guidance is based on available counselling documents and official sources.
+              Always verify final admission decisions with MCC/state counselling authorities and college websites.
             </p>
           </div>
         ) : (
@@ -481,6 +582,7 @@ export default function Home() {
             messages={messages}
             isLoading={isLoading}
             messagesEndRef={messagesEndRef}
+            onSuggestedReply={handleSuggestedReply}
           />
         )}
       </div>

@@ -1,11 +1,10 @@
 """
 Authentication Service
-Handles password hashing and JWT token management
+Handles JWT token management
 Similar to Spring Security's AuthenticationService
 """
 
 import os
-import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
@@ -18,23 +17,6 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-key-change-in-pr
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return bcrypt.checkpw(
-        plain_password.encode('utf-8'), 
-        hashed_password.encode('utf-8')
-    )
-
-
-def get_password_hash(password: str) -> str:
-    """Hash a password"""
-    # Truncate to 72 bytes (bcrypt limit)
-    password_bytes = password.encode('utf-8')[:72]
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
-
 
 class AuthService:
     """
@@ -51,7 +33,7 @@ class AuthService:
         Create a JWT access token
         
         Args:
-            data: Payload data (typically user_id, username, role)
+            data: Payload data (typically user_id and role)
             expires_delta: Optional custom expiration time
             
         Returns:
@@ -103,7 +85,7 @@ class AuthService:
         return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     
     @staticmethod
-    def create_token_pair(user_id: int, username: str, role: str) -> Dict[str, Any]:
+    def create_token_pair(user_id: int, role: str) -> Dict[str, Any]:
         """
         Create both access and refresh tokens
         
@@ -112,7 +94,6 @@ class AuthService:
         """
         access_token_data = {
             "sub": str(user_id),
-            "username": username,
             "role": role
         }
         refresh_token_data = {

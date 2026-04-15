@@ -12,14 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from database.connection import get_db
 from models.user import User, UserRole
 from models.indexed_document import IndexedDocument
 from models.activity_log import ActionType
 from repositories.user_repository import UserRepository
 from repositories.activity_log_repository import ActivityLogRepository
-from services.auth_service import get_password_hash
 from dependencies.auth import get_current_admin
 from services.vector_store_factory import count_vectors_sync
 from services.pdf_extraction import extract_text_from_pdf
@@ -67,8 +66,6 @@ def get_cached_pinecone_vector_count(use_background_refresh: bool = True):
 
 class UserListResponse(BaseModel):
     id: int
-    username: str
-    email: str
     full_name: str
     phone: Optional[str]
     age: Optional[int]
@@ -85,7 +82,6 @@ class UserListResponse(BaseModel):
 
 class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
     phone: Optional[str] = None
     age: Optional[int] = Field(None, ge=10, le=100)
     role: Optional[str] = None
@@ -106,8 +102,6 @@ def _to_user_list_response(u: User) -> UserListResponse:
     """Map User ORM object to response, tolerating removed legacy columns."""
     return UserListResponse(
         id=u.id,
-        username=u.username,
-        email=u.email,
         full_name=u.full_name,
         phone=getattr(u, "phone", None),
         age=getattr(u, "age", None),
@@ -376,8 +370,6 @@ async def list_users(
     # Apply filters
     if search:
         search_filter = or_(
-            User.username.ilike(f"%{search}%"),
-            User.email.ilike(f"%{search}%"),
             User.full_name.ilike(f"%{search}%"),
             User.phone.ilike(f"%{search}%")
         )
@@ -451,14 +443,6 @@ async def update_user(
     # Update fields if provided
     if request.full_name is not None:
         user.full_name = request.full_name
-    if request.email is not None:
-        # Check if email is already taken
-        existing = await db.scalar(
-            select(User).where(User.email == request.email.lower(), User.id != user_id)
-        )
-        if existing:
-            raise HTTPException(status_code=409, detail="Email already in use")
-        user.email = request.email.lower()
     if request.phone is not None:
         user.phone = request.phone
     if request.age is not None and hasattr(user, "age"):
@@ -518,7 +502,7 @@ async def delete_user(
     user.is_active = False
     await db.commit()
     
-    return {"success": True, "message": f"User {user.username} has been deactivated"}
+    return {"success": True, "message": f"User {user.full_name} has been deactivated"}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -527,23 +511,11 @@ async def reset_user_password(
     db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(get_current_admin)
 ):
-    """Reset a user's password to a temporary one"""
-    import secrets
-    
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Generate temporary password
-    temp_password = secrets.token_urlsafe(12)
-    user.password_hash = get_password_hash(temp_password)
-    await db.commit()
-    
-    return {
-        "success": True,
-        "message": f"Password reset for {user.username}",
-        "temporary_password": temp_password
-    }
+    """Password reset removed in OTP-only mode."""
+    raise HTTPException(
+        status_code=410,
+        detail="Password reset endpoint is disabled in OTP-only authentication mode.",
+    )
 
 
 # ============== DOCUMENT MANAGEMENT ROUTES ==============

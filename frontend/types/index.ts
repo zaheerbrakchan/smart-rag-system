@@ -7,8 +7,6 @@ export type UserRole = 'student' | 'admin' | 'super_admin';
 // User type
 export interface User {
   id: number;
-  username: string;
-  email: string;
   full_name: string;
   phone: string | null;
   role: UserRole;
@@ -52,6 +50,7 @@ export interface Message {
   isError?: boolean;
   needsClarification?: boolean;
   clarificationOptions?: string[];
+  suggestedReplies?: string[];
   originalQuestion?: string;
 }
 

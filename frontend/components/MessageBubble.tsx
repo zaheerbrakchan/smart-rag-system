@@ -14,6 +14,7 @@ import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, Che
 
 interface MessageBubbleProps {
   message: Message;
+  onSuggestedReply: (reply: string) => void;
 }
 
 /** True when the model likely refused or said it could not answer (avoid "Verified" in that case). */
@@ -25,7 +26,76 @@ function normalizeMarkdownForRender(content: string): string {
   s = s.replace(/([^\n#])(#{1,6}\s)/g, '$1\n\n$2');
   // "1." "2." after a sentence on the same line
   s = s.replace(/([.!?])\s+(\d{1,2}\.\s)/g, '$1\n\n$2');
+  // Drop accidental standalone pipe lines that break GFM table parsing.
+  s = s.replace(/^\|\s*$/gm, '');
+  // Ensure table header starts on a clean line.
+  s = s.replace(/([^\n])\n(\|[^\n]+\|\n\|[-:| ]+\|)/g, '$1\n\n$2');
   return s;
+}
+
+function hasMarkdownTable(content: string): boolean {
+  return /\|[^\n]+\|\s*\n\|[\-:\s|]+\|/m.test(content);
+}
+
+type ParsedCutoffTable = {
+  rows: Array<{
+    idx: string;
+    institution: string;
+    state: string;
+    category: string;
+    quota: string;
+    domicile: string;
+    air: string;
+    score: string;
+    round: string;
+  }>;
+  contentWithoutTable: string;
+};
+
+function parseCutoffTable(content: string): ParsedCutoffTable | null {
+  const start = content.indexOf('| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |');
+  if (start < 0) return null;
+
+  let end = content.length;
+  const disclaimerIdx = content.indexOf('\n> Disclaimer', start);
+  const ctaIdx = content.indexOf('\nWould you like', start);
+  if (disclaimerIdx >= 0) end = Math.min(end, disclaimerIdx);
+  if (ctaIdx >= 0) end = Math.min(end, ctaIdx);
+
+  const tableBlock = content.slice(start, end);
+  const firstRowMatch = tableBlock.match(/\|\s*\d+\s*\|/);
+  if (!firstRowMatch || firstRowMatch.index === undefined) return null;
+
+  const rowsArea = tableBlock.slice(firstRowMatch.index);
+  const tokens = rowsArea
+    .split('|')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+
+  const rows: ParsedCutoffTable['rows'] = [];
+  for (let i = 0; i < tokens.length; ) {
+    if (!/^\d+$/.test(tokens[i])) {
+      i += 1;
+      continue;
+    }
+    if (i + 8 >= tokens.length) break;
+    rows.push({
+      idx: tokens[i],
+      institution: tokens[i + 1],
+      state: tokens[i + 2],
+      category: tokens[i + 3],
+      quota: tokens[i + 4],
+      domicile: tokens[i + 5],
+      air: tokens[i + 6],
+      score: tokens[i + 7],
+      round: tokens[i + 8],
+    });
+    i += 9;
+  }
+
+  if (rows.length === 0) return null;
+  const contentWithoutTable = `${content.slice(0, start)}${content.slice(end)}`.trim();
+  return { rows, contentWithoutTable };
 }
 
 function isLikelyRefusalOrNoInfo(content: string): boolean {
@@ -38,9 +108,13 @@ function isLikelyRefusalOrNoInfo(content: string): boolean {
   return false;
 }
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+export default function MessageBubble({ message, onSuggestedReply }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
   const isUser = message.role === 'user';
+  const parsedCutoffTable = parseCutoffTable(message.content || '');
+  const contentForMarkdown = parsedCutoffTable ? parsedCutoffTable.contentWithoutTable : (message.content || '');
+  const normalizedContent = normalizeMarkdownForRender(contentForMarkdown);
+  const containsTable = hasMarkdownTable(normalizedContent);
 
   // Don't render empty assistant messages (they're being streamed)
   if (!isUser && (!message.content || message.content.trim() === '') && !message.needsClarification) {
@@ -72,7 +146,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
       <div className={`flex-1 max-w-[85%] ${isUser ? 'text-right' : ''}`}>
         {/* Role label */}
         <p className={`text-xs font-semibold mb-1.5 ${isUser ? 'text-gray-500 dark:text-gray-400' : 'text-blue-600 dark:text-blue-400'}`}>
-          {isUser ? 'You' : 'NEET Assistant'}
+          {isUser ? 'You' : 'Med Buddy'}
         </p>
         
         <div
@@ -89,11 +163,67 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           ) : (
             <div className="assistant-markdown prose prose-sm max-w-none prose-headings:text-gray-800 dark:prose-headings:text-white prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-li:text-gray-700 dark:prose-li:text-gray-300 prose-strong:text-gray-800 dark:prose-strong:text-white">
               <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkBreaks]}
+                remarkPlugins={containsTable ? [remarkGfm] : [remarkGfm, remarkBreaks]}
                 urlTransform={(url) => url}
+                components={{
+                  table: ({ children }) => (
+                    <div className="my-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-600">
+                      <table className="min-w-full border-collapse text-sm">{children}</table>
+                    </div>
+                  ),
+                  thead: ({ children }) => (
+                    <thead className="bg-slate-100 dark:bg-slate-700">{children}</thead>
+                  ),
+                  tbody: ({ children }) => (
+                    <tbody className="bg-white dark:bg-slate-800">{children}</tbody>
+                  ),
+                  tr: ({ children }) => (
+                    <tr className="border-b border-slate-200 dark:border-slate-600">{children}</tr>
+                  ),
+                  th: ({ children }) => (
+                    <th className="px-3 py-2 text-left font-semibold text-slate-800 dark:text-slate-100">
+                      {children}
+                    </th>
+                  ),
+                  td: ({ children }) => (
+                    <td className="px-3 py-2 text-slate-700 dark:text-slate-200 align-top">
+                      {children}
+                    </td>
+                  ),
+                }}
               >
-                {normalizeMarkdownForRender(message.content)}
+                {normalizedContent}
               </ReactMarkdown>
+
+              {parsedCutoffTable && (
+                <div className="my-4 overflow-x-auto rounded-xl border border-slate-600 bg-slate-900/80">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead className="bg-slate-800">
+                      <tr className="border-b border-slate-600">
+                        {['Institution Name', 'State', 'Category', 'Quota', 'Eligibility', 'AIR', 'Score', 'Round'].map((h) => (
+                          <th key={h} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {parsedCutoffTable.rows.map((row) => (
+                        <tr key={`${row.idx}-${row.institution}`} className="border-b border-slate-700">
+                          <td className="px-3 py-2 text-slate-100 font-medium">{row.institution}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.state}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.category}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.quota}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.domicile}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.air}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.score}</td>
+                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.round}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -140,6 +270,21 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Suggested replies (guided chips) */}
+        {!isUser && message.suggestedReplies && message.suggestedReplies.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {message.suggestedReplies.slice(0, 6).map((reply, idx) => (
+              <button
+                key={`${reply}-${idx}`}
+                onClick={() => onSuggestedReply(reply)}
+                className="px-3 py-1.5 rounded-full border border-blue-200 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-800/40 transition-colors"
+              >
+                {reply}
+              </button>
+            ))}
           </div>
         )}
 

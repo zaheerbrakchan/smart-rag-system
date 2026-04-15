@@ -9,22 +9,20 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (phone: string, verificationToken: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => void;
-  sendOtp: (phone: string) => Promise<{ success: boolean; message: string; otp?: string }>;
-  verifyOtp: (phone: string, otp: string) => Promise<{ success: boolean; message: string; verification_token?: string }>;
+  sendOtp: (phone: string, purpose?: 'registration' | 'login' | 'password_reset') => Promise<{ success: boolean; message: string; otp?: string }>;
+  verifyOtp: (phone: string, otp: string, purpose?: 'registration' | 'login' | 'password_reset') => Promise<{ success: boolean; message: string; verification_token?: string }>;
 }
 
 interface RegisterData {
-  username: string;
-  email: string;
-  password: string;
   full_name: string;
   phone: string;
   verification_token: string;
-  preferred_state?: string;
-  category?: string;
+  email?: string;
+  state_or_ut?: string;
+  city?: string;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -88,8 +86,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     loadUser();
   }, []);
 
-  const login = async (username: string, password: string) => {
-    const response = await authApi.login(username, password);
+  const login = async (phone: string, verificationToken: string) => {
+    const response = await authApi.login(phone, verificationToken);
     
     // Store tokens and user
     localStorage.setItem(TOKEN_KEY, JSON.stringify({
@@ -131,12 +129,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null);
   };
 
-  const sendOtp = async (phone: string) => {
-    return await authApi.sendOtp(phone);
+  const sendOtp = async (phone: string, purpose: 'registration' | 'login' | 'password_reset' = 'registration') => {
+    return await authApi.sendOtp(phone, purpose);
   };
 
-  const verifyOtp = async (phone: string, otp: string) => {
-    return await authApi.verifyOtp(phone, otp);
+  const verifyOtp = async (phone: string, otp: string, purpose: 'registration' | 'login' | 'password_reset' = 'registration') => {
+    return await authApi.verifyOtp(phone, otp, purpose);
   };
 
   return (

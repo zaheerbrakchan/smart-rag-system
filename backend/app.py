@@ -5,6 +5,7 @@ Production RAG with Admin Document Management & Smart Query Routing
 
 import os
 import re
+import time
 import json
 import shutil
 import uuid
@@ -29,6 +30,89 @@ uvicorn_logger = logging.getLogger("uvicorn.error")
 def log(msg):
     """Log using uvicorn's logger"""
     uvicorn_logger.info(msg)
+
+
+def _v2_timing_log_enabled() -> bool:
+    """Per-request phase timings for /chat/v2/stream (disable with V2_TIMING_LOG=false)."""
+    return os.getenv("V2_TIMING_LOG", "true").lower() in ("1", "true", "yes")
+
+
+def _elapsed_ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000.0
+
+
+async def v2_background_save_conversation_turn(
+    conversation_id: int,
+    question: str,
+    assistant_content: str,
+    response_time_ms: int,
+    *,
+    sources: Optional[List[Dict]] = None,
+    was_faq_match: bool = False,
+    faq_confidence: Optional[float] = None,
+) -> None:
+    """
+    Persist user + assistant messages after the client has received `done` (SSE).
+    Does not block stream completion; errors are logged only.
+    """
+    from database.connection import async_session_maker
+    from services.conversation_memory import save_message_to_db
+
+    t_save = time.perf_counter()
+    try:
+        async with async_session_maker() as conv_db:
+            await save_message_to_db(conv_db, conversation_id, "user", question)
+            await save_message_to_db(
+                conv_db,
+                conversation_id,
+                "assistant",
+                assistant_content,
+                sources=sources,
+                was_faq_match=was_faq_match,
+                faq_confidence=faq_confidence,
+                response_time_ms=response_time_ms,
+            )
+        log(
+            f"[V2] 💾 Background save completed conv={conversation_id} "
+            f"({_elapsed_ms(t_save):.0f}ms)"
+        )
+    except Exception as e:
+        log(f"[V2] ⚠️ Background save failed conv={conversation_id}: {e}")
+
+
+async def v2_background_update_conversation_context(
+    conversation_id: int,
+    medbuddy_context: Dict[str, object],
+) -> None:
+    """Persist Med Buddy lightweight conversation orchestration state."""
+    from database.connection import async_session_maker
+
+    try:
+        async with async_session_maker() as db:
+            convo = await db.get(Conversation, conversation_id)
+            if not convo:
+                return
+            context_data = dict(convo.context_data or {})
+            context_data["medbuddy"] = medbuddy_context
+            convo.context_data = context_data
+            await db.commit()
+    except Exception as err:
+        log(f"[V2] ⚠️ Context update failed conv={conversation_id}: {err}")
+
+
+async def _v2_conversation_needs_title(conversation_id: int) -> bool:
+    """Return True when conversation title is empty and should be generated."""
+    from database.connection import async_session_maker
+    try:
+        async with async_session_maker() as db:
+            convo = await db.get(Conversation, conversation_id)
+            if not convo:
+                return False
+            title = (convo.title or "").strip()
+            return not title
+    except Exception as err:
+        log(f"[V2] ⚠️ Could not check title state conv={conversation_id}: {err}")
+        return False
 
 
 def sse_tokens_preserving_formatting(text: str):
@@ -56,6 +140,624 @@ def clarification_followup_message(user_state: Optional[str]) -> str:
             f"\n\nIf you want information for the state on your profile (**{user_state}**), you can say that in your message too."
         )
     return text
+
+
+MEDBUDDY_DEFAULT_REPLIES = [
+    "NEET exam guidance",
+    "Counselling process",
+    "College shortlist",
+    "College fee structure",
+]
+
+MEDBUDDY_CAPS = {
+    "cutoff": True,
+    "mbbs_abroad": os.getenv("MEDBUDDY_ENABLE_MBBS_ABROAD", "false").lower() in ("1", "true", "yes"),
+}
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _contains_any(text: str, phrases: List[str]) -> bool:
+    return any(p in text for p in phrases)
+
+
+def _is_greeting_only(question: str) -> bool:
+    q = _normalize_text(question)
+    greeting_words = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hii"}
+    return q in greeting_words
+
+
+def _is_session_close_intent(question: str) -> bool:
+    q = _normalize_text(question)
+    return _contains_any(
+        q,
+        ["bye", "goodbye", "thanks i am done", "i am done", "that's all", "thats all", "see you"],
+    )
+
+
+def _is_broad_discovery_query(question: str) -> bool:
+    q = _normalize_text(question)
+    return _contains_any(
+        q,
+        [
+            "help me",
+            "start",
+            "where should i apply",
+            "which college",
+            "college list",
+            "shortlist",
+            "suggest",
+            "what should i do",
+            "guide me",
+        ],
+    )
+
+
+def _ensure_medbuddy_context(raw_context_data: Optional[Dict[str, object]]) -> Dict[str, object]:
+    data = dict(raw_context_data or {})
+    med = dict(data.get("medbuddy") or {})
+    med.setdefault("stage", "normal_qa")
+    med.setdefault("onboarding", {})
+    med.setdefault("last_topic", None)
+    med.setdefault("last_state", None)
+    med.setdefault("last_activity_at", datetime.utcnow().isoformat())
+    return med
+
+
+def _extract_onboarding_updates(question: str) -> Dict[str, str]:
+    q = _normalize_text(question)
+    updates: Dict[str, str] = {}
+
+    if re.search(r"\b\d{2,7}\b", q) or any(k in q for k in ["rank", "score", "marks", "expected rank"]):
+        updates["rank_or_score"] = "provided"
+
+    if any(x in q for x in ["general", "obc", "sc", "st", "ews", "pwd", "pwbd"]):
+        if "obc" in q:
+            updates["category"] = "OBC"
+        elif "sc" in q:
+            updates["category"] = "SC"
+        elif "st" in q:
+            updates["category"] = "ST"
+        elif "ews" in q:
+            updates["category"] = "EWS"
+        elif "pwd" in q or "pwbd" in q:
+            updates["category"] = "PwD"
+        else:
+            updates["category"] = "General"
+
+    if any(x in q for x in ["all india", "aiq", "mcc"]):
+        updates["preference"] = "all_india"
+    elif "home state" in q or "my state" in q:
+        updates["preference"] = "home_state_only"
+    elif "government" in q:
+        updates["preference"] = "government_only"
+    elif "all types" in q or "private" in q or "deemed" in q:
+        updates["preference"] = "all_types"
+
+    if any(x in q for x in ["mbbs abroad", "abroad", "outside india", "yes show abroad"]):
+        updates["abroad_interest"] = "yes"
+    elif any(x in q for x in ["no india only", "india only", "no abroad"]):
+        updates["abroad_interest"] = "no"
+    return updates
+
+
+def _next_onboarding_prompt(med_ctx: Dict[str, object], question: str) -> Optional[Dict[str, object]]:
+    onboarding = dict(med_ctx.get("onboarding") or {})
+    q = _normalize_text(question)
+
+    # Collect rank/category only when user is explicitly asking for
+    # shortlist/cutoff-style guidance.
+    needs_rank_context = any(
+        k in q for k in ["shortlist", "cutoff", "cut off", "college list", "which college", "compare colleges"]
+    )
+
+    if not (_is_broad_discovery_query(question) or needs_rank_context):
+        return None
+
+    if needs_rank_context and not onboarding.get("rank_or_score"):
+        return {
+            "message": (
+                "To guide you accurately for shortlist/cutoff planning, please share your "
+                "NEET rank (or expected rank/score)."
+            ),
+            "replies": [],
+            "stage": "guided_onboarding",
+        }
+
+    if not onboarding.get("category"):
+        return {
+            "message": (
+                "Great to start with! To guide you better, which NEET category should I use?\n\n"
+                "You can pick one option below."
+            ),
+            "replies": ["General", "OBC", "SC", "ST", "EWS", "PwD"],
+            "stage": "guided_onboarding",
+        }
+
+    if not onboarding.get("preference"):
+        return {
+            "message": (
+                "Got it. Do you want me to explore colleges across All India, "
+                "focus on your home state, or only government colleges?"
+            ),
+            "replies": ["All India", "Home state only", "Government only", "All types"],
+            "stage": "guided_onboarding",
+        }
+
+    if MEDBUDDY_CAPS["mbbs_abroad"] and not onboarding.get("abroad_interest"):
+        return {
+            "message": "Would you also like me to include MBBS abroad options?",
+            "replies": ["Yes, show abroad options", "No, India only for now"],
+            "stage": "guided_onboarding",
+        }
+    return None
+
+
+def _first_visit_welcome_message() -> str:
+    return (
+        "I am **Med Buddy**, India’s first AI counselling companion built exclusively for NEET UG aspirants, "
+        "proudly powered by **Get My University**.\n\n"
+        "Whether you are trying to figure out which medical/dental colleges match your score, understand "
+        "last year’s cutoffs, decode fee structures, plan counselling process, or check NEET exam details, "
+        "you have support at every step.\n\n"
+        "Tell me what you want to explore first."
+    )
+
+
+def _return_visit_welcome_message() -> str:
+    return (
+        "Welcome back! Great to see you again.\n\n"
+        "Ready to continue your NEET UG counselling journey? "
+        "Pick a direction below or ask your next question."
+    )
+
+
+def _build_session_close_message(med_ctx: Dict[str, object]) -> str:
+    topic = med_ctx.get("last_topic") or "your NEET counselling queries"
+    state = med_ctx.get("last_state")
+    state_line = f"\n- Focus state/scope: **{state}**" if state else ""
+    return (
+        "This was a solid session.\n\n"
+        "Here is a quick recap:\n"
+        f"- Last focus area: **{topic}**"
+        f"{state_line}\n\n"
+        "Your progress is saved. Come back anytime and we can continue from here.\n\n"
+        "_Med Buddy, powered by Get My University_"
+    )
+
+
+def _infer_topic_label(question: str) -> str:
+    q = _normalize_text(question)
+    if any(k in q for k in ["fee", "fees", "tuition", "cost"]):
+        return "Fee structure"
+    if any(k in q for k in ["cutoff", "rank", "score"]):
+        return "Cutoff analysis"
+    if any(k in q for k in ["counselling", "counseling", "round", "mcc"]):
+        return "Counselling process"
+    if any(k in q for k in ["college", "shortlist", "which college"]):
+        return "College shortlist"
+    return "NEET counselling guidance"
+
+
+def _extract_entity_hint(question: str) -> Optional[str]:
+    """
+    Try to extract a specific college/entity phrase from the user question.
+    Used to avoid false 'sufficient' decisions for entity-specific fee queries.
+    """
+    q = _normalize_text(question)
+    patterns = [
+        r"(gmc\s+[a-z&\-\s]{2,40})",
+        r"(government medical college\s+[a-z&\-\s]{2,40})",
+        r"(aiims\s+[a-z&\-\s]{2,40})",
+        r"(amu\s+[a-z&\-\s]{2,40})",
+        r"(jipmer\s+[a-z&\-\s]{2,40})",
+        r"(kgmu\s+[a-z&\-\s]{2,40})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, q)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _apply_response_policy(answer: str, question: str) -> str:
+    text = (answer or "").strip()
+    if not text:
+        return text
+    q = _normalize_text(question)
+    factual = any(k in q for k in ["fee", "cutoff", "rank", "date", "reservation", "seat"])
+    has_disclaimer = "always verify" in text.lower() or "official website" in text.lower()
+    if factual and not has_disclaimer:
+        text += (
+            "\n\n> Disclaimer: Information is based on available counselling documents. "
+            "Always verify the latest updates on official MCC/state counselling websites before taking admission decisions."
+        )
+    if factual and "would you like" not in text.lower():
+        text += "\n\nWould you like me to also compare this with another state/college for you?"
+    return text
+
+
+def _has_structured_data_signals(text: str) -> bool:
+    t = _normalize_text(text)
+    return any(
+        k in t
+        for k in [
+            "fee", "tuition", "cost", "₹",
+            "cutoff", "cut off", "rank", "score", "percentile",
+            "seat", "quota", "reservation",
+            "round", "counselling", "date", "schedule",
+        ]
+    )
+
+
+def _is_entity_specific_query(question: str) -> bool:
+    q = _normalize_text(question)
+    if _extract_entity_hint(question):
+        return True
+    # Fallback pattern for "<college/entity> <metric>" type asks
+    return bool(
+        re.search(
+            r"\b([a-z]{3,}\s+[a-z]{2,}(?:\s+[a-z]{2,}){0,4})\b.*\b(fee|cutoff|rank|seat|reservation|date|schedule)\b",
+            q,
+        )
+    )
+
+
+def _looks_like_neet_factual_query(question: str) -> bool:
+    q = _normalize_text(question)
+    return any(
+        k in q
+        for k in [
+            "neet",
+            "syllabus",
+            "exam pattern",
+            "eligibility",
+            "admit card",
+            "result",
+            "counselling",
+            "college",
+            "fee",
+            "cutoff",
+            "rank",
+            "reservation",
+            "seat matrix",
+            "documents",
+        ]
+    )
+
+
+def _is_cutoff_intent(question: str) -> bool:
+    q = _normalize_text(question)
+    return any(
+        k in q
+        for k in [
+            "cutoff",
+            "cut off",
+            "cut-off",
+            "which college can i get",
+            "which colleges can i get",
+            "college can i get",
+            "expected college",
+            "expected colleges",
+            "based on my rank",
+            "based on my score",
+            "college prediction",
+            "shortlist",
+        ]
+    )
+
+
+def _extract_json_object(raw_text: str) -> Optional[Dict[str, object]]:
+    raw = (raw_text or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if not m:
+            return None
+        try:
+            parsed = json.loads(m.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+
+def _llm_should_route_cutoff_sql(question: str, med_ctx: Dict[str, object]) -> Optional[bool]:
+    """
+    LLM-first routing decision for cutoff SQL path.
+    Returns True/False when model gives a valid decision, otherwise None.
+    """
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+        prompt = f"""You are a routing classifier for a NEET UG assistant.
+
+Decide if this user message should be routed to SQL cutoff prediction table (`neet_ug_2025_cutoffs`) instead of document RAG.
+
+Route to SQL cutoff when intent is college prediction/shortlisting based on rank or score, including follow-up profile payloads that provide score/rank/category/state.
+Do NOT route to SQL for general counselling process, exam guidance, fee structure, documents, dates, or reservation policy info.
+
+Conversation last topic: {med_ctx.get("last_topic") or "unknown"}
+Cutoff context already present: {bool(cutoff_ctx)}
+Cutoff context keys: {list(cutoff_ctx.keys())}
+User message: "{question}"
+
+Critical continuation rule:
+- If recent conversation is already in cutoff shortlisting flow and current user message is a short follow-up
+  (state name, category, rank/score value, yes/no, refinement detail), keep routing to SQL cutoff.
+- Only route away from SQL cutoff if user clearly changes topic to fees/process/docs/exam/general info.
+
+Respond ONLY JSON:
+{{
+  "route_to_cutoff_sql": true or false,
+  "reason": "short reason"
+}}
+"""
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        data = _extract_json_object(text)
+        if not data or "route_to_cutoff_sql" not in data:
+            log(f"[V2] ⚠️ Cutoff route classifier parse failed: {text[:200]}")
+            return None
+        decision = bool(data.get("route_to_cutoff_sql"))
+        log(f"[V2] 🧭 Cutoff route classifier: {decision} | reason={data.get('reason', '')}")
+        return decision
+    except Exception as e:
+        log(f"[V2] ⚠️ Cutoff route classifier error: {e}")
+        return None
+
+
+def _looks_like_non_cutoff_topic_shift(question: str) -> bool:
+    q = _normalize_text(question)
+    return any(
+        k in q
+        for k in [
+            "fee",
+            "fees",
+            "tuition",
+            "counselling process",
+            "counseling process",
+            "documents",
+            "eligibility",
+            "exam date",
+            "syllabus",
+            "reservation policy",
+        ]
+    )
+
+
+def _should_continue_cutoff_from_context(question: str, cutoff_ctx: Dict[str, object]) -> bool:
+    if not cutoff_ctx:
+        return False
+    if _looks_like_non_cutoff_topic_shift(question):
+        return False
+    if cutoff_ctx.get("awaiting_refinement_choice") or cutoff_ctx.get("awaiting_refinement_details"):
+        return True
+    if _missing_cutoff_fields(cutoff_ctx):
+        return True
+
+    q = _normalize_text(question)
+    metric_type, metric_value = _extract_metric_from_text(question)
+    has_state = len(_extract_states_from_text(question)) > 0
+    has_category = _extract_category(question) is not None
+    short_ack = q in {"yes", "yes please", "yup", "sure", "ok", "okay"}
+    # Very short inputs in an active cutoff thread are usually continuation tokens.
+    if short_ack or has_state or has_category or (metric_type is not None and metric_value is not None):
+        return True
+    return False
+
+
+def _looks_like_cutoff_profile_payload(question: str) -> bool:
+    q = _normalize_text(question)
+    metric_type, metric_value = _extract_metric_from_text(question)
+    has_metric = metric_type is not None and metric_value is not None
+    has_category = _extract_category(question) is not None
+    has_state = len(_extract_states_from_text(question)) > 0 or any(
+        k in q for k in ["preferred state", "preffered state", "home state", "domicile"]
+    )
+    return has_metric and has_category and has_state
+
+
+def _extract_metric_from_text(question: str) -> Tuple[Optional[str], Optional[int]]:
+    q = _normalize_text(question)
+    num_match = re.search(r"\b(\d{2,7})\b", q)
+    if not num_match:
+        return None, None
+    value = int(num_match.group(1))
+
+    if any(k in q for k in ["score", "marks", "mark"]):
+        return "score", value
+    if any(k in q for k in ["air", "rank", "all india rank"]):
+        return "rank", value
+
+    # Fallback inference by range
+    if value <= 720:
+        return "score", value
+    return "rank", value
+
+
+def _extract_states_from_text(question: str) -> List[str]:
+    q = _normalize_text(question)
+    # Avoid false state extraction from phrases like "follow-up".
+    q = q.replace("follow-up", "followup").replace("follow up", "followup")
+    states: List[str] = []
+    seen = set()
+    for alias, canonical in STATES.items():
+        if canonical == "All-India":
+            continue
+        # Ignore 2-letter aliases here; they create too many false positives
+        # in free text ("up" in "follow-up", etc.). Full names still work.
+        if len(alias) <= 2:
+            continue
+        if re.search(rf"\b{re.escape(alias)}\b", q):
+            if canonical not in seen:
+                seen.add(canonical)
+                states.append(canonical)
+    return states
+
+
+def _extract_home_state(question: str) -> Optional[str]:
+    q = _normalize_text(question)
+    m = re.search(r"(?:i am from|i'm from|my home state is|from)\s+([a-z\s&]+)", q)
+    if m:
+        phrase = m.group(1).strip()
+        for alias, canonical in STATES.items():
+            if canonical == "All-India":
+                continue
+            if re.search(rf"\b{re.escape(alias)}\b", phrase):
+                return canonical
+    return None
+
+
+def _canonicalize_state_name(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    s = _normalize_text(str(raw))
+    if s in STATES:
+        val = STATES[s]
+        return None if val == "All-India" else val
+    for canonical in sorted(set(STATES.values()), key=len, reverse=True):
+        if canonical.lower() == s:
+            return None if canonical == "All-India" else canonical
+    return None
+
+
+def _is_friend_or_general_profile_mode(question: str) -> bool:
+    q = _normalize_text(question)
+    return any(
+        k in q
+        for k in [
+            "for my friend",
+            "for friend",
+            "for my cousin",
+            "for someone",
+            "not for me",
+            "general query",
+            "in general",
+            "generic query",
+        ]
+    )
+
+
+async def _get_registered_home_state(user_id: Optional[int]) -> Optional[str]:
+    if not user_id:
+        return None
+    try:
+        from database.connection import async_session_maker
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return None
+            profile_data = dict(getattr(user, "profile_data", {}) or {})
+            state_raw = (
+                profile_data.get("state_or_ut")
+                or profile_data.get("state")
+                or (dict(getattr(user, "preferences", {}) or {}).get("preferred_state"))
+            )
+            return _canonicalize_state_name(state_raw)
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load registered home state: {e}")
+        return None
+
+
+def _extract_category(question: str) -> Optional[str]:
+    q = _normalize_text(question)
+    if "obc" in q:
+        return "OBC"
+    if re.search(r"\bsc\b", q):
+        return "SC"
+    if re.search(r"\bst\b", q):
+        return "ST"
+    if "ews" in q:
+        return "EWS"
+    if "pwd" in q or "pwbd" in q:
+        return "PwD"
+    if "general" in q or "ur" in q:
+        return "GENERAL"
+    return None
+
+
+def _missing_cutoff_fields(cutoff_ctx: Dict[str, object]) -> List[str]:
+    missing: List[str] = []
+    if not cutoff_ctx.get("metric_type") or not cutoff_ctx.get("metric_value"):
+        missing.append("metric")
+    if not cutoff_ctx.get("category"):
+        missing.append("category")
+    if not cutoff_ctx.get("home_state"):
+        missing.append("home_state")
+    if not cutoff_ctx.get("target_states"):
+        missing.append("target_states")
+    return missing
+
+
+def _build_cutoff_followup_prompt(missing_fields: List[str]) -> str:
+    if "metric" in missing_fields:
+        return (
+            "For cutoff prediction, please share **either your NEET score/marks or AIR rank**.\n\n"
+            "Example: `Score 540` or `AIR 5400`."
+        )
+    if "category" in missing_fields:
+        return "Please share your NEET category (General/OBC/SC/ST/EWS/PwD) so I can fetch accurate cutoff rows."
+    if "home_state" in missing_fields:
+        return (
+            "Please tell me your **home state** (domicile state). "
+            "I use this to apply domicile/non-domicile cutoff rules correctly."
+        )
+    if "target_states" in missing_fields:
+        return (
+            "Which state(s) do you want to check for colleges?\n\n"
+            "You can type one or multiple states, e.g. `Bihar` or `Delhi, Haryana, Punjab`."
+        )
+    return "Please share a bit more detail so I can run cutoff analysis."
+
+
+def _is_affirmative_reply(question: str) -> bool:
+    q = _normalize_text(question)
+    return q in {"yes", "yes please", "yeah", "yup", "sure", "okay", "ok", "go ahead"}
+
+
+def _extract_cutoff_refinements(question: str) -> Dict[str, object]:
+    q = _normalize_text(question)
+    updates: Dict[str, object] = {}
+    states = _extract_states_from_text(question)
+    if states:
+        updates["target_states"] = states
+
+    college_type_patterns: List[str] = []
+    if any(k in q for k in ["government", "govt"]):
+        college_type_patterns.append("%GOV%")
+    if "private" in q:
+        college_type_patterns.append("%PRIVATE%")
+    if "deemed" in q:
+        college_type_patterns.append("%DEEMED%")
+    if college_type_patterns:
+        updates["college_type_patterns"] = college_type_patterns
+
+    quota_patterns: List[str] = []
+    if "aiq" in q or "all india quota" in q:
+        quota_patterns.append("%AIQ%")
+    if "state quota" in q:
+        quota_patterns.append("%STATE%")
+    if "management" in q:
+        quota_patterns.append("%MANAGEMENT%")
+    if "nri" in q:
+        quota_patterns.append("%NRI%")
+    if "open" in q:
+        quota_patterns.append("%OPEN%")
+    if quota_patterns:
+        updates["quota_patterns"] = quota_patterns
+
+    return updates
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -370,15 +1072,15 @@ OBVIOUSLY_OFF_TOPIC = [
     "visa", "passport", "flight", "hotel", "restaurant"
 ]
 
-OUT_OF_DOMAIN_RESPONSE = """I'm sorry, I can only help with questions related to:
+OUT_OF_DOMAIN_RESPONSE = """Hi! Sorry, I can't help with that topic.
 
-🎓 **NEET UG / JEE** - Entrance exams for medical and engineering
-📋 **Admissions & Counseling** - Process, eligibility, documents
-🏫 **Colleges** - Medical, engineering, deemed universities
-📅 **Important Dates** - Application deadlines, exam schedules
-💰 **Fees & Payments** - Application fees, college fees
+I am here to help you with **NEET UG counselling and medical admissions in India**:
+- Eligibility and important dates
+- Counselling process (MCC/AIQ + state)
+- College options, fees, cutoffs, and documents
+- Reservation and quota-related guidance
 
-Please ask something related to these topics, and I'll be happy to assist!"""
+Share your NEET-related question, and I will help right away."""
 
 
 async def is_web_search_fallback_enabled() -> bool:
@@ -397,6 +1099,45 @@ async def is_web_search_fallback_enabled() -> bool:
         return False
 
 
+async def is_faq_lookup_enabled() -> bool:
+    """
+    Read runtime FAQ toggle from admin-managed settings.
+    We currently reuse AUTO_LEARNING_ENABLED because this is the FAQ switch
+    available in the admin dashboard.
+    """
+    try:
+        from database.connection import async_session_maker
+        from models.system_settings import SystemSettings, SettingsKeys
+
+        async with async_session_maker() as db:
+            setting = await db.get(SystemSettings, SettingsKeys.AUTO_LEARNING_ENABLED)
+            if setting is None:
+                return True  # safe default for existing installs
+            return setting.value.lower() == "true"
+    except Exception as err:
+        log(f"[V2] ⚠️ Could not read FAQ setting: {err}")
+        return True
+
+
+async def get_cutoff_result_limit() -> int:
+    """Read runtime setting for cutoff SQL result limit."""
+    try:
+        from database.connection import async_session_maker
+        from models.system_settings import SystemSettings, SettingsKeys
+        async with async_session_maker() as db:
+            setting = await db.get(SystemSettings, SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT)
+            if setting is None:
+                return 10
+            try:
+                value = int(setting.value)
+            except (TypeError, ValueError):
+                return 10
+            return max(1, min(200, value))
+    except Exception as err:
+        log(f"[V2] ⚠️ Could not read cutoff result limit setting: {err}")
+        return 10
+
+
 def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: str) -> tuple[bool, str]:
     """
     LLM-based generic sufficiency check.
@@ -410,9 +1151,13 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
                 {
                     "role": "system",
                     "content": (
-                        "You are a strict retrieval sufficiency evaluator.\n"
+                        "You are a strict retrieval sufficiency evaluator for NEET counselling queries.\n"
                         "Given a user question and retrieved knowledge-base content, decide if the KB content "
                         "is enough to answer accurately without assumptions.\n"
+                        "Judge ONLY against the exact user ask.\n"
+                        "Do NOT mark insufficient just because broader background is missing "
+                        "(for example geography/history when the user asked only fee/cutoff/process).\n"
+                        "If retrieved text contains the requested data-type and correct entity/scope, mark sufficient.\n"
                         "Return ONLY valid JSON with keys: is_sufficient (boolean), reason (string).\n"
                         "Mark is_sufficient=false if exact requested entity/detail is missing, ambiguous, "
                         "or only similar entities are present."
@@ -860,16 +1605,33 @@ async def chat_stream(request: ChatRequest):
             user_state = None
             if request.user_preferences and request.user_preferences.preferred_state:
                 user_state = request.user_preferences.preferred_state
+
+            onboarding_prompt = _next_onboarding_prompt(med_ctx, request.question)
+            if onboarding_prompt:
+                med_ctx["stage"] = onboarding_prompt.get("stage", "guided_onboarding")
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': onboarding_prompt.get('replies', [])})}\n\n"
+                for token in sse_tokens_preserving_formatting(str(onboarding_prompt.get("message", ""))):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                if request.user_id and conversation_id:
+                    asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                return
             
             # ========== FAQ CHECK FIRST (BEFORE EVERYTHING) ==========
             # If FAQ matches with high confidence, skip domain check, routing, RAG.
             # Default 0.85: 0.95 was too strict—near-duplicate wording often scores ~0.78–0.92.
+            faq_lookup_enabled = await is_faq_lookup_enabled()
             FAQ_SCORE_THRESHOLD = float(os.getenv("FAQ_SCORE_THRESHOLD", "0.85"))
             try:
-                log("[INFO] 🔍 Checking FAQs FIRST...")
-                faq_matches = await search_faq(request.question, state_filter=user_state, top_k=1)
+                if not faq_lookup_enabled:
+                    log("[INFO] ⏭️ FAQ lookup skipped (disabled in admin settings)")
+                    faq_matches = []
+                else:
+                    log("[INFO] 🔍 Checking FAQs FIRST...")
+                    faq_matches = await search_faq(request.question, state_filter=user_state, top_k=1)
                 
-                if faq_matches and faq_matches[0]["score"] >= FAQ_SCORE_THRESHOLD:
+                if faq_lookup_enabled and faq_matches and faq_matches[0]["score"] >= FAQ_SCORE_THRESHOLD:
                     faq_match = faq_matches[0]
                     log(f"[INFO] ✅ FAQ MATCH! Score: {faq_match['score']:.3f} (≥{FAQ_SCORE_THRESHOLD})")
                     log(f"[INFO]    Question: {faq_match['question'][:50]}...")
@@ -1863,9 +2625,8 @@ async def chat_v2_stream(request: ChatRequest):
     from services.unified_prompt import get_system_prompt, get_tools
     from services.knowledge_tool import execute_tool_call, format_search_results_for_llm
     from services.conversation_memory import (
-        ConversationMemory, 
+        ConversationMemory,
         get_or_create_conversation,
-        save_message_to_db
     )
     from database.connection import async_session_maker
     
@@ -1877,7 +2638,16 @@ async def chat_v2_stream(request: ChatRequest):
     async def generate_stream() -> AsyncGenerator[str, None]:
         conversation_memory = None
         conversation_id = request.conversation_id
+        med_ctx: Dict[str, object] = _ensure_medbuddy_context(None)
+        is_first_visit = False
         start_time = datetime.now()
+        t_wall = time.perf_counter()
+        conv_ms = 0.0
+        faq_ms = 0.0
+        settings_ms = 0.0
+        round_stats: List[Dict] = []
+        final_ttft_ms = 0.0
+        final_stream_ms = 0.0
         
         try:
             if not request.question.strip():
@@ -1886,9 +2656,13 @@ async def chat_v2_stream(request: ChatRequest):
             
             # ========== LOAD/CREATE CONVERSATION ==========
             if request.user_id:
+                t_conv = time.perf_counter()
                 try:
                     async with async_session_maker() as conv_db:
                         if request.conversation_id:
+                            conversation = await conv_db.get(Conversation, request.conversation_id)
+                            if conversation and conversation.user_id == request.user_id:
+                                med_ctx = _ensure_medbuddy_context(conversation.context_data)
                             conversation_memory = ConversationMemory(
                                 conversation_id=request.conversation_id,
                                 user_id=request.user_id
@@ -1897,6 +2671,7 @@ async def chat_v2_stream(request: ChatRequest):
                             msg_count = len(conversation_memory.get_chat_history())
                             if msg_count > 0:
                                 log(f"[V2] 🧠 MEMORY LOADED: {msg_count} messages")
+                            is_first_visit = msg_count == 0
                         else:
                             conversation = await get_or_create_conversation(
                                 db=conv_db,
@@ -1908,24 +2683,286 @@ async def chat_v2_stream(request: ChatRequest):
                                 conversation_id=conversation_id,
                                 user_id=request.user_id
                             )
+                            med_ctx = _ensure_medbuddy_context(conversation.context_data)
+                            is_first_visit = True
                             log(f"[V2] 📝 NEW CONVERSATION: id={conversation_id}")
                 except Exception as mem_err:
                     log(f"[V2] ⚠️ Conversation error: {mem_err}")
                     conversation_memory = None
+                finally:
+                    conv_ms = _elapsed_ms(t_conv)
+
+            # ========== SESSION CLOSE OR GREETING-WELCOME FAST PATH ==========
+            qnorm = _normalize_text(request.question)
+            if _is_session_close_intent(request.question):
+                med_ctx["stage"] = "closing"
+                med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+                close_msg = _build_session_close_message(med_ctx)
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': ['Start new query', 'Compare fees', 'Counselling process']})}\n\n"
+                for token in sse_tokens_preserving_formatting(close_msg):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                if request.user_id and conversation_id:
+                    asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                return
+
+            if _is_greeting_only(request.question):
+                welcome = _first_visit_welcome_message() if is_first_visit else _return_visit_welcome_message()
+                med_ctx["stage"] = "first_visit" if is_first_visit else "returning"
+                med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                for token in sse_tokens_preserving_formatting(welcome):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                if request.user_id and conversation_id:
+                    asyncio.create_task(
+                        v2_background_save_conversation_turn(
+                            conversation_id,
+                            request.question,
+                            welcome,
+                            int((datetime.now() - start_time).total_seconds() * 1000),
+                        )
+                    )
+                    asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                return
+
+            # Apply lightweight onboarding updates when user answers guided prompts.
+            onboarding = dict(med_ctx.get("onboarding") or {})
+            onboarding.update(_extract_onboarding_updates(request.question))
+            med_ctx["onboarding"] = onboarding
+            med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+
+            # ========== CUTOFF SQL PATH (TABLE-BASED, NO VECTOR SEARCH) ==========
+            cutoff_ctx_peek = dict(med_ctx.get("cutoff") or {})
+            cutoff_triggered = False
+            if MEDBUDDY_CAPS["cutoff"]:
+                if _should_continue_cutoff_from_context(request.question, cutoff_ctx_peek):
+                    cutoff_triggered = True
+                    log("[V2] 🧭 Continuing cutoff refinement flow from conversation context")
+                if cutoff_triggered:
+                    llm_route_decision = True
+                else:
+                    llm_route_decision = _llm_should_route_cutoff_sql(request.question, med_ctx)
+                if llm_route_decision is None:
+                    # Safety fallback only if LLM classifier fails.
+                    in_shortlist_context = str(med_ctx.get("last_topic") or "").lower() in {
+                        "cutoff analysis",
+                        "college shortlist",
+                    }
+                    metric_hint, _metric_value_hint = _extract_metric_from_text(request.question)
+                    cutoff_triggered = (
+                        _is_cutoff_intent(request.question)
+                        or _looks_like_cutoff_profile_payload(request.question)
+                        or (in_shortlist_context and metric_hint is not None)
+                    )
+                    log(f"[V2] 🧭 Cutoff route fallback decision: {cutoff_triggered}")
+                else:
+                    cutoff_triggered = llm_route_decision
+            if cutoff_triggered:
+                from services.cutoff_service import fetch_cutoff_recommendations, format_cutoff_markdown
+                log("[V2] 🎯 Routing to CUTOFF SQL path")
+
+                cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+                profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
+                if _is_friend_or_general_profile_mode(request.question):
+                    profile_mode = "friend_or_general"
+                cutoff_ctx["profile_mode"] = profile_mode
+                if cutoff_ctx.get("awaiting_refinement_choice") and _is_affirmative_reply(request.question):
+                    followup = (
+                        "Sure — happy to refine this.\n\n"
+                        "Tell me what you want to refine:\n"
+                        "- College type (Government / Private / Deemed)\n"
+                        "- Quota (AIQ / State / Management / NRI / Open)\n"
+                        "- Specific state(s)\n\n"
+                        "Example: `Government colleges in Bihar with State quota`."
+                    )
+                    cutoff_ctx["awaiting_refinement_choice"] = False
+                    cutoff_ctx["awaiting_refinement_details"] = True
+                    med_ctx["cutoff"] = cutoff_ctx
+                    for token in sse_tokens_preserving_formatting(followup):
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                        await asyncio.sleep(0.01)
+                    yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                    if request.user_id and conversation_id:
+                        asyncio.create_task(
+                            v2_background_save_conversation_turn(
+                                conversation_id,
+                                request.question,
+                                followup,
+                                int((datetime.now() - start_time).total_seconds() * 1000),
+                            )
+                        )
+                        asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                    return
+
+                detected_states = _extract_states_from_text(request.question)
+                metric_type, metric_value = _extract_metric_from_text(request.question)
+                category = _extract_category(request.question) or cutoff_ctx.get("category") or onboarding.get("category")
+                explicit_home_state = _extract_home_state(request.question)
+                home_state = explicit_home_state or cutoff_ctx.get("home_state")
+
+                # Default to registered user home state only for self-mode.
+                if not home_state and profile_mode != "friend_or_general":
+                    registered_home_state = await _get_registered_home_state(request.user_id)
+                    if registered_home_state:
+                        home_state = registered_home_state
+                    elif request.user_preferences and request.user_preferences.preferred_state:
+                        home_state = request.user_preferences.preferred_state
+
+                # Target states must be explicit from user message or previously provided in this
+                # cutoff context. Never auto-inject home/profile state into target_states.
+                if detected_states:
+                    target_states = detected_states
+                else:
+                    target_states = list(cutoff_ctx.get("target_states") or [])
+
+                if not category and request.user_preferences and request.user_preferences.category:
+                    category = request.user_preferences.category
+
+                if metric_type and metric_value:
+                    cutoff_ctx["metric_type"] = metric_type
+                    cutoff_ctx["metric_value"] = int(metric_value)
+                if category:
+                    cutoff_ctx["category"] = str(category).upper()
+                if home_state:
+                    cutoff_ctx["home_state"] = str(home_state)
+                if target_states:
+                    cutoff_ctx["target_states"] = target_states
+
+                # Apply optional refinement filters from user's follow-up details.
+                refinement_updates = _extract_cutoff_refinements(request.question)
+                if refinement_updates.get("target_states"):
+                    cutoff_ctx["target_states"] = refinement_updates["target_states"]
+                if refinement_updates.get("college_type_patterns"):
+                    cutoff_ctx["college_type_patterns"] = refinement_updates["college_type_patterns"]
+                if refinement_updates.get("quota_patterns"):
+                    cutoff_ctx["quota_patterns"] = refinement_updates["quota_patterns"]
+                if cutoff_ctx.get("awaiting_refinement_details"):
+                    cutoff_ctx["awaiting_refinement_details"] = False
+
+                med_ctx["cutoff"] = cutoff_ctx
+                missing = _missing_cutoff_fields(cutoff_ctx)
+
+                if missing:
+                    followup = _build_cutoff_followup_prompt(missing)
+                    for token in sse_tokens_preserving_formatting(followup):
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                        await asyncio.sleep(0.01)
+                    yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                    if request.user_id and conversation_id:
+                        asyncio.create_task(
+                            v2_background_save_conversation_turn(
+                                conversation_id,
+                                request.question,
+                                followup,
+                                int((datetime.now() - start_time).total_seconds() * 1000),
+                            )
+                        )
+                        asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                    return
+
+                metric_type = str(cutoff_ctx.get("metric_type"))
+                metric_value = int(cutoff_ctx.get("metric_value"))
+                home_state = str(cutoff_ctx.get("home_state"))
+                category = str(cutoff_ctx.get("category"))
+                target_states = [str(s) for s in list(cutoff_ctx.get("target_states") or [])]
+                college_type_patterns = cutoff_ctx.get("college_type_patterns")
+                quota_patterns = cutoff_ctx.get("quota_patterns")
+
+                cutoff_result_limit = await get_cutoff_result_limit()
+                rows = await fetch_cutoff_recommendations(
+                    metric_type=metric_type,
+                    metric_value=metric_value,
+                    home_state=home_state,
+                    target_states=target_states,
+                    category=category,
+                    college_type_patterns=college_type_patterns if isinstance(college_type_patterns, list) else None,
+                    quota_patterns=quota_patterns if isinstance(quota_patterns, list) else None,
+                    total_limit=cutoff_result_limit,
+                )
+                cutoff_answer = format_cutoff_markdown(
+                    rows=rows,
+                    metric_type=metric_type,
+                    metric_value=metric_value,
+                    category=category,
+                    home_state=home_state,
+                    target_states=target_states,
+                    display_limit=cutoff_result_limit,
+                )
+                source = {
+                    "file_name": "neet_ug_2025_cutoffs",
+                    "document_type": "sql_cutoff_table",
+                    "state": ", ".join(target_states),
+                    "text_snippet": f"Cutoff rows matched: {len(rows)}",
+                }
+                yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
+                for token in sse_tokens_preserving_formatting(cutoff_answer):
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                    await asyncio.sleep(0.01)
+
+                med_ctx["stage"] = "normal_qa"
+                med_ctx["last_topic"] = "Cutoff analysis"
+                med_ctx["last_state"] = ", ".join(target_states)
+                med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+                cutoff_ctx["awaiting_refinement_choice"] = True
+                med_ctx["cutoff"] = cutoff_ctx
+
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                if request.user_id and conversation_id:
+                    asyncio.create_task(
+                        v2_background_save_conversation_turn(
+                            conversation_id,
+                            request.question,
+                            cutoff_answer,
+                            int((datetime.now() - start_time).total_seconds() * 1000),
+                            sources=[source],
+                        )
+                    )
+                    asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+
+                should_generate_title = (
+                    request.user_id
+                    and conversation_id
+                    and not _is_greeting_only(request.question)
+                    and await _v2_conversation_needs_title(conversation_id)
+                )
+                if should_generate_title:
+                    from services.conversation_memory import generate_conversation_title, update_conversation_title
+                    try:
+                        generated_title = await generate_conversation_title(request.question)
+                        async with async_session_maker() as title_db:
+                            await update_conversation_title(title_db, conversation_id, generated_title)
+                        yield f"data: {json.dumps({'type': 'title', 'title': generated_title, 'conversation_id': conversation_id})}\n\n"
+                    except Exception as title_err:
+                        log(f"[V2] ⚠️ Title generation error (cutoff path): {title_err}")
+                return
             
             # ========== FAQ CHECK (FAST PATH) ==========
             user_state = None
             if request.user_preferences and request.user_preferences.preferred_state:
                 user_state = request.user_preferences.preferred_state
             
+            faq_lookup_enabled = await is_faq_lookup_enabled()
             FAQ_SCORE_THRESHOLD = float(os.getenv("FAQ_SCORE_THRESHOLD", "0.85"))
             try:
-                log("[V2] 🔍 Checking FAQs...")
-                faq_matches = await search_faq(request.question, state_filter=user_state, top_k=1)
+                t_faq = time.perf_counter()
+                if not faq_lookup_enabled:
+                    log("[V2] ⏭️ FAQ lookup skipped (disabled in admin settings)")
+                    faq_matches = []
+                    faq_ms = _elapsed_ms(t_faq)
+                else:
+                    log("[V2] 🔍 Checking FAQs...")
+                    try:
+                        faq_matches = await search_faq(request.question, state_filter=user_state, top_k=1)
+                    finally:
+                        faq_ms = _elapsed_ms(t_faq)
                 
-                if faq_matches and faq_matches[0]["score"] >= FAQ_SCORE_THRESHOLD:
+                if faq_lookup_enabled and faq_matches and faq_matches[0]["score"] >= FAQ_SCORE_THRESHOLD:
                     faq_match = faq_matches[0]
                     log(f"[V2] ✅ FAQ MATCH! Score: {faq_match['score']:.3f}")
+                    faq_answer = _apply_response_policy(faq_match["answer"], request.question)
                     
                     faq_source = {
                         "file_name": "FAQ Database",
@@ -1938,26 +2975,49 @@ async def chat_v2_stream(request: ChatRequest):
                     }
                     yield f"data: {json.dumps({'type': 'sources', 'sources': [faq_source]})}\n\n"
                     
-                    for token in sse_tokens_preserving_formatting(faq_match["answer"]):
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                    for token in sse_tokens_preserving_formatting(faq_answer):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.01)
                     
-                    # Save FAQ response to conversation
                     is_new_conversation = not request.conversation_id and conversation_id
-                    if request.user_id and conversation_id:
-                        async with async_session_maker() as conv_db:
-                            await save_message_to_db(conv_db, conversation_id, "user", request.question)
-                            await save_message_to_db(
-                                conv_db, conversation_id, "assistant", faq_match["answer"],
-                                sources=[faq_source], was_faq_match=True, faq_confidence=faq_match["score"]
-                            )
-                    
-                    # Send done event IMMEDIATELY - don't wait for title
+                    faq_response_time_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+                    # Done first so the client is not blocked on DB writes
                     yield f"data: {json.dumps({'type': 'done', 'from_faq': True, 'conversation_id': conversation_id})}\n\n"
+
+                    if request.user_id and conversation_id:
+                        asyncio.create_task(
+                            v2_background_save_conversation_turn(
+                                conversation_id,
+                                request.question,
+                                faq_answer,
+                                faq_response_time_ms,
+                                sources=[faq_source],
+                                was_faq_match=True,
+                                faq_confidence=faq_match["score"],
+                            )
+                        )
+                        med_ctx["stage"] = "normal_qa"
+                        med_ctx["last_topic"] = _infer_topic_label(request.question)
+                        med_ctx["last_state"] = user_state
+                        asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
                     log("[V2] ✅ Response from FAQ")
+                    if _v2_timing_log_enabled():
+                        log(
+                            f"[V2] ⏱ TIMING (FAQ path) wall≈{_elapsed_ms(t_wall):.0f}ms | "
+                            f"conversation_db={conv_ms:.0f} | faq_lookup={faq_ms:.0f}"
+                        )
                     
-                    # Generate title AFTER done event (non-blocking for user)
-                    if is_new_conversation and request.user_id:
+                    # Generate title AFTER done event (non-blocking for user).
+                    # Also handle conversations that started with greeting-only turns.
+                    should_generate_title = (
+                        request.user_id
+                        and conversation_id
+                        and not _is_greeting_only(request.question)
+                        and await _v2_conversation_needs_title(conversation_id)
+                    )
+                    if should_generate_title:
                         from services.conversation_memory import generate_conversation_title, update_conversation_title
                         try:
                             generated_title = await generate_conversation_title(request.question)
@@ -1978,7 +3038,9 @@ async def chat_v2_stream(request: ChatRequest):
             
             # ========== BUILD MESSAGES FOR LLM ==========
             client = OpenAIClient(api_key=os.getenv("OPENAI_API_KEY"))
+            t_settings = time.perf_counter()
             web_fallback_enabled = await is_web_search_fallback_enabled()
+            settings_ms = _elapsed_ms(t_settings)
             available_tools = get_tools()
             if not web_fallback_enabled:
                 available_tools = [
@@ -2041,6 +3103,7 @@ async def chat_v2_stream(request: ChatRequest):
                         t for t in available_tools
                         if t.get("function", {}).get("name") == "search_knowledge_base"
                     ]
+                t_llm = time.perf_counter()
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=messages,
@@ -2049,9 +3112,84 @@ async def chat_v2_stream(request: ChatRequest):
                     temperature=0.3,
                     max_tokens=1500
                 )
+                llm_round_ms = _elapsed_ms(t_llm)
                 assistant_message = response.choices[0].message
 
                 if not assistant_message.tool_calls:
+                    # Runtime safety net:
+                    # If the model skips tools on a NEET factual query, force a KB lookup
+                    # so we can still run normal KB/web fallback logic.
+                    if (
+                        round_idx == 0
+                        and _looks_like_neet_factual_query(request.question)
+                        and not kb_attempted
+                    ):
+                        forced_args: Dict[str, str] = {"query": request.question}
+                        if user_state:
+                            forced_args["state"] = user_state
+                        log(f"[V2] 🛟 Forced KB lookup (tool skipped by LLM): {forced_args}")
+                        t_tool = time.perf_counter()
+                        tool_result, success = execute_tool_call("search_knowledge_base", forced_args)
+                        tool_exec_ms = _elapsed_ms(t_tool)
+                        suff_ms = 0.0
+                        kb_attempted = True
+                        if success:
+                            t_suff = time.perf_counter()
+                            is_sufficient, reason = assess_kb_sufficiency_with_llm(
+                                client=client,
+                                user_question=request.question,
+                                kb_tool_result=tool_result,
+                            )
+                            suff_ms = _elapsed_ms(t_suff)
+                            log(f"[V2] 🧪 KB sufficiency (forced): {is_sufficient} | reason: {reason}")
+                            if not is_sufficient and web_fallback_enabled:
+                                force_web_search_next_round = True
+                                kb_marked_insufficient = True
+                            elif not is_sufficient and not web_fallback_enabled:
+                                kb_insufficient_and_web_disabled = True
+                                kb_marked_insufficient = True
+                        else:
+                            log(f"[V2] ⚠️ Forced KB lookup error: {tool_result[:120]}")
+
+                        round_stats.append(
+                            {
+                                "i": round_idx + 1,
+                                "llm": llm_round_ms,
+                                "tool": "forced_search_knowledge_base",
+                                "tool_exec": tool_exec_ms,
+                                "suff": suff_ms,
+                            }
+                        )
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": "forced_kb_lookup",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_knowledge_base",
+                                    "arguments": json.dumps(forced_args),
+                                }
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": "forced_kb_lookup",
+                            "content": tool_result,
+                        })
+                        # Continue loop so final response generation can use tool context.
+                        continue
+
+                    round_stats.append(
+                        {
+                            "i": round_idx + 1,
+                            "llm": llm_round_ms,
+                            "tool": None,
+                            "tool_exec": 0.0,
+                            "suff": 0.0,
+                        }
+                    )
                     break
 
                 tool_call = assistant_message.tool_calls[0]
@@ -2060,19 +3198,42 @@ async def chat_v2_stream(request: ChatRequest):
                 log(f"[V2] 🔧 TOOL CALL: {tool_name}")
                 log(f"[V2]    Args: {tool_args}")
 
+                t_tool = time.perf_counter()
                 tool_result, success = execute_tool_call(tool_name, tool_args)
+                tool_exec_ms = _elapsed_ms(t_tool)
                 if success:
                     log("[V2] ✅ Tool returned results")
                 else:
                     log(f"[V2] ⚠️ Tool error: {tool_result[:120]}")
 
+                suff_ms = 0.0
                 if tool_name == "search_knowledge_base":
                     kb_attempted = True
+                    t_suff = time.perf_counter()
                     is_sufficient, reason = assess_kb_sufficiency_with_llm(
                         client=client,
                         user_question=request.question,
                         kb_tool_result=tool_result
                     )
+                    # Generic guardrails for sufficiency decisions (not fee-only):
+                    # 1) If query is entity-specific and entity is missing in KB text, force insufficient.
+                    # 2) If LLM marked insufficient but KB has strong structured signals for non-entity asks,
+                    #    allow a cautious sufficient override to reduce unnecessary web fallback.
+                    qn = _normalize_text(request.question)
+                    kb_txt = _normalize_text(tool_result)
+                    entity_hint = _extract_entity_hint(request.question)
+                    is_entity_query = _is_entity_specific_query(request.question)
+                    entity_present_in_kb = True if not entity_hint else (entity_hint in kb_txt)
+                    kb_has_multiple_hits = ("[1]" in tool_result or "[2]" in tool_result)
+                    kb_has_structured_signals = _has_structured_data_signals(tool_result)
+
+                    if is_entity_query and not entity_present_in_kb:
+                        is_sufficient = False
+                        reason = "Entity-specific query but exact entity not found in KB evidence"
+                    elif (not is_entity_query) and kb_has_multiple_hits and kb_has_structured_signals and not is_sufficient:
+                        is_sufficient = True
+                        reason = "Heuristic override: non-entity query with strong structured KB signals"
+                    suff_ms = _elapsed_ms(t_suff)
                     log(f"[V2] 🧪 KB sufficiency: {is_sufficient} | reason: {reason}")
                     if not is_sufficient:
                         kb_marked_insufficient = True
@@ -2080,6 +3241,15 @@ async def chat_v2_stream(request: ChatRequest):
                             force_web_search_next_round = True
                         else:
                             kb_insufficient_and_web_disabled = True
+                round_stats.append(
+                    {
+                        "i": round_idx + 1,
+                        "llm": llm_round_ms,
+                        "tool": tool_name,
+                        "tool_exec": tool_exec_ms,
+                        "suff": suff_ms,
+                    }
+                )
                 if tool_name == "search_web":
                     used_web_fallback = True
                     force_web_search_next_round = False
@@ -2140,8 +3310,9 @@ async def chat_v2_stream(request: ChatRequest):
 
                 if kb_insufficient_and_web_disabled:
                     forced_fallback_response = (
-                        "Hi! Sorry, we don't have these specific details in our knowledge base as of now. "
-                        "Please visit official NTA/state counselling websites for the latest confirmed information."
+                        "I want to make sure you get accurate details.\n\n"
+                        "Right now, I do not have this exact information in the current knowledge base. "
+                        "Please verify from official MCC/state counselling websites for the latest confirmed values."
                     )
                     messages.append({
                         "role": "system",
@@ -2200,31 +3371,49 @@ async def chat_v2_stream(request: ChatRequest):
 
             # ========== FINAL RESPONSE ==========
             if forced_fallback_response:
-                full_response = forced_fallback_response
+                full_response = _apply_response_policy(forced_fallback_response, request.question)
+                t_out = time.perf_counter()
+                _first_out = True
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': ['Show more options', 'Compare colleges', 'Try another state']})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
+                    if _first_out:
+                        final_ttft_ms = _elapsed_ms(t_out)
+                        _first_out = False
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
+                final_stream_ms = _elapsed_ms(t_out)
             elif assistant_message and not assistant_message.tool_calls and (assistant_message.content or "").strip():
-                full_response = assistant_message.content or ""
+                full_response = _apply_response_policy(assistant_message.content or "", request.question)
+                t_out = time.perf_counter()
+                _first_out = True
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
+                    if _first_out:
+                        final_ttft_ms = _elapsed_ms(t_out)
+                        _first_out = False
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
+                final_stream_ms = _elapsed_ms(t_out)
             else:
                 log("[V2] 🤖 Generating final response with context...")
                 final_messages = web_only_messages if (used_web_fallback and web_only_messages) else messages
+                t_out = time.perf_counter()
                 final_response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=final_messages,
                     temperature=0.3,
-                    max_tokens=1500,
-                    stream=True
+                    max_tokens=1500
                 )
-                full_response = ""
-                for chunk in final_response:
-                    if chunk.choices[0].delta.content:
-                        text = chunk.choices[0].delta.content
-                        full_response += text
-                        yield f"data: {json.dumps({'type': 'token', 'token': text})}\n\n"
+                full_response = final_response.choices[0].message.content or ""
+                full_response = _apply_response_policy(full_response, request.question)
+                _first_out = True
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                for token in sse_tokens_preserving_formatting(full_response):
+                    if _first_out:
+                        final_ttft_ms = _elapsed_ms(t_out)
+                        _first_out = False
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                final_stream_ms = _elapsed_ms(t_out)
 
             if used_web_fallback:
                 yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True})}\n\n"
@@ -2233,28 +3422,63 @@ async def chat_v2_stream(request: ChatRequest):
                 log("[V2] 🧠 Final response generated with RAG tool context")
                 
             log(f"[V2] ✅ RESPONSE COMPLETE: {len(full_response)} chars")
+            med_ctx["stage"] = "normal_qa"
+            med_ctx["last_topic"] = _infer_topic_label(request.question)
+            if request.user_preferences and request.user_preferences.preferred_state:
+                med_ctx["last_state"] = request.user_preferences.preferred_state
+            med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
             
-            # ========== SAVE TO CONVERSATION ==========
             is_new_conversation = not request.conversation_id and conversation_id
-            if request.user_id and conversation_id:
-                try:
-                    response_time = int((datetime.now() - start_time).total_seconds() * 1000)
-                    async with async_session_maker() as conv_db:
-                        await save_message_to_db(conv_db, conversation_id, "user", request.question)
-                        await save_message_to_db(
-                            conv_db, conversation_id, "assistant", full_response,
-                            response_time_ms=response_time
-                        )
-                        log(f"[V2] 💾 Saved to conversation {conversation_id}")
-                except Exception as save_err:
-                    log(f"[V2] ⚠️ Save error: {save_err}")
-            
-            # Send done event IMMEDIATELY - don't wait for title
+            response_time = int((datetime.now() - start_time).total_seconds() * 1000)
+
+            # Done before DB persist so the client is not blocked on Neon writes
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+
+            if request.user_id and conversation_id:
+                asyncio.create_task(
+                    v2_background_save_conversation_turn(
+                        conversation_id,
+                        request.question,
+                        full_response,
+                        response_time,
+                    )
+                )
+                asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+
+            if _v2_timing_log_enabled():
+                wall_ms = _elapsed_ms(t_wall)
+                parts = [
+                    f"wall_total≈{wall_ms:.0f}ms",
+                    f"conversation_db={conv_ms:.0f}",
+                    f"faq_lookup={faq_ms:.0f}",
+                    f"settings_read={settings_ms:.0f}",
+                ]
+                for r in round_stats:
+                    tool = r.get("tool") or "—"
+                    parts.append(
+                        f"round{r['i']}:llm={r['llm']:.0f}"
+                        f"|tool={tool}"
+                        f"|exec={r['tool_exec']:.0f}"
+                        f"|suff={r['suff']:.0f}"
+                    )
+                parts.append(f"answer_ttft={final_ttft_ms:.0f}ms")
+                parts.append(f"answer_stream_total={final_stream_ms:.0f}ms")
+                parts.append("save_db=deferred(background)")
+                log(
+                    "[V2] ⏱ TIMING SUMMARY (V2_TIMING_LOG=false to hide) → "
+                    + " ".join(parts)
+                )
             log(f"{'='*60}")
             
-            # Generate title AFTER done event (non-blocking for user)
-            if is_new_conversation and request.user_id:
+            # Generate title AFTER done event (non-blocking for user).
+            # Also handle conversations that started with greeting-only turns.
+            should_generate_title = (
+                request.user_id
+                and conversation_id
+                and not _is_greeting_only(request.question)
+                and await _v2_conversation_needs_title(conversation_id)
+            )
+            if should_generate_title:
                 from services.conversation_memory import generate_conversation_title, update_conversation_title
                 try:
                     generated_title = await generate_conversation_title(request.question)
