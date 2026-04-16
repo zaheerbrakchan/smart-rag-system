@@ -200,7 +200,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
                   <table className="min-w-full border-collapse text-sm">
                     <thead className="bg-slate-800">
                       <tr className="border-b border-slate-600">
-                        {['Institution Name', 'State', 'Category', 'Quota', 'Eligibility', 'AIR', 'Score', 'Round'].map((h) => (
+                        {['Institution Name', 'State', 'Category', 'Quota', 'Domicile', 'AIR', 'Score', 'Round'].map((h) => (
                           <th key={h} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
                             {h}
                           </th>
