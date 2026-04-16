@@ -180,8 +180,12 @@ export default function RegisterPage() {
             {/* Step 1: Phone Number */}
             {step === 'phone' && (
               <>
+                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
+                  Med Buddy
+                </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Create Account</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">Enter your mobile number to get started</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 -mt-4 mb-4">Powered by Get My University</p>
                 
                 <form onSubmit={handleSendOtp} className="space-y-4">
                   <div>
@@ -229,10 +233,14 @@ export default function RegisterPage() {
             {/* Step 2: OTP Verification */}
             {step === 'otp' && (
               <>
+                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
+                  Med Buddy
+                </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Verify OTP</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">
                   Enter the 6-digit code sent to {phone}
                 </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 -mt-4 mb-4">Powered by Get My University</p>
                 
                 {devOtp && (
                   <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg text-sm text-yellow-700 dark:text-yellow-400">
@@ -305,8 +313,12 @@ export default function RegisterPage() {
             {/* Step 3: User Details */}
             {step === 'details' && (
               <>
+                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
+                  Med Buddy
+                </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Complete Your Profile</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">Fill in your details to create your account</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 -mt-4 mb-4">Powered by Get My University</p>
                 
                 <form onSubmit={handleRegister} className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
