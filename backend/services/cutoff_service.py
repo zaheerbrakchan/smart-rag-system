@@ -240,7 +240,7 @@ def format_cutoff_markdown(
             "This usually happens when the selected combination is too strict for the available rows "
             "(for example: specific quota + college type + domicile mode at this rank/score range).\n\n"
             "### I Can Help You Explore Better Options\n\n"
-            "If you want, I can immediately retry with one of these counselor-style refinements:\n"
+            "If you want, I can immediately retry with one of these refinements:\n"
             "1. Keep same state, but relax quota or college type\n"
             "2. Keep same category, but include nearby state options\n"
             "3. Show closest available colleges in the same rank/score range\n\n"

@@ -116,8 +116,12 @@ export default function LoginPage() {
               <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl mb-3">
                 <GraduationCap className="w-7 h-7 text-white" />
               </div>
+              <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
+                Med Buddy
+              </p>
               <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In with OTP</h2>
               <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Use your registered mobile number</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Powered by Get My University</p>
             </div>
             
             {step === 'phone' && (
