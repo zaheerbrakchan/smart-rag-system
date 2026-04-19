@@ -253,19 +253,24 @@ export default function Home() {
         },
         // onSuggestedReplies
         (replies) => {
-          const starterReplies = (replies || []).filter((reply) => Boolean(STARTER_INTENT_MAP[reply]));
-          if (!allowStarterReplies || starterReplies.length === 0) {
+          const normalizedReplies = (replies || [])
+            .map((reply) => String(reply || '').trim())
+            .filter((reply) => reply.length > 0)
+            .slice(0, 6);
+          if (normalizedReplies.length === 0) {
             return;
           }
 
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId
-                ? { ...msg, suggestedReplies: starterReplies }
+                ? { ...msg, suggestedReplies: normalizedReplies }
                 : msg
             )
           );
-          setAllowStarterReplies(false);
+          if (normalizedReplies.some((reply) => Boolean(STARTER_INTENT_MAP[reply]))) {
+            setAllowStarterReplies(false);
+          }
         },
         // conversationId and userId
         conversationId || undefined,
@@ -571,8 +576,9 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Disclaimer */}
-            <p className="text-xs text-gray-400 dark:text-gray-500 mt-8 max-w-lg">
+            {/* Note / disclaimer (empty-state footer) */}
+            <p className="text-xs italic text-gray-400 dark:text-gray-500 mt-8 max-w-lg leading-relaxed">
+              <span className="font-medium not-italic text-gray-500 dark:text-gray-400">Note: </span>
               Med Buddy is powered by Get My University. Guidance is based on available counselling documents and official sources.
               Always verify final admission decisions with MCC/state counselling authorities and college websites.
             </p>
