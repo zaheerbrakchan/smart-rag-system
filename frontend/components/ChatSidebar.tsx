@@ -19,6 +19,7 @@ interface ChatSidebarProps {
   onNewChat: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  language: 'en' | 'hi' | 'mr';
 }
 
 export default function ChatSidebar({
@@ -28,6 +29,7 @@ export default function ChatSidebar({
   onNewChat,
   isCollapsed,
   onToggleCollapse,
+  language,
 }: ChatSidebarProps) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -119,20 +121,61 @@ export default function ChatSidebar({
     setEditTitle('');
   };
 
+  const i18n = {
+    expandSidebar: language === 'hi' ? 'साइडबार खोलें' : language === 'mr' ? 'साइडबार उघडा' : 'Expand sidebar',
+    collapseSidebar: language === 'hi' ? 'साइडबार बंद करें' : language === 'mr' ? 'साइडबार बंद करा' : 'Collapse sidebar',
+    newChat: language === 'hi' ? 'नई चैट' : language === 'mr' ? 'नवीन चॅट' : 'New Chat',
+    noConversations: language === 'hi' ? 'अभी कोई बातचीत नहीं' : language === 'mr' ? 'अजून संभाषणे नाहीत' : 'No conversations yet',
+    clickNewChat:
+      language === 'hi'
+        ? '"नई चैट" पर क्लिक करके शुरू करें'
+        : language === 'mr'
+        ? '"नवीन चॅट" क्लिक करून सुरू करा'
+        : 'Click "New Chat" to start',
+    rename: language === 'hi' ? 'नाम बदलें' : language === 'mr' ? 'नाव बदला' : 'Rename',
+    delete: language === 'hi' ? 'हटाएं' : language === 'mr' ? 'हटवा' : 'Delete',
+    chats: language === 'hi' ? 'चैट' : language === 'mr' ? 'चॅट' : 'chat',
+    chatsPlural: language === 'hi' ? 'चैट' : language === 'mr' ? 'चॅट्स' : 'chats',
+    msgs: language === 'hi' ? 'संदेश' : language === 'mr' ? 'संदेश' : 'msgs',
+    today: language === 'hi' ? 'आज' : language === 'mr' ? 'आज' : 'Today',
+    yesterday: language === 'hi' ? 'कल' : language === 'mr' ? 'काल' : 'Yesterday',
+    daysAgo:
+      language === 'hi'
+        ? (d: number) => `${d} दिन पहले`
+        : language === 'mr'
+        ? (d: number) => `${d} दिवसांपूर्वी`
+        : (d: number) => `${d} days ago`,
+    deleteConversation: language === 'hi' ? 'बातचीत हटाएं' : language === 'mr' ? 'संभाषण हटवा' : 'Delete Conversation',
+    cannotUndo:
+      language === 'hi'
+        ? 'यह क्रिया वापस नहीं की जा सकती'
+        : language === 'mr'
+        ? 'ही क्रिया परत आणता येणार नाही'
+        : 'This action cannot be undone',
+    deleteConfirmBody:
+      language === 'hi'
+        ? 'क्या आप वाकई यह बातचीत हटाना चाहते हैं? सभी संदेश स्थायी रूप से हट जाएंगे।'
+        : language === 'mr'
+        ? 'हे संभाषण हटवायचे याची खात्री आहे का? सर्व संदेश कायमचे हटवले जातील.'
+        : 'Are you sure you want to delete this conversation? All messages will be permanently removed.',
+    cancel: language === 'hi' ? 'रद्द करें' : language === 'mr' ? 'रद्द करा' : 'Cancel',
+  };
+
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
     const now = new Date();
     const diffDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
     
-    if (diffDays === 0) return 'Today';
-    if (diffDays === 1) return 'Yesterday';
-    if (diffDays < 7) return `${diffDays} days ago`;
-    return date.toLocaleDateString();
+    if (diffDays === 0) return i18n.today;
+    if (diffDays === 1) return i18n.yesterday;
+    if (diffDays < 7) return i18n.daysAgo(diffDays);
+    return date.toLocaleDateString(language === 'hi' ? 'hi-IN' : language === 'mr' ? 'mr-IN' : 'en-US');
   };
 
   const getTitle = (conv: ConversationSummary) => {
     if (conv.title) return conv.title;
-    return `Chat ${conv.id}`;
+    const chatLabel = language === 'hi' ? 'चैट' : language === 'mr' ? 'चॅट' : 'Chat';
+    return `${chatLabel} ${conv.id}`;
   };
 
   // Collapsed state - just show toggle button
@@ -142,14 +185,14 @@ export default function ChatSidebar({
         <button
           onClick={onToggleCollapse}
           className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all"
-          title="Expand sidebar"
+          title={i18n.expandSidebar}
         >
           <ChevronRight size={20} />
         </button>
         <button
           onClick={onNewChat}
           className="p-2.5 bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all hover:scale-105"
-          title="New chat"
+          title={i18n.newChat}
         >
           <Plus size={20} />
         </button>
@@ -167,12 +210,12 @@ export default function ChatSidebar({
             className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl transition-all font-medium text-sm shadow-lg hover:shadow-blue-500/25"
           >
             <Plus size={18} />
-            New Chat
+            {i18n.newChat}
           </button>
           <button
             onClick={onToggleCollapse}
             className="p-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
-            title="Collapse sidebar"
+            title={i18n.collapseSidebar}
           >
             <ChevronLeft size={18} />
           </button>
@@ -190,8 +233,8 @@ export default function ChatSidebar({
             <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
               <MessageSquare className="w-8 h-8 text-slate-500" />
             </div>
-            <p className="text-slate-400 text-sm font-medium">No conversations yet</p>
-            <p className="text-slate-600 text-xs mt-1">Click "New Chat" to start</p>
+            <p className="text-slate-400 text-sm font-medium">{i18n.noConversations}</p>
+            <p className="text-slate-600 text-xs mt-1">{i18n.clickNewChat}</p>
           </div>
         ) : (
           <div className="py-2 space-y-1">
@@ -252,7 +295,7 @@ export default function ChatSidebar({
                         <Clock size={10} />
                         {formatDate(conv.updated_at)}
                         <span className="text-slate-600">•</span>
-                        {conv.message_count} msgs
+                        {conv.message_count} {i18n.msgs}
                       </p>
                     </div>
                     
@@ -283,7 +326,7 @@ export default function ChatSidebar({
                             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-700 hover:text-white transition-colors"
                           >
                             <Edit2 size={14} className="text-blue-400" />
-                            Rename
+                            {i18n.rename}
                           </button>
                           <div className="h-px bg-slate-700 mx-2 my-1" />
                           <button
@@ -291,7 +334,7 @@ export default function ChatSidebar({
                             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-400 hover:bg-red-900/30 hover:text-red-300 transition-colors"
                           >
                             <Trash2 size={14} />
-                            Delete
+                            {i18n.delete}
                           </button>
                         </div>
                       )}
@@ -307,7 +350,7 @@ export default function ChatSidebar({
       {/* Footer */}
       <div className="p-4 border-t border-slate-700/50">
         <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>{conversations.length} chat{conversations.length !== 1 ? 's' : ''}</span>
+          <span>{conversations.length} {conversations.length !== 1 ? i18n.chatsPlural : i18n.chats}</span>
           <span className="text-slate-600">NEET UG 2026</span>
         </div>
       </div>
@@ -327,25 +370,25 @@ export default function ChatSidebar({
                 <Trash2 className="w-6 h-6 text-red-400" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold text-white">Delete Conversation</h3>
-                <p className="text-sm text-slate-400">This action cannot be undone</p>
+                <h3 className="text-lg font-semibold text-white">{i18n.deleteConversation}</h3>
+                <p className="text-sm text-slate-400">{i18n.cannotUndo}</p>
               </div>
             </div>
             <p className="text-slate-300 text-sm mb-6">
-              Are you sure you want to delete this conversation? All messages will be permanently removed.
+              {i18n.deleteConfirmBody}
             </p>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={cancelDelete}
                 className="px-4 py-2.5 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-xl transition-colors"
               >
-                Cancel
+                {i18n.cancel}
               </button>
               <button
                 onClick={confirmDelete}
                 className="px-4 py-2.5 text-sm font-medium text-white bg-red-600 hover:bg-red-500 rounded-xl transition-colors shadow-lg shadow-red-500/25"
               >
-                Delete
+                {i18n.delete}
               </button>
             </div>
           </div>

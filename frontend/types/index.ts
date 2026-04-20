@@ -33,6 +33,7 @@ export interface Source {
   file_name: string;
   page?: number;
   text_snippet: string;
+  document_type?: string | null;
   /** Admin upload sub-category (whole document): fees, eligibility, comprehensive, … */
   doc_topic?: string | null;
   /** AI label for this chunk’s subject (page-wise) */

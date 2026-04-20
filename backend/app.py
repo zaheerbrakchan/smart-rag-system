@@ -918,6 +918,41 @@ def _looks_like_non_cutoff_topic_shift(question: str) -> bool:
     )
 
 
+def _is_fee_followup_with_context(question: str, med_ctx: Dict[str, object]) -> bool:
+    """
+    Prevent accidental cutoff routing for short follow-ups in an ongoing fee thread.
+    Example: "can you help for gmc srinagar also?"
+    """
+    q = _normalize_text(question)
+    topic = str((med_ctx or {}).get("last_topic") or "").strip().lower()
+    if topic != "fee structure":
+        return False
+
+    has_cutoff_signal = any(
+        k in q
+        for k in [
+            "cutoff",
+            "cut off",
+            "cut-off",
+            "rank",
+            "score",
+            "air",
+            "percentile",
+            "which college can i get",
+            "shortlist",
+            "prediction",
+        ]
+    )
+    if has_cutoff_signal:
+        return False
+
+    has_fee_signal = any(k in q for k in ["fee", "fees", "tuition", "cost", "hostel", "security fee"])
+    has_college_anchor = _question_has_retrieval_scope_anchor(question) or any(
+        k in q for k in ["also", "same for", "what about", "for gmc", "for aiims", "for college"]
+    )
+    return has_fee_signal or has_college_anchor
+
+
 def _should_continue_cutoff_from_context(question: str, cutoff_ctx: Dict[str, object]) -> bool:
     if not cutoff_ctx:
         return False
@@ -1810,6 +1845,10 @@ app.include_router(faq_router)
 # Include conversation routes
 from routes.conversations import router as conversations_router
 app.include_router(conversations_router)
+
+# Include support query routes
+from routes.support import router as support_router
+app.include_router(support_router)
 
 # ============== MODELS ==============
 
@@ -3743,7 +3782,10 @@ async def chat_v2_stream(request: ChatRequest):
             cutoff_ctx_peek = dict(med_ctx.get("cutoff") or {})
             cutoff_triggered = False
             if MEDBUDDY_CAPS["cutoff"]:
-                if _should_continue_cutoff_from_context(request.question, cutoff_ctx_peek):
+                if _is_fee_followup_with_context(request.question, med_ctx):
+                    log("[V2] 🧭 Fee-context follow-up detected; skipping cutoff SQL routing")
+                    cutoff_triggered = False
+                elif _should_continue_cutoff_from_context(request.question, cutoff_ctx_peek):
                     cutoff_triggered = True
                     log("[V2] 🧭 Continuing cutoff refinement flow from conversation context")
                 if cutoff_triggered:
