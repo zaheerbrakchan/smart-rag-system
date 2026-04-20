@@ -15,6 +15,7 @@ import {
   getMySupportQueries,
   getMySupportNotifications,
   markSupportNotificationRead,
+  connectSupportNotificationStream,
   SupportQuery,
   SupportNotification,
 } from '@/services/api';
@@ -431,10 +432,21 @@ export default function Home() {
   useEffect(() => {
     if (!token) return;
     void refreshSupportNotifications();
-    const timer = window.setInterval(() => {
-      void refreshSupportNotifications();
-    }, 15000);
-    return () => window.clearInterval(timer);
+    const stream = connectSupportNotificationStream(
+      token,
+      (event) => {
+        if (event?.type === 'support_notification_created') {
+          void refreshSupportNotifications();
+          if (showSupportPanel) {
+            void loadSupportPanelData();
+          }
+        }
+      },
+      () => {
+        console.error('Support notification stream disconnected');
+      }
+    );
+    return () => stream.close();
   }, [token]);
 
   const handleSendMessage = async (quickReply?: string) => {

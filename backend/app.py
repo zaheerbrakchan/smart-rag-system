@@ -41,6 +41,45 @@ def _elapsed_ms(since: float) -> float:
     return (time.perf_counter() - since) * 1000.0
 
 
+V2_STREAM_TOKEN_DELAY_SEC = float(os.getenv("V2_STREAM_TOKEN_DELAY_SEC", "0"))
+V2_TOOL_CONTEXT_CHAR_LIMIT = int(os.getenv("V2_TOOL_CONTEXT_CHAR_LIMIT", "12000"))
+V2_FINAL_MAX_TOKENS = int(os.getenv("V2_FINAL_MAX_TOKENS", "900"))
+
+
+def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMIT) -> str:
+    text = str(raw or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n[Tool output truncated for model context]"
+
+
+def _stream_chat_completion_text(
+    client,
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    temperature: float = 0.3,
+    max_tokens: int = V2_FINAL_MAX_TOKENS,
+):
+    """
+    Yield text deltas from OpenAI chat completion stream.
+    """
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=True,
+    )
+    for chunk in stream:
+        try:
+            delta = chunk.choices[0].delta.content
+        except Exception:
+            delta = None
+        if delta:
+            yield delta
+
+
 SUPPORTED_LANGUAGES = {"en", "hi", "mr"}
 
 
@@ -2051,6 +2090,7 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
     Returns (is_sufficient, reason).
     """
     try:
+        kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=6000)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
@@ -2083,13 +2123,13 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
                     "role": "user",
                     "content": (
                         f"USER_QUESTION:\n{user_question}\n\n"
-                        f"KB_RESULT:\n{kb_tool_result}\n\n"
+                        f"KB_RESULT:\n{kb_compact}\n\n"
                         "Return JSON only."
                     ),
                 },
             ],
             temperature=0,
-            max_tokens=120,
+            max_tokens=70,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2621,7 +2661,8 @@ async def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': onboarding_prompt.get('replies', [])})}\n\n"
                 for token in sse_tokens_preserving_formatting(str(onboarding_prompt.get("message", ""))):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
                 if request.user_id and conversation_id:
                     asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
@@ -2661,7 +2702,8 @@ async def chat_stream(request: ChatRequest):
                     faq_answer = faq_match["answer"]
                     for token in sse_tokens_preserving_formatting(faq_answer):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                        await asyncio.sleep(0.01)
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                     
                     # Save FAQ response to conversation history
                     if request.user_id and conversation_id:
@@ -3738,7 +3780,8 @@ async def chat_v2_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': _session_close_suggested_replies(preferred_language)})}\n\n"
                 for token in sse_tokens_preserving_formatting(close_msg):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
                 if request.user_id and conversation_id:
                     asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
@@ -3758,7 +3801,8 @@ async def chat_v2_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': _medbuddy_default_replies_for_language(preferred_language)})}\n\n"
                 for token in sse_tokens_preserving_formatting(welcome):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
                 if request.user_id and conversation_id:
                     asyncio.create_task(
@@ -3835,7 +3879,8 @@ async def chat_v2_stream(request: ChatRequest):
                     med_ctx["cutoff"] = cutoff_ctx
                     for token in sse_tokens_preserving_formatting(followup):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                        await asyncio.sleep(0.01)
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                     yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
                     if request.user_id and conversation_id:
                         asyncio.create_task(
@@ -3942,7 +3987,8 @@ async def chat_v2_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': followup_replies})}\n\n"
                     for token in sse_tokens_preserving_formatting(followup):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                        await asyncio.sleep(0.01)
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                     yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
                     if request.user_id and conversation_id:
                         asyncio.create_task(
@@ -4004,7 +4050,8 @@ async def chat_v2_stream(request: ChatRequest):
                     yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': cutoff_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(cutoff_answer):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
 
                 med_ctx["stage"] = "normal_qa"
                 med_ctx["last_topic"] = "Cutoff analysis"
@@ -4090,7 +4137,8 @@ async def chat_v2_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': faq_replies})}\n\n"
                     for token in sse_tokens_preserving_formatting(faq_answer):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                        await asyncio.sleep(0.01)
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                     
                     is_new_conversation = not request.conversation_id and conversation_id
                     faq_response_time_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -4240,7 +4288,8 @@ async def chat_v2_stream(request: ChatRequest):
                         final_ttft_ms = _elapsed_ms(t_out)
                         _first_out = False
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 final_stream_ms = _elapsed_ms(t_out)
                 if _v2_timing_log_enabled():
                     log(
@@ -4285,6 +4334,7 @@ async def chat_v2_stream(request: ChatRequest):
             used_web_fallback = False
             max_tool_rounds = 3
             assistant_message = None
+            full_response = ""
             kb_attempted = False
             force_web_search_next_round = False
             kb_insufficient_and_web_disabled = False
@@ -4293,9 +4343,61 @@ async def chat_v2_stream(request: ChatRequest):
             forced_fallback_response = None
             last_kb_retrieval: Optional[str] = None
             last_web_retrieval: Optional[str] = None
+            streamed_final_in_loop = False
 
             for round_idx in range(max_tool_rounds):
                 log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
+                # If KB is already sufficient, stream final answer directly from LLM in this round
+                # (avoid waiting on a blocking non-stream completion first).
+                if (
+                    preferred_language == "en"
+                    and round_idx > 0
+                    and kb_attempted
+                    and not kb_marked_insufficient
+                    and not force_web_search_next_round
+                ):
+                    t_llm = time.perf_counter()
+                    _first_out = True
+                    streamed_raw = ""
+                    for delta in _stream_chat_completion_text(
+                        client,
+                        model="gpt-4o-mini",
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=V2_FINAL_MAX_TOKENS,
+                    ):
+                        streamed_raw += delta
+                        if _first_out:
+                            final_ttft_ms = _elapsed_ms(t_llm)
+                            _first_out = False
+                        yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+
+                    llm_round_ms = _elapsed_ms(t_llm)
+                    full_response = _apply_response_policy(streamed_raw, request.question)
+                    if full_response.startswith(streamed_raw):
+                        tail = full_response[len(streamed_raw):]
+                        if tail:
+                            for token in sse_tokens_preserving_formatting(tail):
+                                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                                if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                                    await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+                    else:
+                        # Rare: policy transformed earlier text; keep streamed text to avoid jarring rewrites.
+                        full_response = streamed_raw
+
+                    final_stream_ms = _elapsed_ms(t_llm)
+                    streamed_final_in_loop = True
+                    round_stats.append(
+                        {
+                            "i": round_idx + 1,
+                            "llm": llm_round_ms,
+                            "tool": None,
+                            "tool_exec": 0.0,
+                            "suff": 0.0,
+                        }
+                    )
+                    break
+
                 # Enforce KB-first policy at runtime: round-1 only allows KB tool.
                 round_tools = available_tools
                 tool_choice_mode = "auto"
@@ -4318,7 +4420,7 @@ async def chat_v2_stream(request: ChatRequest):
                     tools=round_tools,
                     tool_choice=tool_choice_mode,
                     temperature=0.3,
-                    max_tokens=1500
+                    max_tokens=V2_FINAL_MAX_TOKENS
                 )
                 llm_round_ms = _elapsed_ms(t_llm)
                 assistant_message = response.choices[0].message
@@ -4386,7 +4488,7 @@ async def chat_v2_stream(request: ChatRequest):
                         messages.append({
                             "role": "tool",
                             "tool_call_id": "forced_kb_lookup",
-                            "content": tool_result,
+                            "content": _trim_tool_result_for_model(tool_result),
                         })
                         # Continue loop so final response generation can use tool context.
                         continue
@@ -4478,7 +4580,7 @@ async def chat_v2_stream(request: ChatRequest):
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": tool_result
+                        "content": _trim_tool_result_for_model(tool_result)
                     })
 
                     if tool_name == "search_web":
@@ -4514,7 +4616,7 @@ async def chat_v2_stream(request: ChatRequest):
                                 {
                                     "role": "tool",
                                     "tool_call_id": tool_call.id,
-                                    "content": tool_result
+                                    "content": _trim_tool_result_for_model(tool_result)
                                 },
                             ]
                             messages.append({
@@ -4577,7 +4679,17 @@ async def chat_v2_stream(request: ChatRequest):
             # ========== FINAL RESPONSE ==========
             # Suggestion chips must be grounded only in KB/RAG text, not web snippets.
             chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
-            if forced_fallback_response:
+            if streamed_final_in_loop:
+                final_replies = await _generate_contextual_suggested_replies(
+                    request.question,
+                    full_response,
+                    med_ctx,
+                    retrieval_evidence=chip_evidence,
+                    output_language=preferred_language,
+                )
+                if final_replies:
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+            elif forced_fallback_response:
                 full_response = _apply_response_policy(forced_fallback_response, request.question)
                 full_response = localize_output(full_response)
                 t_out = time.perf_counter()
@@ -4596,7 +4708,8 @@ async def chat_v2_stream(request: ChatRequest):
                         final_ttft_ms = _elapsed_ms(t_out)
                         _first_out = False
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 final_stream_ms = _elapsed_ms(t_out)
             elif assistant_message and not assistant_message.tool_calls and (assistant_message.content or "").strip():
                 full_response = _apply_response_policy(assistant_message.content or "", request.question)
@@ -4616,37 +4729,82 @@ async def chat_v2_stream(request: ChatRequest):
                         final_ttft_ms = _elapsed_ms(t_out)
                         _first_out = False
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                    await asyncio.sleep(0.01)
+                    if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                        await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 final_stream_ms = _elapsed_ms(t_out)
             else:
                 log("[V2] 🤖 Generating final response with context...")
                 final_messages = web_only_messages if (used_web_fallback and web_only_messages) else messages
                 t_out = time.perf_counter()
-                final_response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=final_messages,
-                    temperature=0.3,
-                    max_tokens=1500
-                )
-                full_response = final_response.choices[0].message.content or ""
-                full_response = _apply_response_policy(full_response, request.question)
-                full_response = localize_output(full_response)
-                _first_out = True
-                final_replies = await _generate_contextual_suggested_replies(
-                    request.question,
-                    full_response,
-                    med_ctx,
-                    retrieval_evidence=chip_evidence,
-                    output_language=preferred_language,
-                )
-                if final_replies:
-                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
-                for token in sse_tokens_preserving_formatting(full_response):
-                    if _first_out:
-                        final_ttft_ms = _elapsed_ms(t_out)
-                        _first_out = False
-                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                final_stream_ms = _elapsed_ms(t_out)
+                # True end-to-end stream for final generation (English path).
+                if preferred_language == "en":
+                    _first_out = True
+                    streamed_raw = ""
+                    for delta in _stream_chat_completion_text(
+                        client,
+                        model="gpt-4o-mini",
+                        messages=final_messages,
+                        temperature=0.3,
+                        max_tokens=V2_FINAL_MAX_TOKENS,
+                    ):
+                        streamed_raw += delta
+                        if _first_out:
+                            final_ttft_ms = _elapsed_ms(t_out)
+                            _first_out = False
+                        yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+
+                    # Keep response policy behavior while preserving streamed output.
+                    full_response = _apply_response_policy(streamed_raw, request.question)
+                    if full_response.startswith(streamed_raw):
+                        tail = full_response[len(streamed_raw):]
+                        if tail:
+                            for token in sse_tokens_preserving_formatting(tail):
+                                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                                if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                                    await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+                    else:
+                        # Rare case: policy changed non-tail text; keep what user already saw.
+                        full_response = streamed_raw
+
+                    final_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        full_response,
+                        med_ctx,
+                        retrieval_evidence=chip_evidence,
+                        output_language=preferred_language,
+                    )
+                    if final_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+                    final_stream_ms = _elapsed_ms(t_out)
+                else:
+                    # Non-English still uses post-translation finalization path.
+                    final_response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=final_messages,
+                        temperature=0.3,
+                        max_tokens=V2_FINAL_MAX_TOKENS
+                    )
+                    full_response = final_response.choices[0].message.content or ""
+                    full_response = _apply_response_policy(full_response, request.question)
+                    full_response = localize_output(full_response)
+                    _first_out = True
+                    final_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        full_response,
+                        med_ctx,
+                        retrieval_evidence=chip_evidence,
+                        output_language=preferred_language,
+                    )
+                    if final_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+                    for token in sse_tokens_preserving_formatting(full_response):
+                        if _first_out:
+                            final_ttft_ms = _elapsed_ms(t_out)
+                            _first_out = False
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+                    final_stream_ms = _elapsed_ms(t_out)
 
             if used_web_fallback:
                 yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True})}\n\n"
