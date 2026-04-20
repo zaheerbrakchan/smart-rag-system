@@ -2615,6 +2615,8 @@ async def chat_stream(request: ChatRequest):
         start_time = datetime.now()
         
         try:
+            # Emit an immediate frame to encourage early proxy/client flush for SSE.
+            yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
@@ -3731,6 +3733,8 @@ async def chat_v2_stream(request: ChatRequest):
             return _translate_text_sync(text, "en", preferred_language)
         
         try:
+            # Emit an immediate frame to encourage early proxy/client flush for SSE.
+            yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
