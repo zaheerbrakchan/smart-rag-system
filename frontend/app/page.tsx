@@ -7,13 +7,23 @@ import ChatWindow from '@/components/ChatWindow';
 import ChatSidebar from '@/components/ChatSidebar';
 import ThemeToggle from '@/components/ThemeToggle';
 import { Message, ModelType } from '@/types';
-import { streamChatMessage, UserPreferences, getConversation } from '@/services/api';
+import {
+  streamChatMessage,
+  UserPreferences,
+  getConversation,
+  createSupportQuery,
+  getMySupportQueries,
+  getMySupportNotifications,
+  markSupportNotificationRead,
+  SupportQuery,
+  SupportNotification,
+} from '@/services/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { 
   GraduationCap, Send, Sparkles, BookOpen, Calendar, FileCheck, 
-  HelpCircle, Shield, RotateCcw, Settings, LogIn, UserPlus, 
-  User, LogOut, ChevronDown, Menu 
+  HelpCircle, Shield, Settings, LogIn, UserPlus, 
+  User, LogOut, ChevronDown, Menu, MessageCircleQuestion, Bell
 } from 'lucide-react';
 
 type GuidedIntent =
@@ -22,29 +32,244 @@ type GuidedIntent =
   | 'college_shortlist'
   | 'college_fee_structure';
 
-const STARTER_INTENT_MAP: Record<string, GuidedIntent> = {
-  'NEET exam guidance': 'neet_exam_guidance',
-  'Counselling process': 'counselling_process',
-  'College shortlist': 'college_shortlist',
-  'College fee structure': 'college_fee_structure',
-};
+type LanguageCode = 'en' | 'hi' | 'mr';
 
-const GUIDED_PROMPTS: Record<GuidedIntent, { message: string }> = {
-  neet_exam_guidance: {
-    message:
-      'Great choice. What would you like to know in NEET exam guidance?',
+const TRANSLATIONS: Record<
+  LanguageCode,
+  {
+    languageLabel: string;
+    poweredByHeader: string;
+    officialNtaSource: string;
+    dashboard: string;
+    admin: string;
+    newChat: string;
+    myProfile: string;
+    signOut: string;
+    signIn: string;
+    signUp: string;
+    heroDescription: string;
+    officialNtaDocument: string;
+    authenticInfo: string;
+    aiPowered: string;
+    startWith: string;
+    noteLabel: string;
+    noteBody: string;
+    placeholderClarification: string;
+    placeholderDefault: string;
+    searching: string;
+    ask: string;
+    footerPowerBy: string;
+    footerEnter: string;
+    contactSupport: string;
+    mySupportUpdates: string;
+    supportModalTitle: string;
+    supportMessagePlaceholder: string;
+    submitSupport: string;
+    supportSent: string;
+    close: string;
+    notificationsTitle: string;
+    supportHistoryTitle: string;
+    loading: string;
+    noSupportQueries: string;
+    noNotifications: string;
+    unreadLabel: string;
+    statusPending: string;
+    statusInProgress: string;
+    statusAnswered: string;
+    statusClosed: string;
+    subjectLabel: string;
+    messageLabel: string;
+    latestReplyLabel: string;
+    markRead: string;
+    starter: Record<GuidedIntent, string>;
+    guidedPrompts: Record<GuidedIntent, string>;
+  }
+> = {
+  en: {
+    languageLabel: 'English',
+    poweredByHeader: 'Powered by Get My University',
+    officialNtaSource: 'Official NTA Source',
+    dashboard: 'Dashboard',
+    admin: 'Admin',
+    newChat: 'New Chat',
+    myProfile: 'My Profile',
+    signOut: 'Sign Out',
+    signIn: 'Sign In',
+    signUp: 'Sign Up',
+    heroDescription:
+      "India's counselling companion for NEET UG aspirants. Get structured, reliable guidance on college shortlist, fee structures, NEET exam process, and counselling roadmap.",
+    officialNtaDocument: 'Official NTA Document',
+    authenticInfo: '100% Authentic Info',
+    aiPowered: 'AI Powered',
+    startWith: 'Start With',
+    noteLabel: 'Note: ',
+    noteBody:
+      'Med Buddy is powered by Get My University. Guidance is based on available counselling documents and official sources. Always verify final admission decisions with MCC/state counselling authorities and college websites.',
+    placeholderClarification: 'Reply in your own words — e.g. All India / MCC, or name a state…',
+    placeholderDefault: 'Ask any question about NEET UG 2026...',
+    searching: 'Searching...',
+    ask: 'Ask',
+    footerPowerBy: 'Powered by',
+    footerEnter: 'Press Enter to send',
+    contactSupport: 'Contact GMU Team',
+    mySupportUpdates: 'My Support',
+    supportModalTitle: 'Send query to Get My University team',
+    supportMessagePlaceholder: 'Write your query/feedback here...',
+    submitSupport: 'Send Query',
+    supportSent: 'Support query submitted successfully.',
+    close: 'Close',
+    notificationsTitle: 'Notifications',
+    supportHistoryTitle: 'My Submitted Queries',
+    loading: 'Loading...',
+    noSupportQueries: 'No support queries yet.',
+    noNotifications: 'No notifications yet.',
+    unreadLabel: 'Unread',
+    statusPending: 'Pending',
+    statusInProgress: 'In Progress',
+    statusAnswered: 'Answered',
+    statusClosed: 'Closed',
+    subjectLabel: 'Subject',
+    messageLabel: 'Message',
+    latestReplyLabel: 'Latest reply',
+    markRead: 'Mark read',
+    starter: {
+      neet_exam_guidance: 'NEET exam guidance',
+      counselling_process: 'Counselling process',
+      college_shortlist: 'College shortlist',
+      college_fee_structure: 'College fee structure',
+    },
+    guidedPrompts: {
+      neet_exam_guidance: 'Great choice. What would you like to know in NEET exam guidance?',
+      counselling_process: 'Sure — please type the state/UT counselling details you want to know.',
+      college_shortlist:
+        'To shortlist accurately, please share your NEET rank (or expected rank), category, and preferred state.',
+      college_fee_structure:
+        'Sure — tell me which state or college fee structure you want, and if possible mention college type.',
+    },
   },
-  counselling_process: {
-    message:
-      'Sure — please type the state/UT counselling details you want to know.',
+  hi: {
+    languageLabel: 'हिंदी',
+    poweredByHeader: 'Get My University द्वारा संचालित',
+    officialNtaSource: 'आधिकारिक NTA स्रोत',
+    dashboard: 'डैशबोर्ड',
+    admin: 'एडमिन',
+    newChat: 'नई चैट',
+    myProfile: 'मेरा प्रोफाइल',
+    signOut: 'साइन आउट',
+    signIn: 'साइन इन',
+    signUp: 'साइन अप',
+    heroDescription:
+      'NEET UG अभ्यर्थियों के लिए काउंसलिंग साथी। कॉलेज शॉर्टलिस्ट, फीस, NEET प्रक्रिया और काउंसलिंग रोडमैप पर भरोसेमंद मार्गदर्शन पाएं।',
+    officialNtaDocument: 'आधिकारिक NTA दस्तावेज़',
+    authenticInfo: '100% प्रमाणित जानकारी',
+    aiPowered: 'AI संचालित',
+    startWith: 'शुरुआत करें',
+    noteLabel: 'नोट: ',
+    noteBody:
+      'Med Buddy, Get My University द्वारा संचालित है। मार्गदर्शन उपलब्ध काउंसलिंग दस्तावेज़ों और आधिकारिक स्रोतों पर आधारित है। अंतिम निर्णय से पहले MCC/राज्य काउंसलिंग प्राधिकरण और कॉलेज वेबसाइट पर अवश्य सत्यापित करें।',
+    placeholderClarification: 'अपने शब्दों में जवाब दें — जैसे All India / MCC, या किसी राज्य का नाम…',
+    placeholderDefault: 'NEET UG 2026 से जुड़ा कोई भी प्रश्न पूछें...',
+    searching: 'खोज जारी है...',
+    ask: 'पूछें',
+    footerPowerBy: 'संचालित द्वारा',
+    footerEnter: 'भेजने के लिए Enter दबाएं',
+    contactSupport: 'GMU टीम से संपर्क',
+    mySupportUpdates: 'मेरा सपोर्ट',
+    supportModalTitle: 'Get My University टीम को प्रश्न भेजें',
+    supportMessagePlaceholder: 'अपना प्रश्न/फीडबैक यहां लिखें...',
+    submitSupport: 'प्रश्न भेजें',
+    supportSent: 'सपोर्ट प्रश्न सफलतापूर्वक भेजा गया।',
+    close: 'बंद करें',
+    notificationsTitle: 'सूचनाएं',
+    supportHistoryTitle: 'मेरे भेजे गए प्रश्न',
+    loading: 'लोड हो रहा है...',
+    noSupportQueries: 'अभी कोई सपोर्ट प्रश्न नहीं है।',
+    noNotifications: 'अभी कोई सूचना नहीं है।',
+    unreadLabel: 'अपठित',
+    statusPending: 'लंबित',
+    statusInProgress: 'प्रगति में',
+    statusAnswered: 'उत्तर दिया गया',
+    statusClosed: 'बंद',
+    subjectLabel: 'विषय',
+    messageLabel: 'संदेश',
+    latestReplyLabel: 'नवीनतम उत्तर',
+    markRead: 'पढ़ा हुआ चिन्हित करें',
+    starter: {
+      neet_exam_guidance: 'NEET परीक्षा मार्गदर्शन',
+      counselling_process: 'काउंसलिंग प्रक्रिया',
+      college_shortlist: 'कॉलेज शॉर्टलिस्ट',
+      college_fee_structure: 'कॉलेज फीस संरचना',
+    },
+    guidedPrompts: {
+      neet_exam_guidance: 'बहुत बढ़िया। NEET परीक्षा मार्गदर्शन में आप क्या जानना चाहते हैं?',
+      counselling_process: 'ज़रूर — जिस राज्य/केंद्र शासित प्रदेश की काउंसलिंग जानकारी चाहिए, वह लिखें।',
+      college_shortlist:
+        'सटीक शॉर्टलिस्ट के लिए अपना NEET रैंक (या अपेक्षित रैंक/स्कोर), श्रेणी और पसंदीदा राज्य बताएं।',
+      college_fee_structure:
+        'ज़रूर — जिस राज्य या कॉलेज की फीस संरचना चाहिए, बताएं; संभव हो तो कॉलेज प्रकार भी लिखें।',
+    },
   },
-  college_shortlist: {
-    message:
-      'To shortlist accurately, please share your NEET rank (or expected rank), category, and preferred state.',
-  },
-  college_fee_structure: {
-    message:
-      'Sure — tell me which state or college fee structure you want, and if possible mention college type.',
+  mr: {
+    languageLabel: 'मराठी',
+    poweredByHeader: 'Get My University द्वारे समर्थित',
+    officialNtaSource: 'अधिकृत NTA स्रोत',
+    dashboard: 'डॅशबोर्ड',
+    admin: 'ॲडमिन',
+    newChat: 'नवीन चॅट',
+    myProfile: 'माझे प्रोफाइल',
+    signOut: 'साइन आउट',
+    signIn: 'साइन इन',
+    signUp: 'साइन अप',
+    heroDescription:
+      'NEET UG विद्यार्थ्यांसाठी समुपदेशन साथी. कॉलेज शॉर्टलिस्ट, फी स्ट्रक्चर, NEET प्रक्रिया आणि समुपदेशन रोडमॅपसाठी विश्वसनीय मार्गदर्शन मिळवा.',
+    officialNtaDocument: 'अधिकृत NTA दस्तऐवज',
+    authenticInfo: '100% प्रमाणित माहिती',
+    aiPowered: 'AI समर्थित',
+    startWith: 'यापासून सुरू करा',
+    noteLabel: 'टीप: ',
+    noteBody:
+      'Med Buddy हे Get My University द्वारे समर्थित आहे. मार्गदर्शन उपलब्ध समुपदेशन दस्तऐवज आणि अधिकृत स्रोतांवर आधारित आहे. अंतिम प्रवेश निर्णयापूर्वी MCC/राज्य समुपदेशन प्राधिकरण आणि कॉलेज संकेतस्थळावर पडताळणी करा.',
+    placeholderClarification: 'तुमच्या शब्दांत उत्तर द्या — उदा. All India / MCC किंवा राज्याचे नाव…',
+    placeholderDefault: 'NEET UG 2026 बद्दल कोणताही प्रश्न विचारा...',
+    searching: 'शोध सुरू आहे...',
+    ask: 'विचारा',
+    footerPowerBy: 'समर्थित',
+    footerEnter: 'पाठवण्यासाठी Enter दाबा',
+    contactSupport: 'GMU टीमशी संपर्क',
+    mySupportUpdates: 'माझा सपोर्ट',
+    supportModalTitle: 'Get My University टीमला प्रश्न पाठवा',
+    supportMessagePlaceholder: 'तुमचा प्रश्न/फीडबॅक येथे लिहा...',
+    submitSupport: 'प्रश्न पाठवा',
+    supportSent: 'सपोर्ट प्रश्न यशस्वीरित्या पाठवला गेला.',
+    close: 'बंद करा',
+    notificationsTitle: 'सूचना',
+    supportHistoryTitle: 'माझे पाठवलेले प्रश्न',
+    loading: 'लोड होत आहे...',
+    noSupportQueries: 'अद्याप कोणतेही सपोर्ट प्रश्न नाहीत.',
+    noNotifications: 'अद्याप कोणत्याही सूचना नाहीत.',
+    unreadLabel: 'न वाचलेले',
+    statusPending: 'प्रलंबित',
+    statusInProgress: 'प्रगतीत',
+    statusAnswered: 'उत्तर दिले',
+    statusClosed: 'बंद',
+    subjectLabel: 'विषय',
+    messageLabel: 'संदेश',
+    latestReplyLabel: 'नवीन उत्तर',
+    markRead: 'वाचले म्हणून चिन्हांकित करा',
+    starter: {
+      neet_exam_guidance: 'NEET परीक्षा मार्गदर्शन',
+      counselling_process: 'समुपदेशन प्रक्रिया',
+      college_shortlist: 'कॉलेज शॉर्टलिस्ट',
+      college_fee_structure: 'कॉलेज फी संरचना',
+    },
+    guidedPrompts: {
+      neet_exam_guidance: 'छान निवड. NEET परीक्षा मार्गदर्शनात तुम्हाला काय जाणून घ्यायचे आहे?',
+      counselling_process: 'नक्की — ज्या राज्य/केंद्रशासित प्रदेशाची समुपदेशन माहिती हवी आहे ती टाइप करा.',
+      college_shortlist:
+        'अचूक शॉर्टलिस्टसाठी तुमचा NEET रँक (किंवा अपेक्षित रँक/स्कोर), प्रवर्ग आणि पसंतीचे राज्य सांगा.',
+      college_fee_structure:
+        'नक्की — कोणत्या राज्य/कॉलेजची फी संरचना हवी ते सांगा; शक्य असल्यास कॉलेज प्रकारही नमूद करा.',
+    },
   },
 };
 
@@ -78,8 +303,110 @@ export default function Home() {
   const [allowStarterReplies, setAllowStarterReplies] = useState(true);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState<LanguageCode>('en');
+  const [showSupportModal, setShowSupportModal] = useState(false);
+  const [showSupportPanel, setShowSupportPanel] = useState(false);
+  const [supportMessage, setSupportMessage] = useState('');
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportSuccess, setSupportSuccess] = useState<string | null>(null);
+  const [supportError, setSupportError] = useState<string | null>(null);
+  const [mySupportQueries, setMySupportQueries] = useState<SupportQuery[]>([]);
+  const [myNotifications, setMyNotifications] = useState<SupportNotification[]>([]);
+  const [supportUnreadCount, setSupportUnreadCount] = useState(0);
+  const [supportPanelLoading, setSupportPanelLoading] = useState(false);
   const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const t = TRANSLATIONS[selectedLanguage];
+
+  const resolveGuidedIntent = (reply: string): GuidedIntent | null => {
+    const val = reply.trim();
+    const langs: LanguageCode[] = ['en', 'hi', 'mr'];
+    for (const lang of langs) {
+      const entries = Object.entries(TRANSLATIONS[lang].starter) as Array<[GuidedIntent, string]>;
+      for (const [intent, label] of entries) {
+        if (val === label) return intent;
+      }
+    }
+    return null;
+  };
+
+  const supportStatusLabel = (status: string) => {
+    if (status === 'pending') return t.statusPending;
+    if (status === 'in_progress') return t.statusInProgress;
+    if (status === 'answered') return t.statusAnswered;
+    if (status === 'closed') return t.statusClosed;
+    return status;
+  };
+
+  const unreadQueryIds = new Set(
+    myNotifications
+      .filter((n) => !n.is_read && typeof n.related_query_id === 'number')
+      .map((n) => n.related_query_id as number)
+  );
+
+  const refreshSupportNotifications = async () => {
+    if (!token) return;
+    try {
+      const notifications = await getMySupportNotifications(token);
+      setMyNotifications(notifications);
+      setSupportUnreadCount(notifications.filter((n) => !n.is_read).length);
+    } catch (e) {
+      console.error('Failed to refresh support notifications', e);
+    }
+  };
+
+  const loadSupportPanelData = async () => {
+    if (!token) return;
+    setSupportPanelLoading(true);
+    try {
+      const [queries, notifications] = await Promise.all([
+        getMySupportQueries(token),
+        getMySupportNotifications(token),
+      ]);
+      setMySupportQueries(queries);
+      setMyNotifications(notifications);
+      setSupportUnreadCount(notifications.filter((n) => !n.is_read).length);
+    } catch (e) {
+      console.error('Failed to load support panel data', e);
+    } finally {
+      setSupportPanelLoading(false);
+    }
+  };
+
+  const handleSubmitSupportQuery = async () => {
+    if (!token || !supportMessage.trim()) return;
+    setSupportLoading(true);
+    setSupportError(null);
+    setSupportSuccess(null);
+    try {
+      await createSupportQuery(token, {
+        student_name: user?.full_name || undefined,
+        phone: user?.phone || undefined,
+        subject: `Support query from student`,
+        message: supportMessage.trim(),
+      });
+      setSupportMessage('');
+      setSupportSuccess(t.supportSent);
+      await loadSupportPanelData();
+    } catch (err) {
+      setSupportError(err instanceof Error ? err.message : 'Failed to send support query');
+    } finally {
+      setSupportLoading(false);
+    }
+  };
+
+  const markAllSupportNotificationsRead = async () => {
+    if (!token) return;
+    const unread = myNotifications.filter((n) => !n.is_read);
+    if (unread.length === 0) return;
+    try {
+      await Promise.allSettled(unread.map((n) => markSupportNotificationRead(token, n.id)));
+      setMyNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+      setSupportUnreadCount(0);
+    } catch (e) {
+      console.error('Failed to mark all support notifications read', e);
+    }
+  };
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -93,32 +420,51 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    if (!showSupportPanel || !token) return;
+    void (async () => {
+      await loadSupportPanelData();
+      await markAllSupportNotificationsRead();
+    })();
+  }, [showSupportPanel, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    void refreshSupportNotifications();
+    const timer = window.setInterval(() => {
+      void refreshSupportNotifications();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [token]);
+
   const handleSendMessage = async (quickReply?: string) => {
     const trimmed = (quickReply ?? inputValue).trim();
     const pending = pendingClarification;
 
     if (isLoading) return;
 
-    if (!pending && quickReply && STARTER_INTENT_MAP[quickReply]) {
-      const intent = STARTER_INTENT_MAP[quickReply];
-      const guide = GUIDED_PROMPTS[intent];
-      const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      const userMessage: Message = {
-        id: `user-${turnId}`,
-        role: 'user',
-        content: quickReply,
-        timestamp: new Date(),
-      };
-      const assistantMessage: Message = {
-        id: `assistant-${turnId}`,
-        role: 'assistant',
-        content: guide.message,
-        timestamp: new Date(),
-      };
-      setGuidedIntent(intent);
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
-      setInputValue('');
-      return;
+    if (!pending && quickReply) {
+      const intent = resolveGuidedIntent(quickReply);
+      if (intent) {
+        const guideMessage = t.guidedPrompts[intent];
+        const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const userMessage: Message = {
+          id: `user-${turnId}`,
+          role: 'user',
+          content: quickReply,
+          timestamp: new Date(),
+        };
+        const assistantMessage: Message = {
+          id: `assistant-${turnId}`,
+          role: 'assistant',
+          content: guideMessage,
+          timestamp: new Date(),
+        };
+        setGuidedIntent(intent);
+        setMessages((prev) => [...prev, userMessage, assistantMessage]);
+        setInputValue('');
+        return;
+      }
     }
 
     let question: string;
@@ -268,7 +614,7 @@ export default function Home() {
                 : msg
             )
           );
-          if (normalizedReplies.some((reply) => Boolean(STARTER_INTENT_MAP[reply]))) {
+          if (normalizedReplies.some((reply) => Boolean(resolveGuidedIntent(reply)))) {
             setAllowStarterReplies(false);
           }
         },
@@ -280,7 +626,8 @@ export default function Home() {
           if (convId) {
             setSidebarKey(prev => prev + 1);
           }
-        }
+        },
+        selectedLanguage,
       );
     } catch (error) {
       setMessages((prev) => 
@@ -346,15 +693,6 @@ export default function Home() {
     setInputValue('');
   };
 
-  const clearChat = () => {
-    setMessages([]);
-    setPendingClarification(null);
-    setGuidedIntent(null);
-    setAllowStarterReplies(true);
-    setConversationId(null);  // Reset conversation for new chat
-    setSidebarKey(prev => prev + 1); // Refresh sidebar to show new conversation
-  };
-
   // Show loading only while checking auth status
   if (authLoading) {
     return (
@@ -381,6 +719,7 @@ export default function Home() {
           onNewChat={handleNewChat}
           isCollapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          language={selectedLanguage}
         />
       )}
       
@@ -396,18 +735,54 @@ export default function Home() {
               <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
                 Med Buddy
               </h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">{t.poweredByHeader}</p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-700 rounded-full">
               <Shield className="w-4 h-4 text-green-600 dark:text-green-400" />
-              <span className="text-xs font-medium text-green-700 dark:text-green-400">Official NTA Source</span>
+              <span className="text-xs font-medium text-green-700 dark:text-green-400">{t.officialNtaSource}</span>
             </div>
+
+            <select
+              value={selectedLanguage}
+              onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
+              className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200"
+              aria-label="Language"
+            >
+              <option value="en">{TRANSLATIONS.en.languageLabel}</option>
+              <option value="hi">{TRANSLATIONS.hi.languageLabel}</option>
+              <option value="mr">{TRANSLATIONS.mr.languageLabel}</option>
+            </select>
+
+            <button
+              onClick={() => {
+                setSupportError(null);
+                setSupportSuccess(null);
+                setShowSupportModal(true);
+              }}
+              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-blue-200 dark:border-blue-700 rounded-lg text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+            >
+              <MessageCircleQuestion className="w-3.5 h-3.5" />
+              <span>{t.contactSupport}</span>
+            </button>
+
+            <button
+              onClick={() => setShowSupportPanel(true)}
+              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 dark:border-slate-600 rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700 relative"
+            >
+              <Bell className="w-3.5 h-3.5" />
+              <span>{t.mySupportUpdates}</span>
+              {supportUnreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center font-semibold">
+                  {supportUnreadCount > 99 ? '99+' : supportUnreadCount}
+                </span>
+              )}
+            </button>
             
             {/* Theme Toggle */}
-            <ThemeToggle />
+            <ThemeToggle language={selectedLanguage} />
             
             {/* Admin Dashboard - Modern Glass Design */}
             {isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin') && (
@@ -422,20 +797,10 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="hidden sm:block">
-                  <p className="text-xs font-semibold text-gray-800 group-hover:text-indigo-700 transition-colors">Dashboard</p>
-                  <p className="text-[10px] text-gray-400 group-hover:text-indigo-400 transition-colors -mt-0.5">Admin</p>
+                  <p className="text-xs font-semibold text-gray-800 group-hover:text-indigo-700 transition-colors">{t.dashboard}</p>
+                  <p className="text-[10px] text-gray-400 group-hover:text-indigo-400 transition-colors -mt-0.5">{t.admin}</p>
                 </div>
               </Link>
-            )}
-            
-            {messages.length > 0 && (
-              <button
-                onClick={clearChat}
-                className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
-              >
-                <RotateCcw className="w-4 h-4" />
-                <span className="hidden sm:inline">New Chat</span>
-              </button>
             )}
             
             {/* Auth buttons */}
@@ -467,7 +832,7 @@ export default function Home() {
                             onClick={() => setShowUserMenu(false)}
                           >
                             <User className="w-4 h-4" />
-                            My Profile
+                            {t.myProfile}
                           </Link>
                           <button
                             onClick={() => {
@@ -477,7 +842,7 @@ export default function Home() {
                             className="w-full flex items-center gap-3 px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
                           >
                             <LogOut className="w-4 h-4" />
-                            Sign Out
+                            {t.signOut}
                           </button>
                         </div>
                       </>
@@ -490,14 +855,14 @@ export default function Home() {
                       className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
                     >
                       <LogIn className="w-4 h-4" />
-                      <span className="hidden sm:inline">Sign In</span>
+                      <span className="hidden sm:inline">{t.signIn}</span>
                     </Link>
                     <Link
                       href="/register"
                       className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 rounded-lg transition-colors"
                     >
                       <UserPlus className="w-4 h-4" />
-                      <span className="hidden sm:inline">Sign Up</span>
+                      <span className="hidden sm:inline">{t.signUp}</span>
                     </Link>
                   </div>
                 )}
@@ -524,63 +889,62 @@ export default function Home() {
               NEET UG 2026 <span className="bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Med Buddy</span>
             </h2>
             <p className="text-gray-600 dark:text-gray-300 max-w-xl mb-4 text-lg">
-              India&apos;s counselling companion for NEET UG aspirants. Get structured, reliable guidance on college shortlist, fee structures, NEET exam process, and counselling roadmap.
+              {t.heroDescription}
             </p>
             
             {/* Trust Badges */}
             <div className="flex flex-wrap justify-center gap-3 mb-8">
               <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 rounded-full">
                 <BookOpen className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span className="text-sm font-medium text-blue-700 dark:text-blue-400">Official NTA Document</span>
+                <span className="text-sm font-medium text-blue-700 dark:text-blue-400">{t.officialNtaDocument}</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-700 rounded-full">
                 <Shield className="w-4 h-4 text-green-600 dark:text-green-400" />
-                <span className="text-sm font-medium text-green-700 dark:text-green-400">100% Authentic Info</span>
+                <span className="text-sm font-medium text-green-700 dark:text-green-400">{t.authenticInfo}</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-700 rounded-full">
                 <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                <span className="text-sm font-medium text-purple-700 dark:text-purple-400">AI Powered</span>
+                <span className="text-sm font-medium text-purple-700 dark:text-purple-400">{t.aiPowered}</span>
               </div>
             </div>
 
             {/* Quick Questions */}
             <div className="w-full max-w-3xl">
               <p className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                Start With
+                {t.startWith}
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <QuickQuestion
                   icon={<Calendar className="w-5 h-5" />}
-                  onClick={() => void handleSendMessage('NEET exam guidance')}
+                  onClick={() => void handleSendMessage(t.starter.neet_exam_guidance)}
                 >
-                  NEET exam guidance
+                  {t.starter.neet_exam_guidance}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<BookOpen className="w-5 h-5" />}
-                  onClick={() => void handleSendMessage('Counselling process')}
+                  onClick={() => void handleSendMessage(t.starter.counselling_process)}
                 >
-                  Counselling process
+                  {t.starter.counselling_process}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<HelpCircle className="w-5 h-5" />}
-                  onClick={() => void handleSendMessage('College shortlist')}
+                  onClick={() => void handleSendMessage(t.starter.college_shortlist)}
                 >
-                  College shortlist
+                  {t.starter.college_shortlist}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<FileCheck className="w-5 h-5" />}
-                  onClick={() => void handleSendMessage('College fee structure')}
+                  onClick={() => void handleSendMessage(t.starter.college_fee_structure)}
                 >
-                  College fee structure
+                  {t.starter.college_fee_structure}
                 </QuickQuestion>
               </div>
             </div>
 
             {/* Note / disclaimer (empty-state footer) */}
             <p className="text-xs italic text-gray-400 dark:text-gray-500 mt-8 max-w-lg leading-relaxed">
-              <span className="font-medium not-italic text-gray-500 dark:text-gray-400">Note: </span>
-              Med Buddy is powered by Get My University. Guidance is based on available counselling documents and official sources.
-              Always verify final admission decisions with MCC/state counselling authorities and college websites.
+              <span className="font-medium not-italic text-gray-500 dark:text-gray-400">{t.noteLabel}</span>
+              {t.noteBody}
             </p>
           </div>
         ) : (
@@ -589,6 +953,7 @@ export default function Home() {
             isLoading={isLoading}
             messagesEndRef={messagesEndRef}
             onSuggestedReply={handleSuggestedReply}
+            language={selectedLanguage}
           />
         )}
       </div>
@@ -604,8 +969,8 @@ export default function Home() {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   pendingClarification
-                    ? 'Reply in your own words — e.g. All India / MCC, or name a state…'
-                    : 'Ask any question about NEET UG 2026...'
+                    ? t.placeholderClarification
+                    : t.placeholderDefault
                 }
                 className="w-full px-5 py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500"
                 rows={1}
@@ -620,21 +985,113 @@ export default function Home() {
               {isLoading ? (
                 <>
                   <LoadingSpinner />
-                  <span className="hidden sm:inline">Searching...</span>
+                  <span className="hidden sm:inline">{t.searching}</span>
                 </>
               ) : (
                 <>
                   <Send className="w-5 h-5" />
-                  <span className="hidden sm:inline">Ask</span>
+                  <span className="hidden sm:inline">{t.ask}</span>
                 </>
               )}
             </button>
           </div>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-2 text-center">
-            Powered by <span className="font-semibold text-blue-600 dark:text-blue-400">Get My University</span> • Press Enter to send
+            {t.footerPowerBy} <span className="font-semibold text-blue-600 dark:text-blue-400">Get My University</span> • {t.footerEnter}
           </p>
         </div>
       </div>
+
+      {showSupportModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setShowSupportModal(false)}
+          />
+          <div className="relative w-full max-w-lg bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-2xl p-5 mx-4 shadow-2xl">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">{t.supportModalTitle}</h3>
+            <textarea
+              value={supportMessage}
+              onChange={(e) => setSupportMessage(e.target.value)}
+              className="w-full min-h-[140px] p-3 rounded-xl border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-800 dark:text-white"
+              placeholder={t.supportMessagePlaceholder}
+            />
+            {supportError && <p className="text-sm text-red-600 mt-2">{supportError}</p>}
+            {supportSuccess && <p className="text-sm text-green-600 mt-2">{supportSuccess}</p>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowSupportModal(false)}
+                className="px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-700 dark:text-gray-200"
+              >
+                {t.close}
+              </button>
+              <button
+                onClick={() => void handleSubmitSupportQuery()}
+                disabled={supportLoading || !supportMessage.trim()}
+                className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white disabled:opacity-60"
+              >
+                {supportLoading ? t.loading : t.submitSupport}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSupportPanel && (
+        <div className="fixed inset-0 z-[90] flex justify-end">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setShowSupportPanel(false)} />
+          <div className="relative h-full w-full max-w-xl bg-white dark:bg-slate-900 border-l border-gray-200 dark:border-slate-700 overflow-y-auto p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{t.mySupportUpdates}</h3>
+              <button
+                onClick={() => setShowSupportPanel(false)}
+                className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 dark:border-slate-500 bg-white dark:bg-slate-800 text-gray-700 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-slate-700 shadow-sm"
+              >
+                {t.close}
+              </button>
+            </div>
+
+            <section>
+              <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">{t.supportHistoryTitle}</h4>
+              {supportPanelLoading ? (
+                <p className="text-sm text-gray-500">{t.loading}</p>
+              ) : mySupportQueries.length === 0 ? (
+                <p className="text-sm text-gray-500">{t.noSupportQueries}</p>
+              ) : (
+                <div className="space-y-3">
+                  {mySupportQueries.map((q) => {
+                    const latestReply = q.replies && q.replies.length > 0 ? q.replies[q.replies.length - 1] : null;
+                    return (
+                      <div key={q.id} className="p-3 rounded-lg border border-gray-200 dark:border-slate-700">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium text-gray-800 dark:text-gray-100">{q.subject}</p>
+                          <div className="flex items-center gap-2">
+                            {unreadQueryIds.has(q.id) && (
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300">
+                                {t.unreadLabel}
+                              </span>
+                            )}
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-gray-300">
+                              {supportStatusLabel(q.status)}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 whitespace-pre-wrap">{q.message}</p>
+                        {latestReply && (
+                          <div className="mt-2 p-2 rounded bg-blue-50 dark:bg-blue-900/20">
+                            <p className="text-xs font-medium text-blue-700 dark:text-blue-300">{t.latestReplyLabel}</p>
+                            <p className="text-sm text-blue-900 dark:text-blue-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
+                          </div>
+                        )}
+                        <p className="text-xs text-gray-400 mt-2">{new Date(q.created_at).toLocaleString()}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      )}
     </main>
     </div>
   );

@@ -28,6 +28,7 @@ DEV_MODE = os.getenv("DEBUG", "true").lower() == "true"
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_VERIFY_SERVICE_SID = os.getenv("TWILIO_VERIFY_SERVICE_SID")
+OTP_BYPASS_FOR_TESTING = os.getenv("OTP_BYPASS_FOR_TESTING", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # Initialize Twilio client (lazy loading)
 _twilio_client = None
@@ -89,6 +90,16 @@ class OTPService:
             Dictionary with success status and message
         """
         phone = OTPService._format_phone(phone)
+
+        # ===== TEST BYPASS MODE: Skip SMS provider and allow immediate OTP flow =====
+        if OTP_BYPASS_FOR_TESTING:
+            print(f"🧪 OTP_BYPASS_FOR_TESTING enabled: send_otp accepted for {phone}")
+            return {
+                "success": True,
+                "message": f"OTP accepted for testing on {phone[-4:].rjust(len(phone), '*')}",
+                "expires_in": OTP_EXPIRY_MINUTES * 60,
+                "otp": "ANY",  # explicit testing marker for local/dev use
+            }
         
         # ===== DEV MODE: Print to console =====
         if DEV_MODE:
@@ -189,6 +200,14 @@ class OTPService:
             Dictionary with verification result
         """
         phone = OTPService._format_phone(phone)
+
+        # ===== TEST BYPASS MODE: accept any OTP value =====
+        if OTP_BYPASS_FOR_TESTING:
+            print(f"🧪 OTP_BYPASS_FOR_TESTING enabled: verify_otp accepted for {phone}")
+            return {
+                "success": True,
+                "message": "Phone number verified successfully (testing bypass)"
+            }
         
         # ===== DEV MODE: Verify locally =====
         if DEV_MODE:

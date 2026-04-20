@@ -6,6 +6,7 @@ from .activity_log import ActivityLog, ActionType
 from .indexed_document import IndexedDocument
 from .faq import FAQ
 from .system_settings import SystemSettings, SettingsKeys
+from .support_query import SupportQuery, SupportQueryReply, UserNotification, SupportQueryStatus
 
 __all__ = [
     "User", "UserRole",
@@ -14,5 +15,6 @@ __all__ = [
     "ActivityLog", "ActionType",
     "IndexedDocument",
     "FAQ",
-    "SystemSettings", "SettingsKeys"
+    "SystemSettings", "SettingsKeys",
+    "SupportQuery", "SupportQueryReply", "UserNotification", "SupportQueryStatus",
 ]

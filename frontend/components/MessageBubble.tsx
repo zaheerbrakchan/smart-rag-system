@@ -15,6 +15,7 @@ import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, Che
 interface MessageBubbleProps {
   message: Message;
   onSuggestedReply: (reply: string) => void;
+  language: 'en' | 'hi' | 'mr';
 }
 
 /** True when the model likely refused or said it could not answer (avoid "Verified" in that case). */
@@ -113,13 +114,52 @@ function isLikelyRefusalOrNoInfo(content: string): boolean {
   return false;
 }
 
-export default function MessageBubble({ message, onSuggestedReply }: MessageBubbleProps) {
+function hasExternalWebSource(sources?: Source[]): boolean {
+  if (!sources || sources.length === 0) return false;
+  return sources.some((s) => {
+    const dtype = String(s.document_type || '').toLowerCase();
+    if (dtype === 'web_search') return true;
+    if (dtype.includes('web')) return true;
+    const name = String(s.file_name || '').toLowerCase();
+    return name.startsWith('http://') || name.startsWith('https://');
+  });
+}
+
+export default function MessageBubble({ message, onSuggestedReply, language }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
   const isUser = message.role === 'user';
+  const youLabel = language === 'hi' ? 'आप' : language === 'mr' ? 'तुम्ही' : 'You';
+  const buddyLabel = 'Med Buddy';
+  const tableHeaders =
+    language === 'hi'
+      ? ['संस्थान', 'राज्य', 'श्रेणी', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
+      : language === 'mr'
+      ? ['संस्था', 'राज्य', 'प्रवर्ग', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
+      : ['Institution Name', 'State', 'Category', 'Quota', 'Domicile', 'AIR', 'Score', 'Round'];
+  const noInfoRefLabel =
+    language === 'hi'
+      ? 'आधिकारिक PDF संदर्भ उपलब्ध — हो सकता है हर विवरण न दिया हो'
+      : language === 'mr'
+      ? 'अधिकृत PDF संदर्भ उपलब्ध — प्रत्येक तपशील असणे आवश्यक नाही'
+      : 'References from official PDFs — excerpts may not list every detail you asked for';
+  const verifiedLabel =
+    language === 'hi'
+      ? 'आधिकारिक दस्तावेज़ से सत्यापित'
+      : language === 'mr'
+      ? 'अधिकृत दस्तऐवजातून पडताळलेले'
+      : 'Verified from Official Document';
+  const externalVerifiedLabel = 'Verified from external sources; user discretion advised';
+  const viewRefsLabel =
+    language === 'hi'
+      ? `NEET बुलेटिन से ${message.sources?.length || 0} संदर्भ देखें`
+      : language === 'mr'
+      ? `NEET बुलेटिनमधील ${message.sources?.length || 0} संदर्भ पहा`
+      : `View ${message.sources?.length || 0} Reference(s) from NEET Bulletin`;
   const parsedCutoffTable = parseCutoffTable(message.content || '');
   const contentForMarkdown = parsedCutoffTable ? parsedCutoffTable.contentWithoutTable : (message.content || '');
   const normalizedContent = normalizeMarkdownForRender(contentForMarkdown);
   const containsTable = hasMarkdownTable(normalizedContent);
+  const isExternalAnswer = hasExternalWebSource(message.sources);
 
   // Don't render empty assistant messages (they're being streamed)
   if (!isUser && (!message.content || message.content.trim() === '') && !message.needsClarification) {
@@ -151,7 +191,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
       <div className={`flex-1 max-w-[85%] ${isUser ? 'text-right' : ''}`}>
         {/* Role label */}
         <p className={`text-xs font-semibold mb-1.5 ${isUser ? 'text-gray-500 dark:text-gray-400' : 'text-blue-600 dark:text-blue-400'}`}>
-          {isUser ? 'You' : 'Med Buddy'}
+          {isUser ? youLabel : buddyLabel}
         </p>
         
         <div
@@ -210,7 +250,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
                   <table className="min-w-full border-collapse text-sm">
                     <thead className="bg-slate-800">
                       <tr className="border-b border-slate-600">
-                        {['Institution Name', 'State', 'Category', 'Quota', 'Domicile', 'AIR', 'Score', 'Round'].map((h) => (
+                        {tableHeaders.map((h) => (
                           <th key={h} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
                             {h}
                           </th>
@@ -239,19 +279,24 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
         </div>
 
         {/* Source indicator for assistant - only show when there's actual content and not clarification */}
-        {!isUser && !message.isError && !message.needsClarification && message.content && message.content.trim() !== '' && (
+        {!isUser && !message.isError && !message.needsClarification && message.content && message.content.trim() !== '' && message.sources && message.sources.length > 0 && (
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             {isLikelyRefusalOrNoInfo(message.content) ? (
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full">
                 <BookOpen className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
                 <span className="text-xs font-medium text-amber-800 dark:text-amber-300">
-                  References from official PDFs — excerpts may not list every detail you asked for
+                  {noInfoRefLabel}
                 </span>
+              </div>
+            ) : isExternalAnswer ? (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/30 rounded-full">
+                <CheckCircle2 className="w-3.5 h-3.5 text-violet-700 dark:text-violet-300" />
+                <span className="text-xs font-medium text-violet-700 dark:text-violet-300">{externalVerifiedLabel}</span>
               </div>
             ) : (
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-full">
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-                <span className="text-xs font-medium text-green-700 dark:text-green-400">Verified from Official Document</span>
+                <span className="text-xs font-medium text-green-700 dark:text-green-400">{verifiedLabel}</span>
               </div>
             )}
           </div>
@@ -265,7 +310,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
               className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors font-medium"
             >
               <BookOpen className="w-4 h-4" />
-              <span>View {message.sources.length} Reference(s) from NEET Bulletin</span>
+              <span>{viewRefsLabel}</span>
               {showSources ? (
                 <ChevronUp className="w-4 h-4" />
               ) : (
@@ -276,7 +321,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
             {showSources && (
               <div className="mt-3 space-y-2">
                 {message.sources.map((source, index) => (
-                  <SourceCard key={index} source={source} index={index} />
+                  <SourceCard key={index} source={source} index={index} language={language} />
                 ))}
               </div>
             )}
@@ -301,7 +346,7 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
         {/* Timestamp - only show when there's content */}
         {message.content && message.content.trim() !== '' && (
           <p className={`text-xs text-gray-400 dark:text-gray-500 mt-2 ${isUser ? 'text-right' : ''}`}>
-            {formatTime(message.timestamp)}
+            {formatTime(message.timestamp, language)}
           </p>
         )}
       </div>
@@ -309,7 +354,22 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
   );
 }
 
-function SourceCard({ source, index }: { source: Source; index: number }) {
+function SourceCard({ source, index, language }: { source: Source; index: number; language: 'en' | 'hi' | 'mr' }) {
+  const pageLabel = language === 'hi' ? 'पेज' : language === 'mr' ? 'पृष्ठ' : 'Page';
+  const docLabel = language === 'hi' ? 'दस्तावेज़' : language === 'mr' ? 'दस्तऐवज' : 'Doc';
+  const chunkLabel = language === 'hi' ? 'खंड' : language === 'mr' ? 'भाग' : 'Chunk';
+  const docTooltip =
+    language === 'hi'
+      ? 'दस्तावेज़ का दायरा (अपलोड के समय सेट)'
+      : language === 'mr'
+      ? 'दस्तऐवजाचा व्याप्ती (अपलोडवेळी सेट)'
+      : 'Document scope (set when uploading)';
+  const chunkTooltip =
+    language === 'hi'
+      ? 'खंड विषय (AI, पेज-वार)'
+      : language === 'mr'
+      ? 'भाग विषय (AI, पृष्ठानुसार)'
+      : 'Chunk topic (AI, page-wise)';
   return (
     <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200 dark:border-blue-500/30 rounded-xl p-4">
       <div className="flex items-center gap-2 mb-2">
@@ -321,7 +381,7 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
         </span>
         {source.page && (
           <span className="px-2 py-0.5 bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">
-            Page {source.page}
+            {pageLabel} {source.page}
           </span>
         )}
       </div>
@@ -330,17 +390,17 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
           {source.doc_topic && (
             <span
               className="px-2 py-0.5 bg-violet-100 dark:bg-violet-500/20 text-violet-800 dark:text-violet-200 text-xs rounded-full"
-              title="Document scope (set when uploading)"
+              title={docTooltip}
             >
-              Doc: {topicLabel(source.doc_topic)}
+              {docLabel}: {topicLabel(source.doc_topic)}
             </span>
           )}
           {source.chunk_category && (
             <span
               className="px-2 py-0.5 bg-slate-200 dark:bg-slate-600/40 text-slate-800 dark:text-slate-200 text-xs rounded-full"
-              title="Chunk topic (AI, page-wise)"
+              title={chunkTooltip}
             >
-              Chunk: {topicLabel(source.chunk_category)}
+              {chunkLabel}: {topicLabel(source.chunk_category)}
             </span>
           )}
         </div>
@@ -350,8 +410,9 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
   );
 }
 
-function formatTime(date: Date): string {
-  return new Intl.DateTimeFormat('en-US', {
+function formatTime(date: Date, language: 'en' | 'hi' | 'mr'): string {
+  const locale = language === 'hi' ? 'hi-IN' : language === 'mr' ? 'mr-IN' : 'en-US';
+  return new Intl.DateTimeFormat(locale, {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);

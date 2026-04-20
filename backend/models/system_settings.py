@@ -49,3 +49,6 @@ class SettingsKeys:
     FAQ_SCORE_THRESHOLD = "faq_score_threshold"
     WEB_SEARCH_FALLBACK_ENABLED = "web_search_fallback_enabled"
     CUTOFF_COLLEGE_RESULT_LIMIT = "cutoff_college_result_limit"
+    SUPPORT_EMAIL_ENABLED = "support_email_enabled"
+    SUPPORT_SMS_ENABLED = "support_sms_enabled"
+    SUPPORT_INBOX_EMAIL = "support_inbox_email"

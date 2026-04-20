@@ -12,6 +12,55 @@ export interface UserPreferences {
   category?: string;
 }
 
+export type SupportQueryStatus = 'pending' | 'in_progress' | 'answered' | 'closed';
+
+export interface SupportQueryReply {
+  id: number;
+  responder_admin_id: number | null;
+  reply_text: string;
+  sent_email: boolean;
+  sent_sms: boolean;
+  created_at: string;
+}
+
+export interface SupportQuery {
+  id: number;
+  user_id: number;
+  student_name: string;
+  phone: string;
+  email: string | null;
+  subject: string;
+  message: string;
+  status: SupportQueryStatus;
+  assigned_admin_id: number | null;
+  answered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  replies: SupportQueryReply[];
+}
+
+export interface SupportNotification {
+  id: number;
+  type: string;
+  title: string;
+  body: string;
+  related_query_id: number | null;
+  is_read: boolean;
+  created_at: string;
+}
+
+function extractApiErrorMessage(error: any, fallback: string): string {
+  const detail = error?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const firstMsg = detail.find((d) => typeof d?.msg === 'string')?.msg;
+    if (firstMsg) return firstMsg;
+    return detail.map((d) => d?.msg || d?.message || '').filter(Boolean).join(', ') || fallback;
+  }
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message;
+  return fallback;
+}
+
 /**
  * Send a chat message to the RAG backend (non-streaming)
  */
@@ -57,7 +106,8 @@ export async function streamChatMessage(
   onSuggestedReplies?: (replies: string[]) => void,
   conversationId?: number,
   userId?: number,
-  onTitle?: (title: string, conversationId: number) => void
+  onTitle?: (title: string, conversationId: number) => void,
+  preferredLanguage?: 'en' | 'hi' | 'mr'
 ): Promise<void> {
   try {
     // Select endpoint based on config
@@ -72,6 +122,7 @@ export async function streamChatMessage(
         question,
         model,
         user_preferences: userPreferences,
+        preferred_language: preferredLanguage,
         clarified_scope: clarifiedScope,
         conversation_id: conversationId,
         user_id: userId,
@@ -266,6 +317,127 @@ export async function getConversation(
     throw new Error('Failed to fetch conversation');
   }
 
+  return response.json();
+}
+
+export async function createSupportQuery(
+  token: string,
+  payload: {
+    student_name?: string;
+    phone?: string;
+    email?: string;
+    subject?: string;
+    message: string;
+  }
+): Promise<SupportQuery> {
+  const response = await fetch(`${API_BASE_URL}/support/queries`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to submit support query' }));
+    throw new Error(extractApiErrorMessage(error, 'Failed to submit support query'));
+  }
+  return response.json();
+}
+
+export async function getMySupportQueries(token: string): Promise<SupportQuery[]> {
+  const response = await fetch(`${API_BASE_URL}/support/queries/me`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error('Failed to fetch support queries');
+  }
+  return response.json();
+}
+
+export async function getMySupportNotifications(token: string): Promise<SupportNotification[]> {
+  const response = await fetch(`${API_BASE_URL}/support/notifications/me`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error('Failed to fetch notifications');
+  }
+  return response.json();
+}
+
+export async function markSupportNotificationRead(token: string, notificationId: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/support/notifications/${notificationId}/read`, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error('Failed to mark notification as read');
+  }
+}
+
+export interface AdminSupportQueryList {
+  queries: SupportQuery[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export async function getAdminSupportQueries(
+  token: string,
+  params: { page?: number; page_size?: number; status?: SupportQueryStatus | ''; search?: string } = {}
+): Promise<AdminSupportQueryList> {
+  const qs = new URLSearchParams();
+  if (params.page) qs.set('page', String(params.page));
+  if (params.page_size) qs.set('page_size', String(params.page_size));
+  if (params.status) qs.set('status', params.status);
+  if (params.search) qs.set('search', params.search);
+  const response = await fetch(`${API_BASE_URL}/admin/support/queries?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error('Failed to fetch admin support queries');
+  }
+  return response.json();
+}
+
+export async function updateAdminSupportQueryStatus(
+  token: string,
+  queryId: number,
+  payload: { status: SupportQueryStatus; assigned_admin_id?: number | null }
+): Promise<SupportQuery> {
+  const response = await fetch(`${API_BASE_URL}/admin/support/queries/${queryId}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to update support query' }));
+    throw new Error(error.detail || 'Failed to update support query');
+  }
+  return response.json();
+}
+
+export async function replyAdminSupportQuery(
+  token: string,
+  queryId: number,
+  replyText: string
+): Promise<SupportQuery> {
+  const response = await fetch(`${API_BASE_URL}/admin/support/queries/${queryId}/reply`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ reply_text: replyText }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to send reply' }));
+    throw new Error(error.detail || 'Failed to send reply');
+  }
   return response.json();
 }
 

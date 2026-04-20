@@ -90,7 +90,32 @@ interface FAQStats {
   rejected: number;
 }
 
-type TabType = 'overview' | 'users' | 'documents' | 'faqs' | 'configurations';
+interface SupportReply {
+  id: number;
+  responder_admin_id: number | null;
+  reply_text: string;
+  sent_email: boolean;
+  sent_sms: boolean;
+  created_at: string;
+}
+
+interface SupportQueryItem {
+  id: number;
+  user_id: number;
+  student_name: string;
+  phone: string;
+  email: string | null;
+  subject: string;
+  message: string;
+  status: 'pending' | 'in_progress' | 'answered' | 'closed';
+  assigned_admin_id: number | null;
+  answered_at: string | null;
+  created_at: string;
+  updated_at: string;
+  replies: SupportReply[];
+}
+
+type TabType = 'overview' | 'users' | 'documents' | 'faqs' | 'queries' | 'configurations';
 
 export default function AdminPage() {
   const router = useRouter();
@@ -156,6 +181,17 @@ export default function AdminPage() {
   const [showCreateFaq, setShowCreateFaq] = useState(false);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [reviewingFaqAction, setReviewingFaqAction] = useState<{ id: number; action: string } | null>(null);
+
+  // Support query state
+  const [supportQueries, setSupportQueries] = useState<SupportQueryItem[]>([]);
+  const [supportTotal, setSupportTotal] = useState(0);
+  const [supportPage, setSupportPage] = useState(1);
+  const [supportTotalPages, setSupportTotalPages] = useState(1);
+  const [supportSearch, setSupportSearch] = useState('');
+  const [supportStatusFilter, setSupportStatusFilter] = useState('unreplied');
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportReplyDraft, setSupportReplyDraft] = useState<Record<number, string>>({});
+  const [supportActionLoading, setSupportActionLoading] = useState<{ id: number; action: string } | null>(null);
   
   // Auto-learning state
   const [autoLearningEnabled, setAutoLearningEnabled] = useState<boolean>(true);
@@ -339,6 +375,40 @@ export default function AdminPage() {
     }
   }, []);
 
+  // Fetch support queries (admin)
+  const fetchSupportQueries = useCallback(async (showLoader = true) => {
+    if (showLoader) setSupportLoading(true);
+    try {
+      const token = getAuthToken();
+      const params = new URLSearchParams({
+        page: supportPage.toString(),
+        page_size: '10',
+        ...(supportSearch && { search: supportSearch }),
+        ...(supportStatusFilter === 'pending' ||
+        supportStatusFilter === 'in_progress' ||
+        supportStatusFilter === 'answered' ||
+        supportStatusFilter === 'closed'
+          ? { status: supportStatusFilter }
+          : {}),
+        ...(supportStatusFilter === 'unreplied' ? { replied: 'false' } : {}),
+      });
+
+      const response = await fetch(`${API_BASE_URL}/admin/support/queries?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setSupportQueries(data.queries || []);
+        setSupportTotal(data.total || 0);
+        setSupportTotalPages(data.total_pages || 1);
+      }
+    } catch (err) {
+      console.error('Failed to fetch support queries:', err);
+    } finally {
+      setSupportLoading(false);
+    }
+  }, [supportPage, supportSearch, supportStatusFilter]);
+
   // Fetch auto-learning status
   const fetchAutoLearningStatus = useCallback(async () => {
     try {
@@ -502,6 +572,7 @@ export default function AdminPage() {
         fetchUsers(false),      // false = don't show loader (initial load)
         fetchDocuments(false),
         fetchFaqs(false),
+        fetchSupportQueries(false),
         fetchFaqStats(),
         fetchAutoLearningStatus(),
         fetchWebFallbackStatus(),
@@ -512,7 +583,7 @@ export default function AdminPage() {
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchCutoffResultLimit]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchCutoffResultLimit]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -534,6 +605,70 @@ export default function AdminPage() {
       fetchFaqs();
     }
   }, [faqsPage, faqsSearch, faqsStatusFilter, initialLoadDone]);
+
+  useEffect(() => {
+    if (initialLoadDone && activeTab === 'queries') {
+      fetchSupportQueries();
+    }
+  }, [supportPage, supportSearch, supportStatusFilter, initialLoadDone, fetchSupportQueries, activeTab]);
+
+  const handleSupportStatusUpdate = async (
+    queryId: number,
+    status: 'pending' | 'in_progress' | 'answered' | 'closed'
+  ) => {
+    setSupportActionLoading({ id: queryId, action: `status-${status}` });
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/admin/support/queries/${queryId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      });
+      if (response.ok) {
+        setSuccess('Support query status updated');
+        fetchSupportQueries();
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update support query');
+      }
+    } catch (err) {
+      setError('Failed to update support query');
+    } finally {
+      setSupportActionLoading(null);
+    }
+  };
+
+  const handleSupportReply = async (queryId: number) => {
+    const replyText = (supportReplyDraft[queryId] || '').trim();
+    if (!replyText) return;
+    setSupportActionLoading({ id: queryId, action: 'reply' });
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/admin/support/queries/${queryId}/reply`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ reply_text: replyText }),
+      });
+      if (response.ok) {
+        setSupportReplyDraft((prev) => ({ ...prev, [queryId]: '' }));
+        setSuccess('Reply sent to student');
+        fetchSupportQueries();
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to send reply');
+      }
+    } catch (err) {
+      setError('Failed to send reply');
+    } finally {
+      setSupportActionLoading(null);
+    }
+  };
 
   // User actions
   const handleUpdateUser = async (userId: number, updates: Partial<User>) => {
@@ -956,6 +1091,7 @@ export default function AdminPage() {
                   if (activeTab === 'users') fetchUsers();
                   if (activeTab === 'documents') fetchDocuments();
                   if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); fetchAutoLearningStatus(); fetchWebFallbackStatus(); }
+                  if (activeTab === 'queries') fetchSupportQueries();
                   if (activeTab === 'configurations') { fetchAutoLearningStatus(); fetchWebFallbackStatus(); fetchCutoffResultLimit(); }
                 }}
                 className="p-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 rounded-lg"
@@ -1094,6 +1230,7 @@ export default function AdminPage() {
             { id: 'users', label: 'Users', icon: Users },
             { id: 'documents', label: 'Documents', icon: FileText },
             { id: 'faqs', label: 'FAQs', icon: MessageSquare, badge: faqStats?.pending_review },
+            { id: 'queries', label: 'Queries', icon: ShieldAlert, badge: supportQueries.filter((q) => q.status === 'pending').length },
             { id: 'configurations', label: 'Configurations', icon: Settings }
           ].map((tab) => (
             <button
@@ -1729,6 +1866,202 @@ export default function AdminPage() {
                   <span className="px-3 py-2 text-slate-400">Page {faqsPage} of {faqsTotalPages || 1}</span>
                   <button onClick={() => setFaqsPage(p => Math.min(faqsTotalPages || 1, p + 1))} disabled={faqsPage >= (faqsTotalPages || 1)}
                     className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                    <ChevronRight className="w-4 h-4 text-white" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Support Queries Tab */}
+        {activeTab === 'queries' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-4">
+                <p className="text-slate-400 text-sm">Total Queries</p>
+                <p className="text-2xl font-bold text-white">{supportTotal}</p>
+              </div>
+              <div className="bg-orange-500/10 rounded-xl border border-orange-500/20 p-4">
+                <p className="text-orange-400 text-sm">Pending</p>
+                <p className="text-2xl font-bold text-orange-400">{supportQueries.filter((q) => q.status === 'pending').length}</p>
+              </div>
+              <div className="bg-blue-500/10 rounded-xl border border-blue-500/20 p-4">
+                <p className="text-blue-400 text-sm">In Progress</p>
+                <p className="text-2xl font-bold text-blue-400">{supportQueries.filter((q) => q.status === 'in_progress').length}</p>
+              </div>
+              <div className="bg-green-500/10 rounded-xl border border-green-500/20 p-4">
+                <p className="text-green-400 text-sm">Answered</p>
+                <p className="text-2xl font-bold text-green-400">{supportQueries.filter((q) => q.status === 'answered').length}</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-4">
+              <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex-1 min-w-[220px] relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by student/phone/subject..."
+                    value={supportSearch}
+                    onChange={(e) => {
+                      setSupportSearch(e.target.value);
+                      setSupportPage(1);
+                    }}
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+                <select
+                  value={supportStatusFilter}
+                  onChange={(e) => {
+                    setSupportStatusFilter(e.target.value);
+                    setSupportPage(1);
+                  }}
+                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                >
+                  <option value="unreplied">Unreplied (Default)</option>
+                  <option value="all">All</option>
+                  <option value="pending">Pending</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="answered">Answered</option>
+                  <option value="closed">Closed</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              {supportLoading && supportQueries.length === 0 ? (
+                <>
+                  {[1, 2].map((i) => (
+                    <div key={i} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5 animate-pulse">
+                      <div className="h-5 bg-slate-700 rounded w-1/3 mb-3"></div>
+                      <div className="h-4 bg-slate-700 rounded w-full mb-2"></div>
+                      <div className="h-4 bg-slate-700 rounded w-2/3"></div>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                supportQueries.map((q) => {
+                  const latestReply = q.replies?.length ? q.replies[q.replies.length - 1] : null;
+                  const alreadyReplied = (q.replies?.length || 0) > 0;
+                  const isReplyLoading = supportActionLoading?.id === q.id && supportActionLoading?.action === 'reply';
+                  return (
+                    <div key={q.id} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                        <div>
+                          <p className="text-white font-semibold">{q.subject}</p>
+                          <p className="text-xs text-slate-400 mt-1">
+                            {q.student_name} • {q.phone}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-1 text-xs rounded-full ${
+                            q.status === 'pending'
+                              ? 'bg-orange-500/10 text-orange-400'
+                              : q.status === 'in_progress'
+                              ? 'bg-blue-500/10 text-blue-400'
+                              : q.status === 'answered'
+                              ? 'bg-green-500/10 text-green-400'
+                              : 'bg-slate-600/30 text-slate-300'
+                          }`}>
+                            {q.status}
+                          </span>
+                          <select
+                            value={q.status}
+                            onChange={(e) =>
+                              void handleSupportStatusUpdate(
+                                q.id,
+                                e.target.value as 'pending' | 'in_progress' | 'answered' | 'closed'
+                              )
+                            }
+                            className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs text-white"
+                            disabled={Boolean(supportActionLoading && supportActionLoading.id === q.id)}
+                          >
+                            <option value="pending">pending</option>
+                            <option value="in_progress">in_progress</option>
+                            <option value="answered">answered</option>
+                            <option value="closed">closed</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <p className="text-sm text-slate-300 whitespace-pre-wrap">{q.message}</p>
+                      {q.email && <p className="text-xs text-slate-500 mt-2">Email: {q.email}</p>}
+
+                      {latestReply && (
+                        <div className="mt-3 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                          <p className="text-xs text-blue-300 mb-1">Latest reply</p>
+                          <p className="text-sm text-blue-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
+                          <p className="text-xs text-blue-300/70 mt-1">
+                            Email sent: {latestReply.sent_email ? 'yes' : 'no'} • SMS sent: {latestReply.sent_sms ? 'yes' : 'no'}
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="mt-3">
+                        {alreadyReplied ? (
+                          <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-sm">
+                            Reply already sent. Additional replies are disabled.
+                          </div>
+                        ) : (
+                          <>
+                            <textarea
+                              value={supportReplyDraft[q.id] || ''}
+                              onChange={(e) =>
+                                setSupportReplyDraft((prev) => ({ ...prev, [q.id]: e.target.value }))
+                              }
+                              rows={3}
+                              placeholder="Write reply to student..."
+                              className="w-full p-3 rounded-lg bg-slate-700/50 border border-slate-600 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                            <div className="mt-2 flex justify-end">
+                              <button
+                                onClick={() => void handleSupportReply(q.id)}
+                                disabled={isReplyLoading || !(supportReplyDraft[q.id] || '').trim()}
+                                className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                              >
+                                {isReplyLoading ? 'Sending...' : 'Send reply'}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <p className="text-xs text-slate-500 mt-3">
+                        Created: {new Date(q.created_at).toLocaleString()} {q.answered_at ? `• Answered: ${new Date(q.answered_at).toLocaleString()}` : ''}
+                      </p>
+                    </div>
+                  );
+                })
+              )}
+
+              {!supportLoading && supportQueries.length === 0 && (
+                <div className="bg-slate-800/50 rounded-2xl border border-slate-700 py-12 text-center">
+                  <ShieldAlert className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                  <p className="text-slate-400">No support queries found</p>
+                </div>
+              )}
+            </div>
+
+            {supportQueries.length > 0 && (
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-slate-400">{supportTotal} support queries</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSupportPage((p) => Math.max(1, p - 1))}
+                    disabled={supportPage === 1}
+                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg"
+                  >
+                    <ChevronLeft className="w-4 h-4 text-white" />
+                  </button>
+                  <span className="px-3 py-2 text-slate-400">
+                    Page {supportPage} of {supportTotalPages || 1}
+                  </span>
+                  <button
+                    onClick={() => setSupportPage((p) => Math.min(supportTotalPages || 1, p + 1))}
+                    disabled={supportPage >= (supportTotalPages || 1)}
+                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg"
+                  >
                     <ChevronRight className="w-4 h-4 text-white" />
                   </button>
                 </div>

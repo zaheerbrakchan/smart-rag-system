@@ -92,6 +92,27 @@ class User(Base):
         back_populates="reviewed_by_user",
         foreign_keys="PendingQA.reviewed_by"
     )
+    support_queries: Mapped[List["SupportQuery"]] = relationship(
+        "SupportQuery",
+        back_populates="user",
+        foreign_keys="SupportQuery.user_id",
+        cascade="all, delete-orphan",
+    )
+    assigned_support_queries: Mapped[List["SupportQuery"]] = relationship(
+        "SupportQuery",
+        back_populates="assigned_admin",
+        foreign_keys="SupportQuery.assigned_admin_id",
+    )
+    support_query_replies: Mapped[List["SupportQueryReply"]] = relationship(
+        "SupportQueryReply",
+        back_populates="responder_admin",
+        foreign_keys="SupportQueryReply.responder_admin_id",
+    )
+    notifications: Mapped[List["UserNotification"]] = relationship(
+        "UserNotification",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, full_name='{self.full_name}', role={self.role.value})>"
@@ -122,3 +143,4 @@ class User(Base):
 from .conversation import Conversation
 from .activity_log import ActivityLog
 from .pending_qa import PendingQA
+from .support_query import SupportQuery, SupportQueryReply, UserNotification
