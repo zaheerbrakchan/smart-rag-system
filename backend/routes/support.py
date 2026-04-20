@@ -2,10 +2,13 @@
 Support query routes for students and admins.
 """
 
+import asyncio
+import json
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, exists
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,9 +28,47 @@ from models.support_query import (
 from models.activity_log import ActionType
 from models.system_settings import SystemSettings, SettingsKeys
 from repositories.activity_log_repository import ActivityLogRepository
+from repositories.user_repository import UserRepository
+from services.auth_service import AuthService
 from services.support_notification_service import SupportNotificationService
 
 router = APIRouter(tags=["Support"])
+
+
+class _SupportNotificationHub:
+    """
+    In-process pub/sub for per-user support notification events.
+    """
+
+    def __init__(self) -> None:
+        self._subs: Dict[int, List[asyncio.Queue]] = {}
+        self._lock = asyncio.Lock()
+
+    async def subscribe(self, user_id: int) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        async with self._lock:
+            self._subs.setdefault(user_id, []).append(q)
+        return q
+
+    async def unsubscribe(self, user_id: int, queue: asyncio.Queue) -> None:
+        async with self._lock:
+            queues = self._subs.get(user_id, [])
+            if queue in queues:
+                queues.remove(queue)
+            if not queues and user_id in self._subs:
+                self._subs.pop(user_id, None)
+
+    async def publish(self, user_id: int, event: dict) -> None:
+        async with self._lock:
+            queues = list(self._subs.get(user_id, []))
+        for q in queues:
+            try:
+                q.put_nowait(event)
+            except Exception:
+                continue
+
+
+notification_hub = _SupportNotificationHub()
 
 
 class SupportQueryCreateRequest(BaseModel):
@@ -255,6 +296,48 @@ async def list_my_notifications(
     ]
 
 
+async def _get_user_from_access_token(db: AsyncSession, token: str) -> User:
+    payload = AuthService.verify_token(token, token_type="access")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    user = await UserRepository(db).get_by_id(int(user_id))
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account is deactivated")
+    return user
+
+
+@router.get("/support/notifications/stream")
+async def stream_my_notifications(
+    token: str = Query(..., min_length=10),
+    db: AsyncSession = Depends(get_db),
+):
+    current_user = await _get_user_from_access_token(db, token)
+    queue = await notification_hub.subscribe(current_user.id)
+
+    async def event_gen():
+        try:
+            # Handshake event so frontend knows stream is connected.
+            yield f"data: {json.dumps({'type': 'connected'})}\n\n"
+            while True:
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield f"data: {json.dumps(evt)}\n\n"
+                except asyncio.TimeoutError:
+                    # Keep connection alive without extra DB/API calls.
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            return
+        finally:
+            await notification_hub.unsubscribe(current_user.id, queue)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
 @router.patch("/support/notifications/{notification_id}/read")
 async def mark_notification_read(
     notification_id: int,
@@ -431,6 +514,15 @@ async def reply_support_query_admin(
     await db.commit()
     await db.refresh(item)
     await db.refresh(item, attribute_names=["replies"])
+    await db.refresh(notif)
+    await notification_hub.publish(
+        item.user_id,
+        {
+            "type": "support_notification_created",
+            "query_id": item.id,
+            "notification_id": notif.id,
+        },
+    )
     await ActivityLogRepository(db).log_action(
         action_type=ActionType.CHAT_MESSAGE,
         description="Admin replied to support query",

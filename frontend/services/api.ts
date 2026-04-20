@@ -375,6 +375,27 @@ export async function markSupportNotificationRead(token: string, notificationId:
   }
 }
 
+export function connectSupportNotificationStream(
+  token: string,
+  onEvent: (data: { type: string; [key: string]: any }) => void,
+  onError?: () => void
+): EventSource {
+  const url = `${API_BASE_URL}/support/notifications/stream?token=${encodeURIComponent(token)}`;
+  const es = new EventSource(url);
+  es.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      onEvent(data);
+    } catch {
+      // Ignore malformed/non-JSON frames.
+    }
+  };
+  es.onerror = () => {
+    if (onError) onError();
+  };
+  return es;
+}
+
 export interface AdminSupportQueryList {
   queries: SupportQuery[];
   total: number;
