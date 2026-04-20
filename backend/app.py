@@ -3175,8 +3175,10 @@ Provide a helpful, accurate answer based on the context above. If this is a foll
         generate_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
+            "Content-Type": "text/event-stream; charset=utf-8",
             "Connection": "keep-alive",
+            "Pragma": "no-cache",
             "X-Accel-Buffering": "no"
         }
     )
@@ -4891,8 +4893,10 @@ async def chat_v2_stream(request: ChatRequest):
         generate_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
+            "Content-Type": "text/event-stream; charset=utf-8",
             "Connection": "keep-alive",
+            "Pragma": "no-cache",
             "X-Accel-Buffering": "no"
         }
     )

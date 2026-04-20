@@ -335,7 +335,17 @@ async def stream_my_notifications(
         finally:
             await notification_hub.unsubscribe(current_user.id, queue)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Connection": "keep-alive",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.patch("/support/notifications/{notification_id}/read")
