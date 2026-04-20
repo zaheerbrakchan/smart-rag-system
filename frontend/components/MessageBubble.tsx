@@ -57,7 +57,12 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
   if (start < 0) return null;
 
   let end = content.length;
-  const disclaimerIdx = content.indexOf('\n> Disclaimer', start);
+  const disclaimerIdxFromNote = content.indexOf('\n> *Note', start);
+  const disclaimerIdxLegacy = content.indexOf('\n> Disclaimer', start);
+  const disclaimerIdx =
+    disclaimerIdxFromNote >= 0 && disclaimerIdxLegacy >= 0
+      ? Math.min(disclaimerIdxFromNote, disclaimerIdxLegacy)
+      : Math.max(disclaimerIdxFromNote, disclaimerIdxLegacy);
   const ctaIdx = content.indexOf('\nWould you like', start);
   if (disclaimerIdx >= 0) end = Math.min(end, disclaimerIdx);
   if (ctaIdx >= 0) end = Math.min(end, ctaIdx);
@@ -166,6 +171,11 @@ export default function MessageBubble({ message, onSuggestedReply }: MessageBubb
                 remarkPlugins={containsTable ? [remarkGfm] : [remarkGfm, remarkBreaks]}
                 urlTransform={(url) => url}
                 components={{
+                  blockquote: ({ children }) => (
+                    <blockquote className="border-l-4 border-slate-300 dark:border-slate-600 pl-4 my-3 italic text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                      {children}
+                    </blockquote>
+                  ),
                   table: ({ children }) => (
                     <div className="my-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-600">
                       <table className="min-w-full border-collapse text-sm">{children}</table>

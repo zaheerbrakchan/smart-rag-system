@@ -9,7 +9,7 @@ This module provides a unified search interface that:
 
 import os
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union, Sequence
 from dataclasses import dataclass
 
 from llama_index.core import VectorStoreIndex
@@ -106,6 +106,29 @@ def warm_knowledge_tool():
         return False
 
 
+def _normalize_states_argument(
+    state: Optional[str],
+    states: Optional[Union[str, Sequence[str]]],
+) -> List[str]:
+    """
+    Build a non-empty list of state/UT filter strings from tool args.
+    Empty list means: no state filter (search all).
+    """
+    out: List[str] = []
+    if states is not None:
+        if isinstance(states, str):
+            parts = [s.strip() for s in states.split(",") if s.strip()]
+            out.extend(parts)
+        else:
+            for s in states:
+                t = str(s).strip()
+                if t:
+                    out.append(t)
+    if not out and state and str(state).strip():
+        out.append(str(state).strip())
+    return out
+
+
 def build_metadata_filters(state: Optional[str] = None) -> Optional[Any]:
     """
     Build LlamaIndex metadata filters (state only).
@@ -136,78 +159,108 @@ def build_metadata_filters(state: Optional[str] = None) -> Optional[Any]:
     )
 
 
-def search_knowledge_base(
+def _search_knowledge_base_single_state(
     query: str,
-    state: Optional[str] = None,
-    top_k: int = 8
+    state: Optional[str],
+    top_k: int,
 ) -> SearchResponse:
-    """
-    Search the NEET counselling knowledge base.
-    
-    This is the main tool function that the LLM calls.
-    
-    Args:
-        query: Semantic search query (required)
-        state: Optional state/UT filter only
-        top_k: Number of results to return (default: 8)
-    
-    Returns:
-        SearchResponse with results and metadata
-    """
-    log(f"[TOOL] search_knowledge_base called:")
-    log(f"       Query: {query}")
-    log(f"       State: {state or 'None'}")
-    
-    # Build filters (state only)
+    """One vector retrieval with optional single-state metadata filter."""
     filters = build_metadata_filters(state)
     filters_applied: Dict[str, str] = {}
     if state:
         filters_applied["state"] = state
-    
-    # Get vector index
+
     index = get_vector_index()
-    
-    # Create retriever with filters
-    retriever = index.as_retriever(
-        similarity_top_k=top_k,
-        filters=filters
-    )
-    
-    # Execute search
+    retriever = index.as_retriever(similarity_top_k=top_k, filters=filters)
+
     try:
         nodes: List[NodeWithScore] = retriever.retrieve(query)
-        log(f"[TOOL] Retrieved {len(nodes)} results")
+        log(f"[TOOL] Retrieved {len(nodes)} results (state={state or 'ALL'})")
     except Exception as e:
         log(f"[TOOL] Search error: {e}")
-        # Retry without filters if filtered search fails
         if filters:
             log("[TOOL] Retrying without filters...")
             retriever = index.as_retriever(similarity_top_k=top_k)
             nodes = retriever.retrieve(query)
             filters_applied = {}
-    
-    # Convert to SearchResult objects
-    results = []
+        else:
+            nodes = []
+
+    results: List[SearchResult] = []
     for node in nodes:
-        metadata = node.node.metadata if hasattr(node.node, 'metadata') else {}
-        text = node.node.text if hasattr(node.node, 'text') else str(node.node)
-        
-        results.append(SearchResult(
-            text=text,
-            score=node.score if hasattr(node, 'score') else 0.0,
-            state=metadata.get("state"),
-            document_type=metadata.get("document_type"),
-            doc_topic=metadata.get("doc_topic"),
-            chunk_category=metadata.get("chunk_category") or metadata.get("category"),
-            file_name=metadata.get("file_name"),
-            page_label=metadata.get("page_label")
-        ))
+        metadata = node.node.metadata if hasattr(node.node, "metadata") else {}
+        text = node.node.text if hasattr(node.node, "text") else str(node.node)
+        results.append(
+            SearchResult(
+                text=text,
+                score=node.score if hasattr(node, "score") else 0.0,
+                state=metadata.get("state"),
+                document_type=metadata.get("document_type"),
+                doc_topic=metadata.get("doc_topic"),
+                chunk_category=metadata.get("chunk_category") or metadata.get("category"),
+                file_name=metadata.get("file_name"),
+                page_label=metadata.get("page_label"),
+            )
+        )
 
     return SearchResponse(
         results=results,
         query=query,
         filters_applied=filters_applied,
-        total_results=len(results)
+        total_results=len(results),
+    )
+
+
+def search_knowledge_base(
+    query: str,
+    state: Optional[str] = None,
+    states: Optional[Union[str, Sequence[str]]] = None,
+    top_k: int = 8,
+) -> SearchResponse:
+    """
+    Search the NEET counselling knowledge base.
+
+    Args:
+        query: Semantic search query (required)
+        state: Optional single state/UT filter (legacy)
+        states: Optional list of states/UTs — for comparisons, retrieval runs per state
+                and results are merged (deduped, top scores kept). Prefer this over a
+                single `state` when the user needs chunks from multiple states.
+        top_k: Max results after merge (default: 8)
+
+    Returns:
+        SearchResponse with results and metadata
+    """
+    state_list = _normalize_states_argument(state, states)
+
+    log(f"[TOOL] search_knowledge_base called:")
+    log(f"       Query: {query}")
+    log(f"       State filter: {state_list if state_list else 'None (all states)'}")
+
+    if len(state_list) <= 1:
+        only = state_list[0] if state_list else None
+        return _search_knowledge_base_single_state(query, only, top_k)
+
+    # Multi-state: one retrieval per state, merge + dedupe, keep best scores
+    per_state_k = max(3, min(top_k, (top_k * 2) // len(state_list)))
+    merged: List[SearchResult] = []
+    seen: set = set()
+    for st in state_list:
+        part = _search_knowledge_base_single_state(query, st, per_state_k)
+        for r in part.results:
+            key = (r.file_name or "", r.page_label or "", (r.text or "")[:200])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+
+    merged.sort(key=lambda x: x.score, reverse=True)
+    merged = merged[:top_k]
+    return SearchResponse(
+        results=merged,
+        query=query,
+        filters_applied={"states_or": ", ".join(state_list)},
+        total_results=len(merged),
     )
 
 
@@ -274,9 +327,11 @@ def execute_tool_call(
     """
     try:
         if tool_name == "search_knowledge_base":
+            raw_states = arguments.get("states")
             response = search_knowledge_base(
                 query=arguments.get("query", ""),
                 state=arguments.get("state"),
+                states=raw_states,
             )
             formatted = format_search_results_for_llm(response)
             return formatted, True

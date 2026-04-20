@@ -41,6 +41,26 @@ def _render_sql_for_debug(sql: str, params: Dict[str, object]) -> str:
     return rendered
 
 
+def _domicile_sql_filter(*, home_state: str, row_state: str) -> str:
+    """
+    Domicile column uses exact semantic values (case may vary): DOMICILE, NON-DOMICILE, OPEN.
+
+    - OPEN: always eligible (any student from any state).
+    - Same home state as the college's state: DOMICILE or OPEN (not NON-DOMICILE-only rows).
+    - Different home state: NON-DOMICILE or OPEN (not DOMICILE-only rows).
+
+    Never use ILIKE '%DOMICILE%' — it incorrectly matches NON-DOMICILE.
+
+    We normalize with TRIM/UPPER and hyphen→space so 'NON-DOMICILE' and 'NON DOMICILE' match.
+    """
+    same = (home_state or "").strip().lower() == (row_state or "").strip().lower()
+    allowed = "('DOMICILE', 'OPEN')" if same else "('NON DOMICILE', 'OPEN')"
+    return f"""AND (
+          REPLACE(TRIM(UPPER(COALESCE(domicile, ''))), '-', ' ')
+          IN {allowed}
+        )"""
+
+
 def _state_limits(states: List[str], total_limit: int) -> Dict[str, int]:
     if not states:
         return {}
@@ -51,6 +71,16 @@ def _state_limits(states: List[str], total_limit: int) -> Dict[str, int]:
     for idx, state in enumerate(states):
         limits[state] = base + (1 if idx < rem else 0)
     return limits
+
+
+def _format_score_for_output(raw_score: object) -> str:
+    """Render score without trailing decimals (e.g., 370 instead of 370.00)."""
+    if raw_score is None:
+        return "-"
+    try:
+        return str(int(float(raw_score)))
+    except (TypeError, ValueError):
+        return str(raw_score)
 
 
 async def fetch_cutoff_recommendations(
@@ -99,7 +129,7 @@ async def fetch_cutoff_recommendations(
           AND score IS NOT NULL
           AND score <= :user_score
           AND category ILIKE :category_like
-          AND domicile ILIKE ANY(:domicile_patterns)
+          __DOMICILE_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
           score DESC
@@ -127,7 +157,7 @@ async def fetch_cutoff_recommendations(
           AND air_rank IS NOT NULL
           AND air_rank >= :user_rank
           AND category ILIKE :category_like
-          AND domicile ILIKE ANY(:domicile_patterns)
+          __DOMICILE_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
           air_rank ASC
@@ -148,12 +178,9 @@ async def fetch_cutoff_recommendations(
                 "category_like": category_like,
                 "state_limit": per_state_limits.get(state, 1),
             }
-            if state.lower() == home_state.lower():
-                params["domicile_patterns"] = ["%DOMICILE%"]
-            else:
-                params["domicile_patterns"] = ["%NON-DOMICILE%", "%NON DOMICILE%", "%OPEN%"]
-
+            domicile_filter = _domicile_sql_filter(home_state=home_state, row_state=state)
             sql_base = score_sql_base if metric_type == "score" else rank_sql_base
+            sql_base = sql_base.replace("__DOMICILE_FILTER__", domicile_filter)
             if college_type_patterns:
                 sql_base = sql_base.replace(
                     "        ORDER BY",
@@ -224,9 +251,9 @@ def format_cutoff_markdown(
         metric_label = "AIR Rank" if metric_type == "rank" else "Score"
         states_label = ", ".join(target_states) if target_states else "your selected states"
         domicile_mode = (
-            "non-domicile/open"
+            "NON-DOMICILE or OPEN (home state differs from target state)"
             if any(s.lower() != (home_state or "").lower() for s in target_states)
-            else "domicile"
+            else "DOMICILE or OPEN (home state matches target state)"
         )
         return (
             "I checked the 2025 cutoff records carefully, but I could not find a direct match for your current preference set.\n\n"
@@ -273,7 +300,7 @@ def format_cutoff_markdown(
                 quota=row.get("quota") or "-",
                 dom=row.get("domicile") or "-",
                 air=row.get("air_rank") if row.get("air_rank") is not None else "-",
-                score=row.get("score") if row.get("score") is not None else "-",
+                score=_format_score_for_output(row.get("score")),
                 round_=row.get("round") or "-",
             )
         )
@@ -281,7 +308,8 @@ def format_cutoff_markdown(
     lines.extend(
         [
             "",
-            "> Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. Please verify final options on official MCC/state counselling portals.",
+            "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
+            "Please verify final options on official MCC/state counselling portals.*",
             "",
             "Would you like me to refine this further by quota, college type, or a specific state?",
         ]

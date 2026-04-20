@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Tuple, AsyncGenerator
+from typing import Optional, List, Dict, Tuple, Any, AsyncGenerator
 from dotenv import load_dotenv
 
 # Use uvicorn's logger (same one that shows "INFO: Uvicorn running on...")
@@ -39,6 +39,231 @@ def _v2_timing_log_enabled() -> bool:
 
 def _elapsed_ms(since: float) -> float:
     return (time.perf_counter() - since) * 1000.0
+
+
+SUPPORTED_LANGUAGES = {"en", "hi", "mr"}
+
+
+def _normalize_language_code(raw: Optional[str]) -> str:
+    code = str(raw or "en").strip().lower()
+    if code in SUPPORTED_LANGUAGES:
+        return code
+    return "en"
+
+
+def _detect_user_language_sync(text: str) -> str:
+    """
+    Detect user language among en/hi/mr.
+    """
+    if not text or not text.strip():
+        return "en"
+    # English greeting "hi" clashes with ISO code `hi` for Hindi — treat known greetings as English.
+    if _is_greeting_only(text):
+        return "en"
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Detect the natural language of the USER TEXT. Return JSON only: {\"language\": \"en|hi|mr\"}.\n"
+                        "- Use **en** for English (including the standalone greeting words hi, hey, hello).\n"
+                        "- Use **hi** only when the text is actually **Hindi** (Devanagari script or clear Hindi words).\n"
+                        "- Use **mr** only for **Marathi** (Devanagari typical Marathi forms).\n"
+                        "Important: the token \"hi\" as an English hello is **en**, not Hindi. "
+                        "The value \"hi\" in JSON must mean Hindi **content**, not the greeting \"hi\"."
+                    ),
+                },
+                {"role": "user", "content": text[:800]},
+            ],
+            temperature=0,
+            max_tokens=40,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        return _normalize_language_code(str(parsed.get("language", "en")))
+    except Exception as e:
+        log(f"[V2] ⚠️ Language detection failed, defaulting en: {e}")
+        return "en"
+
+
+def _is_markdown_table_separator_line(line: str) -> bool:
+    """True for GFM-style header separator rows like |---|:---:|."""
+    s = line.strip()
+    if not (s.startswith("|") and s.endswith("|")):
+        return False
+    cells = [c.strip() for c in s.strip("|").split("|")]
+    if not cells or not any(cells):
+        return False
+    for c in cells:
+        if not c:
+            continue
+        if not re.fullmatch(r":?-{1,}:?", c):
+            return False
+    return True
+
+
+def _document_contains_pipe_table(text: str) -> bool:
+    """Heuristic: at least two pipe-delimited table rows (avoids one-line false positives)."""
+    run = 0
+    for raw in text.split("\n"):
+        st = raw.strip()
+        if st.startswith("|") and st.endswith("|") and st.count("|") >= 2:
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def _translate_plain_chunk_sync(text: str, source_lang: str, target_lang: str) -> str:
+    """Translate prose / non-table markdown in one shot."""
+    if not text or source_lang == target_lang:
+        return text
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        max_out = min(8192, max(900, len(text) // 2 + 1200))
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a precise translator for NEET counselling chat.\n"
+                        "Preserve meaning, numbers, bullet/heading markdown, and blank lines.\n"
+                        "Translate only the natural-language content.\n"
+                        "Return translated text only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Source language: {source_lang}\n"
+                        f"Target language: {target_lang}\n\n"
+                        f"Text:\n{text}"
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=max_out,
+        )
+        translated = (response.choices[0].message.content or "").strip()
+        return translated or text
+    except Exception as e:
+        log(f"[V2] ⚠️ Translation failed ({source_lang}->{target_lang}): {e}")
+        return text
+
+
+def _translate_markdown_table_block_lines_sync(lines: List[str], target_lang: str) -> List[str]:
+    """
+    Translate a contiguous Markdown pipe table without merging rows.
+    Separator rows are copied verbatim so column alignment stays valid.
+    """
+    if not lines:
+        return []
+    code = _normalize_language_code(target_lang)
+    if code == "en":
+        return list(lines)
+    lang_name = {"hi": "Hindi (Devanagari)", "mr": "Marathi (Devanagari)"}.get(code, target_lang)
+    pipe_counts = [ln.count("|") for ln in lines]
+    locked = [_is_markdown_table_separator_line(ln) for ln in lines]
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        n = len(lines)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"You translate Markdown **pipe table rows** to {lang_name}.\n"
+                        f"Return JSON only: {{\"lines\": [string, ...]}} with exactly {n} strings.\n"
+                        "Rules:\n"
+                        "- lines[i] is the translation of input line i (same index).\n"
+                        "- NEVER merge two input lines into one string. One input row → one output string.\n"
+                        "- Each output line must contain the **same number of pipe '|' characters** as input line i.\n"
+                        "- For markdown separator rows (only |, -, :, spaces in cells), copy the input line **exactly**.\n"
+                        "- Translate words inside cells; keep numbers, AIR, round codes like R1, state codes like BIHAR unchanged.\n"
+                        "- Do not add text before the first | or after the last | on a row.\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps({"lines": lines}, ensure_ascii=False),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=8192,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        outs = parsed.get("lines")
+        if not isinstance(outs, list) or len(outs) != n:
+            log("[V2] ⚠️ Table translation JSON shape invalid; keeping English table")
+            return list(lines)
+        merged: List[str] = []
+        for i, orig in enumerate(lines):
+            if locked[i]:
+                merged.append(orig)
+                continue
+            cand = str(outs[i] if i < len(outs) else "").strip()
+            if cand.count("|") != pipe_counts[i]:
+                merged.append(orig)
+            else:
+                merged.append(cand)
+        return merged
+    except Exception as e:
+        log(f"[V2] ⚠️ Table-row translation failed: {e}")
+        return list(lines)
+
+
+def _translate_text_preserving_pipe_tables_sync(text: str, source_lang: str, target_lang: str) -> str:
+    """Walk the document; translate pipe-table row blocks line-wise, other chunks with plain translator."""
+    if not text or source_lang == target_lang:
+        return text
+    lines = text.split("\n")
+    out: List[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        st = lines[i].strip()
+        if st.startswith("|") and st.endswith("|") and st.count("|") >= 2:
+            j = i
+            while j < n:
+                sj = lines[j].strip()
+                if sj.startswith("|") and sj.endswith("|") and sj.count("|") >= 2:
+                    j += 1
+                else:
+                    break
+            out.extend(_translate_markdown_table_block_lines_sync(lines[i:j], target_lang))
+            i = j
+        else:
+            j = i
+            while j < n:
+                s2 = lines[j].strip()
+                if s2.startswith("|") and s2.endswith("|") and s2.count("|") >= 2:
+                    break
+                j += 1
+            chunk = "\n".join(lines[i:j])
+            if chunk.strip():
+                out.extend(_translate_plain_chunk_sync(chunk, source_lang, target_lang).split("\n"))
+            else:
+                out.extend(lines[i:j])
+            i = j
+    return "\n".join(out)
+
+
+def _translate_text_sync(text: str, source_lang: str, target_lang: str) -> str:
+    if not text or source_lang == target_lang:
+        return text
+    if _normalize_language_code(target_lang) != "en" and _document_contains_pipe_table(text):
+        return _translate_text_preserving_pipe_tables_sync(text, source_lang, target_lang)
+    return _translate_plain_chunk_sync(text, source_lang, target_lang)
 
 
 async def v2_background_save_conversation_turn(
@@ -149,6 +374,66 @@ MEDBUDDY_DEFAULT_REPLIES = [
     "College fee structure",
 ]
 
+
+def _medbuddy_default_replies_for_language(lang: str) -> List[str]:
+    code = _normalize_language_code(lang)
+    if code == "hi":
+        return [
+            "नीट परीक्षा मार्गदर्शन",
+            "काउंसलिंग प्रक्रिया",
+            "कॉलेज शॉर्टलिस्ट",
+            "कॉलेज फीस संरचना",
+        ]
+    if code == "mr":
+        return [
+            "नीट परीक्षा मार्गदर्शन",
+            "कौन्सेलिंग प्रक्रिया",
+            "महाविद्यालय शॉर्टलिस्ट",
+            "फीस संरचना",
+        ]
+    return list(MEDBUDDY_DEFAULT_REPLIES)
+
+
+def _session_close_suggested_replies(lang: str) -> List[str]:
+    code = _normalize_language_code(lang)
+    if code == "hi":
+        return [
+            "नया प्रश्न शुरू करें",
+            "फीस की तुलना",
+            "काउंसलिंग प्रक्रिया",
+        ]
+    if code == "mr":
+        return [
+            "नवा प्रश्न सुरू करा",
+            "फी तुलना",
+            "कौन्सेलिंग प्रक्रिया",
+        ]
+    return ["Start new query", "Compare fees", "Counselling process"]
+
+
+def _chip_generation_language_rules(output_language: str) -> str:
+    """System-prompt fragment so quick-reply chips match the user's UI language."""
+    code = _normalize_language_code(output_language)
+    if code == "hi":
+        return (
+            "LANGUAGE (mandatory): Write **every** chip in **Hindi** using **Devanagari** script only. "
+            "Do not use English in chip strings.\n"
+            "- Keep each chip a very short user question (one brief line; about as compact as 5–8 English words).\n"
+            "- RETRIEVED_EVIDENCE may be English; chips must still be grounded Hindi questions about the same facts.\n"
+        )
+    if code == "mr":
+        return (
+            "LANGUAGE (mandatory): Write **every** chip in **Marathi** using **Devanagari** script only. "
+            "Do not use English in chip strings.\n"
+            "- Keep each chip a very short user question (one brief line; about as compact as 5–8 English words).\n"
+            "- RETRIEVED_EVIDENCE may be English; chips must still be grounded Marathi questions about the same facts.\n"
+        )
+    return (
+        "LANGUAGE: Write every chip in **English**.\n"
+        "- Each reply at most 6 words.\n"
+    )
+
+
 MEDBUDDY_CAPS = {
     "cutoff": True,
     "mbbs_abroad": os.getenv("MEDBUDDY_ENABLE_MBBS_ABROAD", "false").lower() in ("1", "true", "yes"),
@@ -240,6 +525,9 @@ def _extract_onboarding_updates(question: str) -> Dict[str, str]:
         updates["abroad_interest"] = "yes"
     elif any(x in q for x in ["no india only", "india only", "no abroad"]):
         updates["abroad_interest"] = "no"
+
+    if _extract_states_from_text(question, cutoff_db_states=None, use_llm_fallback=False):
+        updates["state_scope"] = "provided"
     return updates
 
 
@@ -247,24 +535,59 @@ def _next_onboarding_prompt(med_ctx: Dict[str, object], question: str) -> Option
     onboarding = dict(med_ctx.get("onboarding") or {})
     q = _normalize_text(question)
 
-    # Collect rank/category only when user is explicitly asking for
-    # shortlist/cutoff-style guidance.
+    # Shortlist / college-finding: collect rank → domicile+target states → category first.
+    # Do not ask govt/private vs deemed in this guided path (refine after results).
     needs_rank_context = any(
-        k in q for k in ["shortlist", "cutoff", "cut off", "college list", "which college", "compare colleges"]
+        k in q
+        for k in [
+            "shortlist",
+            "cutoff",
+            "cut off",
+            "college list",
+            "which college",
+            "compare colleges",
+            "find college",
+            "find a college",
+            "good college",
+            "best college",
+            "looking for college",
+            "college prediction",
+        ]
     )
 
     if not (_is_broad_discovery_query(question) or needs_rank_context):
         return None
 
-    if needs_rank_context and not onboarding.get("rank_or_score"):
-        return {
-            "message": (
-                "To guide you accurately for shortlist/cutoff planning, please share your "
-                "NEET rank (or expected rank/score)."
-            ),
-            "replies": [],
-            "stage": "guided_onboarding",
-        }
+    if needs_rank_context:
+        if not onboarding.get("rank_or_score"):
+            return {
+                "message": (
+                    "To suggest colleges from cutoff data, please share your **NEET AIR rank** or "
+                    "**NEET score/marks** (expected or actual)."
+                ),
+                "replies": [],
+                "stage": "guided_onboarding",
+            }
+        if not onboarding.get("state_scope"):
+            return {
+                "message": (
+                    "Next, share your **home state (domicile)** and the **state(s)** where you want "
+                    "college/cutoff options (they can be the same).\n\n"
+                    "Example: *Home Bihar, explore Bihar* or *Home Uttar Pradesh, explore Delhi and Haryana*."
+                ),
+                "replies": [],
+                "stage": "guided_onboarding",
+            }
+        if not onboarding.get("category"):
+            return {
+                "message": (
+                    "Which **NEET category** should I use?\n\n"
+                    "Pick one option below."
+                ),
+                "replies": ["General", "OBC", "SC", "ST", "EWS", "PwD"],
+                "stage": "guided_onboarding",
+            }
+        return None
 
     if not onboarding.get("category"):
         return {
@@ -295,8 +618,23 @@ def _next_onboarding_prompt(med_ctx: Dict[str, object], question: str) -> Option
     return None
 
 
-def _first_visit_welcome_message() -> str:
+def _extract_first_name(full_name: Optional[str]) -> Optional[str]:
+    if not full_name:
+        return None
+    cleaned = str(full_name).strip()
+    if not cleaned:
+        return None
+    return cleaned.split()[0]
+
+
+def _first_visit_welcome_message(first_name: Optional[str] = None) -> str:
+    greeting = (
+        f"Hi {first_name}, hope you are doing well.\n\n"
+        if first_name else
+        "Hi, hope you are doing well.\n\n"
+    )
     return (
+        f"{greeting}"
         "I am **Med Buddy**, India’s first AI counselling companion built exclusively for NEET UG aspirants, "
         "proudly powered by **Get My University**.\n\n"
         "Whether you are trying to figure out which medical/dental colleges match your score, understand "
@@ -306,8 +644,14 @@ def _first_visit_welcome_message() -> str:
     )
 
 
-def _return_visit_welcome_message() -> str:
+def _return_visit_welcome_message(first_name: Optional[str] = None) -> str:
+    greeting = (
+        f"Hi {first_name}, hope you are doing well.\n\n"
+        if first_name else
+        "Hi, hope you are doing well.\n\n"
+    )
     return (
+        f"{greeting}"
         "Welcome back! Great to see you again.\n\n"
         "Ready to continue your NEET UG counselling journey? "
         "Pick a direction below or ask your next question."
@@ -341,68 +685,33 @@ def _infer_topic_label(question: str) -> str:
     return "NEET counselling guidance"
 
 
-def _extract_entity_hint(question: str) -> Optional[str]:
-    """
-    Try to extract a specific college/entity phrase from the user question.
-    Used to avoid false 'sufficient' decisions for entity-specific fee queries.
-    """
-    q = _normalize_text(question)
-    patterns = [
-        r"(gmc\s+[a-z&\-\s]{2,40})",
-        r"(government medical college\s+[a-z&\-\s]{2,40})",
-        r"(aiims\s+[a-z&\-\s]{2,40})",
-        r"(amu\s+[a-z&\-\s]{2,40})",
-        r"(jipmer\s+[a-z&\-\s]{2,40})",
-        r"(kgmu\s+[a-z&\-\s]{2,40})",
-    ]
-    for pat in patterns:
-        m = re.search(pat, q)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def _apply_response_policy(answer: str, question: str) -> str:
+def _apply_response_policy(
+    answer: str,
+    question: str,
+    skip_compare_cta: bool = False,
+) -> str:
     text = (answer or "").strip()
     if not text:
         return text
     q = _normalize_text(question)
     factual = any(k in q for k in ["fee", "cutoff", "rank", "date", "reservation", "seat"])
-    has_disclaimer = "always verify" in text.lower() or "official website" in text.lower()
+    tlow = text.lower()
+    has_disclaimer = (
+        "always verify" in tlow
+        or "official website" in tlow
+        or "note — disclaimer" in tlow
+        or "note - disclaimer" in tlow
+        or ("note" in tlow and "disclaimer" in tlow)
+    )
     if factual and not has_disclaimer:
         text += (
-            "\n\n> Disclaimer: Information is based on available counselling documents. "
-            "Always verify the latest updates on official MCC/state counselling websites before taking admission decisions."
+            "\n\n"
+            "> *Note — Disclaimer: Information is based on available counselling documents. "
+            "Always verify the latest updates on official MCC/state counselling websites before taking admission decisions.*"
         )
-    if factual and "would you like" not in text.lower():
+    if factual and not skip_compare_cta and "would you like" not in tlow:
         text += "\n\nWould you like me to also compare this with another state/college for you?"
     return text
-
-
-def _has_structured_data_signals(text: str) -> bool:
-    t = _normalize_text(text)
-    return any(
-        k in t
-        for k in [
-            "fee", "tuition", "cost", "₹",
-            "cutoff", "cut off", "rank", "score", "percentile",
-            "seat", "quota", "reservation",
-            "round", "counselling", "date", "schedule",
-        ]
-    )
-
-
-def _is_entity_specific_query(question: str) -> bool:
-    q = _normalize_text(question)
-    if _extract_entity_hint(question):
-        return True
-    # Fallback pattern for "<college/entity> <metric>" type asks
-    return bool(
-        re.search(
-            r"\b([a-z]{3,}\s+[a-z]{2,}(?:\s+[a-z]{2,}){0,4})\b.*\b(fee|cutoff|rank|seat|reservation|date|schedule)\b",
-            q,
-        )
-    )
 
 
 def _looks_like_neet_factual_query(question: str) -> bool:
@@ -428,6 +737,61 @@ def _looks_like_neet_factual_query(question: str) -> bool:
     )
 
 
+_VAGUE_SCOPE_EXPANSION_PATTERNS: Tuple[str, ...] = (
+    "what about other",
+    "other colleges",
+    "other college",
+    "another colleges",
+    "another college",
+    "any other college",
+    "some other college",
+    "different colleges",
+    "different college",
+    "more colleges",
+    "more college",
+    "rest of colleges",
+    "rest of college",
+    "compare with another",
+    "compare to another",
+    "another state",
+    "other state",
+    "other states",
+)
+
+
+def _question_has_retrieval_scope_anchor(question: str) -> bool:
+    """
+    True when the user already narrowed the ask enough (state/UT or common institute token)
+    that a KB query is reasonable without asking for more names first.
+    """
+    q = _normalize_text(question)
+    if _extract_states_from_text(question, cutoff_db_states=None, use_llm_fallback=False):
+        return True
+    if re.search(r"\baiims\b", q):
+        return True
+    if re.search(r"\bgmc\b", q):
+        return True
+    if re.search(r"\bjipmer\b", q):
+        return True
+    if re.search(r"\bmcc\b", q):
+        return True
+    if "deemed university" in q or re.search(r"\bdeemed\b", q):
+        return True
+    return False
+
+
+def _requires_entity_clarification_before_retrieval(question: str) -> bool:
+    """
+    Broad follow-ups like 'other colleges' fees' need a named scope before KB/web search.
+    """
+    q = _normalize_text(question)
+    if not any(p in q for p in _VAGUE_SCOPE_EXPANSION_PATTERNS):
+        return False
+    if _question_has_retrieval_scope_anchor(question):
+        return False
+    return True
+
+
 def _is_cutoff_intent(question: str) -> bool:
     q = _normalize_text(question)
     return any(
@@ -445,6 +809,18 @@ def _is_cutoff_intent(question: str) -> bool:
             "based on my score",
             "college prediction",
             "shortlist",
+            "find college",
+            "find a college",
+            "find good college",
+            "good college",
+            "best college",
+            "need college",
+            "need a college",
+            "looking for college",
+            "college for me",
+            "help me find",
+            "which medical college",
+            "mbbs college",
         ]
     )
 
@@ -479,8 +855,14 @@ def _llm_should_route_cutoff_sql(question: str, med_ctx: Dict[str, object]) -> O
 
 Decide if this user message should be routed to SQL cutoff prediction table (`neet_ug_2025_cutoffs`) instead of document RAG.
 
-Route to SQL cutoff when intent is college prediction/shortlisting based on rank or score, including follow-up profile payloads that provide score/rank/category/state.
-Do NOT route to SQL for general counselling process, exam guidance, fee structure, documents, dates, or reservation policy info.
+Route **TRUE** to SQL cutoff when the user wants **college finding, shortlist, prediction, cutoffs tied to their chances**,
+or follow-ups that supply rank/score, category, or state — **even if they have not given a full profile yet**
+(the server will ask for missing rank/score, home state, target state(s), and category **before** running the query).
+
+Route **TRUE** for vague asks like "help me find a good college", "which college can I get", "shortlist", "cutoff for my rank".
+
+Route **FALSE** for general counselling process, exam-only guidance, fee structure, documents, dates, reservation policy
+**without** college prediction, or pure definitions.
 
 Conversation last topic: {med_ctx.get("last_topic") or "unknown"}
 Cutoff context already present: {bool(cutoff_ctx)}
@@ -586,7 +968,87 @@ def _extract_metric_from_text(question: str) -> Tuple[Optional[str], Optional[in
     return "rank", value
 
 
-def _extract_states_from_text(question: str) -> List[str]:
+def _normalize_state_key(raw: str) -> str:
+    s = _normalize_text(raw)
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+
+def _map_canonical_to_cutoff_db_state(
+    canonical_state: str,
+    cutoff_db_states: Optional[List[str]] = None,
+) -> str:
+    if not cutoff_db_states:
+        return canonical_state
+    target_key = _normalize_state_key(canonical_state)
+    for db_state in cutoff_db_states:
+        if _normalize_state_key(db_state) == target_key:
+            return db_state
+    return canonical_state
+
+
+def _llm_map_states_to_db_values(question: str, cutoff_db_states: List[str]) -> List[str]:
+    """
+    LLM fallback for fuzzy state mentions (e.g., 'up' -> 'Uttar Pradesh'),
+    constrained to DB-provided distinct state names.
+    """
+    if not question or not cutoff_db_states:
+        return []
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You map user-entered Indian state mentions to canonical values from an allowed list.\n"
+                        "Return ONLY JSON with key `states` as an array of exact strings from allowed_states.\n"
+                        "Rules:\n"
+                        "- Use only values that exist in allowed_states.\n"
+                        "- Resolve abbreviations like UP, MP, AP, J&K when clear.\n"
+                        "- Do not invent states.\n"
+                        "- If no state is present, return {\"states\": []}."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "query": question,
+                            "allowed_states": cutoff_db_states,
+                        }
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=180,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        states = parsed.get("states", [])
+        if not isinstance(states, list):
+            return []
+        allowed = {s for s in cutoff_db_states}
+        deduped: List[str] = []
+        seen = set()
+        for st in states:
+            if isinstance(st, str) and st in allowed and st not in seen:
+                deduped.append(st)
+                seen.add(st)
+        return deduped
+    except Exception as e:
+        log(f"[V2] ⚠️ LLM state-mapping fallback failed: {e}")
+        return []
+
+
+def _extract_states_from_text(
+    question: str,
+    cutoff_db_states: Optional[List[str]] = None,
+    use_llm_fallback: bool = False,
+) -> List[str]:
     q = _normalize_text(question)
     # Avoid false state extraction from phrases like "follow-up".
     q = q.replace("follow-up", "followup").replace("follow up", "followup")
@@ -595,14 +1057,22 @@ def _extract_states_from_text(question: str) -> List[str]:
     for alias, canonical in STATES.items():
         if canonical == "All-India":
             continue
-        # Ignore 2-letter aliases here; they create too many false positives
-        # in free text ("up" in "follow-up", etc.). Full names still work.
-        if len(alias) <= 2:
-            continue
         if re.search(rf"\b{re.escape(alias)}\b", q):
-            if canonical not in seen:
-                seen.add(canonical)
-                states.append(canonical)
+            mapped = _map_canonical_to_cutoff_db_state(canonical, cutoff_db_states)
+            if mapped not in seen:
+                seen.add(mapped)
+                states.append(mapped)
+
+    # Also try direct matching on DB truth values.
+    if cutoff_db_states:
+        for db_state in cutoff_db_states:
+            if re.search(rf"\b{re.escape(_normalize_text(db_state))}\b", q):
+                if db_state not in seen:
+                    seen.add(db_state)
+                    states.append(db_state)
+
+    if not states and use_llm_fallback and cutoff_db_states:
+        return _llm_map_states_to_db_values(question, cutoff_db_states)
     return states
 
 
@@ -670,6 +1140,23 @@ async def _get_registered_home_state(user_id: Optional[int]) -> Optional[str]:
         return None
 
 
+async def _get_registered_user_name(user_id: Optional[int]) -> Optional[str]:
+    """Fetch the logged-in student's name for response personalization."""
+    if not user_id:
+        return None
+    try:
+        from database.connection import async_session_maker
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return None
+            full_name = str(getattr(user, "full_name", "") or "").strip()
+            return full_name or None
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load registered user name: {e}")
+        return None
+
+
 def _extract_category(question: str) -> Optional[str]:
     q = _normalize_text(question)
     if "obc" in q:
@@ -688,35 +1175,57 @@ def _extract_category(question: str) -> Optional[str]:
 
 
 def _missing_cutoff_fields(cutoff_ctx: Dict[str, object]) -> List[str]:
+    """
+    Required fields before running cutoff SQL, in the order we ask the user:
+    1) AIR rank or NEET score — prediction depends on this first.
+    2) Home / domicile state — for domicile vs non-domicile rows.
+    3) State(s) to explore — where to pull college cutoffs from (may match home or not).
+    4) Category — seat-type cutoffs vary by category.
+    """
     missing: List[str] = []
     if not cutoff_ctx.get("metric_type") or not cutoff_ctx.get("metric_value"):
         missing.append("metric")
-    if not cutoff_ctx.get("category"):
-        missing.append("category")
     if not cutoff_ctx.get("home_state"):
         missing.append("home_state")
     if not cutoff_ctx.get("target_states"):
         missing.append("target_states")
+    if not cutoff_ctx.get("category"):
+        missing.append("category")
     return missing
 
 
-def _build_cutoff_followup_prompt(missing_fields: List[str]) -> str:
+def _build_cutoff_followup_prompt(
+    missing_fields: List[str],
+    cutoff_ctx: Optional[Dict[str, object]] = None,
+) -> str:
+    ctx = dict(cutoff_ctx or {})
+    friend = str(ctx.get("profile_mode") or "") == "friend_or_general"
     if "metric" in missing_fields:
         return (
-            "For cutoff prediction, please share **either your NEET score/marks or AIR rank**.\n\n"
-            "Example: `Score 540` or `AIR 5400`."
+            "To suggest colleges from cutoff data, I first need **your NEET AIR rank or your NEET score/marks** "
+            "(whichever you use).\n\n"
+            "Example: `AIR 5400` or `Score 540`."
         )
-    if "category" in missing_fields:
-        return "Please share your NEET category (General/OBC/SC/ST/EWS/PwD) so I can fetch accurate cutoff rows."
     if "home_state" in missing_fields:
+        if friend:
+            return (
+                "Please share the **candidate's home state** (domicile / home state for the person you are asking about). "
+                "I need this to apply **domicile vs non-domicile** cutoff rows correctly."
+            )
         return (
-            "Please tell me your **home state** (domicile state). "
-            "I use this to apply domicile/non-domicile cutoff rules correctly."
+            "Please tell me your **home state** (domicile / home state).\n\n"
+            "I use this with your target state(s) to apply **domicile vs non-domicile** rules correctly."
         )
     if "target_states" in missing_fields:
         return (
-            "Which state(s) do you want to check for colleges?\n\n"
-            "You can type one or multiple states, e.g. `Bihar` or `Delhi, Haryana, Punjab`."
+            "Which **state(s) or UT(s)** should I pull college cutoff options from?\n\n"
+            "This can match your home state or include other states you are exploring. "
+            "Example: `Bihar` or `Delhi, Haryana`."
+        )
+    if "category" in missing_fields:
+        return (
+            "Which **NEET category** should I use? (General / OBC / SC / ST / EWS / PwD)\n\n"
+            "Reply with your category so cutoff rows match your seat type."
         )
     return "Please share a bit more detail so I can run cutoff analysis."
 
@@ -726,10 +1235,242 @@ def _is_affirmative_reply(question: str) -> bool:
     return q in {"yes", "yes please", "yeah", "yup", "sure", "okay", "ok", "go ahead"}
 
 
-def _extract_cutoff_refinements(question: str) -> Dict[str, object]:
+def _combine_retrieval_for_suggestion_chips(
+    kb_text: Optional[str],
+    web_text: Optional[str],
+) -> Optional[str]:
+    """Merge KB + web tool outputs for chip grounding (truncated for context limits)."""
+    kb_text = (kb_text or "").strip()
+    web_text = (web_text or "").strip()
+    if not kb_text and not web_text:
+        return None
+    parts: List[str] = []
+    if kb_text:
+        parts.append("=== KNOWLEDGE BASE (retrieved) ===\n" + kb_text[:8000])
+    if web_text:
+        parts.append("=== WEB SEARCH (retrieved) ===\n" + web_text[:6000])
+    return "\n\n".join(parts)[:14000]
+
+
+def _filter_chips_not_supported_by_evidence(replies: List[str], evidence: Optional[str]) -> List[str]:
+    """
+    Drop follow-up chips whose topic is not substantively present in retrieval text.
+    Fee tables often list amounts only — do not offer payment/scholarship/refund chips unless evidence mentions them.
+    """
+    if not evidence or not replies:
+        return replies
+    ev = _normalize_text(evidence)
+    out: List[str] = []
+    for r in replies:
+        q = _normalize_text(r)
+        skip = False
+        # Chips that broaden to unnamed colleges/states are not grounded in a single retrieval.
+        if any(
+            phrase in q
+            for phrase in (
+                "other colleges",
+                "other college",
+                "another college",
+                "another state",
+                "different college",
+                "different colleges",
+                "more colleges",
+                "more college",
+            )
+        ):
+            skip = True
+        if not skip and "placement" in q and "placement" not in ev:
+            skip = True
+        if not skip and "internship" in q and "internship" not in ev:
+            skip = True
+        # Payment *methods* / how to pay (amounts named "fees" are not enough)
+        asks_payment_modality = (
+            ("payment" in q and ("option" in q or "method" in q or "mode" in q))
+            or "how to pay" in q
+            or "pay online" in q
+            or "pay fees" in q
+        )
+        if asks_payment_modality:
+            if not any(
+                k in ev
+                for k in (
+                    "demand draft",
+                    "neft",
+                    "rtgs",
+                    "upi",
+                    "online payment",
+                    "bank",
+                    "cheque",
+                    "cash payment",
+                    "installment",
+                    "emi",
+                    "mode of payment",
+                    "payment mode",
+                    "payable at",
+                    "pay through",
+                )
+            ):
+                skip = True
+        if not skip and any(k in q for k in ("scholarship", "fee waiver", "financial aid")):
+            if not any(k in ev for k in ("scholarship", "waiver", "freeship", "fee concession", "economic weaker")):
+                skip = True
+        if not skip and "refund" in q:
+            if "refund" not in ev and "forfeit" not in ev:
+                skip = True
+        if not skip and "stipend" in q:
+            if "stipend" not in ev:
+                skip = True
+        if not skip:
+            out.append(r)
+    return out
+
+
+async def _generate_contextual_suggested_replies(
+    user_question: str,
+    assistant_response: str,
+    med_ctx: Optional[Dict[str, object]] = None,
+    retrieval_evidence: Optional[str] = None,
+    output_language: str = "en",
+) -> List[str]:
+    """
+    Generate optional quick-reply chips.
+    Uses deterministic shortcuts for known guided prompts, then LLM fallback.
+    When retrieval_evidence is set, chips must stay on-topic and be answerable from that evidence.
+    """
+    response_text = str(assistant_response or "")
+    question_text = str(user_question or "")
+    response_norm = _normalize_text(response_text)
+    evidence_text = (retrieval_evidence or "").strip()
+
+    # If we are explicitly collecting rank/score/category/home state, avoid chips.
+    collection_signals = [
+        "share either your neet score",
+        "share your neet category",
+        "tell me your home state",
+        "please tell me your home state",
+        "please share your neet rank",
+        "neet air rank or",
+        "neet score/marks",
+        "home state (domicile",
+        "candidate's home state",
+        "state(s) or ut(s) should i pull",
+        "which **neet category**",
+        "which state(s) should i pull",
+    ]
+    if any(sig in response_norm for sig in collection_signals):
+        return []
+
+    # Keep initial starter choices stable.
+    if _is_greeting_only(question_text):
+        return _medbuddy_default_replies_for_language(output_language)
+
+    lang_rules = _chip_generation_language_rules(output_language)
+    max_words_per_chip = 6 if _normalize_language_code(output_language) == "en" else 14
+
+    if evidence_text:
+        grounding_rules = (
+            "CRITICAL — Answerability from evidence only:\n"
+            "- Read RETRIEVED_EVIDENCE carefully. Propose a chip ONLY if a correct answer could be written using "
+            "**only** sentences/facts from RETRIEVED_EVIDENCE (plus trivial math like summing line items already shown).\n"
+            "- NEVER propose chips that broaden to unnamed targets: no 'other colleges', 'another college', "
+            "'another state', 'more colleges', or similar unless RETRIEVED_EVIDENCE already lists those extra colleges "
+            "with comparable facts for the same question.\n"
+            "- NEVER propose placement, internship, or non-admission topics unless they appear in RETRIEVED_EVIDENCE.\n"
+            "- If the evidence is mainly a **fee table** (amounts, components, year-wise totals) and does **not** discuss "
+            "how fees are **paid** (bank, DD, UPI, instalments, portal), do **not** ask about payment methods, "
+            "payment options, or online payment — the user would get 'not in documents'.\n"
+            "- Do **not** ask about scholarships, refund policy, admission steps, hostel **facilities** (beyond a fee line), "
+            "or curriculum unless those topics are **explicitly** covered in RETRIEVED_EVIDENCE.\n"
+            "- Good fee-only chips (examples): ask about a **named component** in the table, year-to-year comparison, "
+            "security deposit, or total — only if that detail appears in the evidence.\n"
+            "- Stay on the same named college(s)/state as in the evidence; do not invent new institutes.\n"
+            "- If nothing sensible remains answerable from the evidence, return {\"replies\": []}.\n"
+        )
+    else:
+        grounding_rules = (
+            "No retrieval blob provided — use only the user question and assistant reply:\n"
+            "- Suggest follow-ups only if the assistant answer actually contains enough detail to support a further answer; "
+            "do not suggest payment methods, scholarships, or refunds unless the assistant explicitly gave information about them.\n"
+            "- Stay in the SAME topic lane (fee → fee-related; cutoff → cutoff-related).\n"
+            "- Prefer 0–3 chips; return empty if the reply was already exhaustive or purely disclaimer.\n"
+        )
+
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        topic = str((med_ctx or {}).get("last_topic") or "")
+        user_payload: Dict[str, object] = {
+            "current_user_question": question_text,
+            "assistant_response": response_text[:2000],
+            "last_topic": topic,
+            "ui_language": _normalize_language_code(output_language),
+        }
+        if evidence_text:
+            user_payload["RETRIEVED_EVIDENCE"] = evidence_text[:14000]
+
+        llm_resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate concise suggested reply chips for a NEET counselling chat UI.\n"
+                        "Return JSON only: {\"replies\": [\"...\", \"...\", ...]}.\n"
+                        "Rules:\n"
+                        "- Return 0 to 5 replies (prefer fewer when scope is narrow).\n"
+                        + lang_rules
+                        + "- Phrase each chip as a short user question or request the user might send next.\n"
+                        "- Avoid generic fillers like 'Thanks' (or equivalent in the output language).\n"
+                        "- Do not repeat the same meaning.\n"
+                        "- If user should type numeric/profile detail next, return empty list.\n"
+                        + grounding_rules
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(user_payload),
+                },
+            ],
+            temperature=0.2,
+            max_tokens=220,
+        )
+        raw = (llm_resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        replies = parsed.get("replies", [])
+        if not isinstance(replies, list):
+            return []
+        cleaned: List[str] = []
+        seen = set()
+        for r in replies:
+            text = str(r or "").strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            if len(text.split()) > max_words_per_chip:
+                continue
+            cleaned.append(text)
+            seen.add(key)
+            if len(cleaned) >= 5:
+                break
+        if evidence_text:
+            cleaned = _filter_chips_not_supported_by_evidence(cleaned, evidence_text)
+        return cleaned
+    except Exception as e:
+        log(f"[V2] ⚠️ Suggested replies generation failed: {e}")
+        return []
+
+
+def _extract_cutoff_refinements(
+    question: str,
+    cutoff_db_states: Optional[List[str]] = None,
+) -> Dict[str, object]:
     q = _normalize_text(question)
     updates: Dict[str, object] = {}
-    states = _extract_states_from_text(question)
+    states = _extract_states_from_text(
+        question,
+        cutoff_db_states=cutoff_db_states,
+        use_llm_fallback=True,
+    )
     if states:
         updates["target_states"] = states
 
@@ -758,6 +1499,90 @@ def _extract_cutoff_refinements(question: str) -> Dict[str, object]:
         updates["quota_patterns"] = quota_patterns
 
     return updates
+
+
+async def _llm_interpret_cutoff_refinement(
+    question: str,
+    cutoff_ctx: Dict[str, object],
+    allowed_states: List[str],
+    current_turn_signals: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """
+    Use LLM to interpret refinement intent from free-text/chip clicks.
+    Returns structured updates (state scope + optional filter relaxation).
+    """
+    if not question:
+        return {"apply": False}
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        payload = {
+            "question": question,
+            "current_context": {
+                "metric_type": cutoff_ctx.get("metric_type"),
+                "metric_value": cutoff_ctx.get("metric_value"),
+                "category": cutoff_ctx.get("category"),
+                "home_state": cutoff_ctx.get("home_state"),
+                "target_states": list(cutoff_ctx.get("target_states") or []),
+                "college_type_patterns": cutoff_ctx.get("college_type_patterns"),
+                "quota_patterns": cutoff_ctx.get("quota_patterns"),
+                "last_result_count": cutoff_ctx.get("last_result_count"),
+            },
+            "current_turn_signals": dict(current_turn_signals or {}),
+            "allowed_states": allowed_states,
+        }
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Interpret NEET cutoff refinement intent and output structured JSON only.\n"
+                        "Return keys exactly: apply (bool), target_states (array of exact values from allowed_states), "
+                        "clear_college_type (bool), clear_quota (bool).\n"
+                        "Rules:\n"
+                        "- First check `current_turn_signals`.\n"
+                        "- If explicit_states_count > 0 OR metric_detected=true OR category_detected=true, treat this as primary profile input.\n"
+                        "- For primary profile input, DO NOT auto-broaden states. Return apply=false unless user explicitly asks refine/relax/nearby/broader/change.\n"
+                        "- Use only states from allowed_states.\n"
+                        "- If user asks nearby/closest/broader options, expand target_states intelligently using geography around current/home state.\n"
+                        "- If user asks home-state only, set target_states to [home_state] when available.\n"
+                        "- If user asks relax quota/type, set clear flags.\n"
+                        "- If no actionable refinement intent, return apply=false."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+            temperature=0,
+            max_tokens=220,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return {"apply": False}
+
+        out: Dict[str, object] = {
+            "apply": bool(parsed.get("apply", False)),
+            "clear_college_type": bool(parsed.get("clear_college_type", False)),
+            "clear_quota": bool(parsed.get("clear_quota", False)),
+            "target_states": [],
+        }
+        allowed = {s for s in allowed_states}
+        states = parsed.get("target_states", [])
+        if isinstance(states, list):
+            deduped: List[str] = []
+            seen = set()
+            for st in states:
+                if isinstance(st, str) and st in allowed and st not in seen:
+                    deduped.append(st)
+                    seen.add(st)
+            out["target_states"] = deduped[:6]
+        if out["target_states"] or out["clear_college_type"] or out["clear_quota"]:
+            out["apply"] = True
+        return out
+    except Exception as e:
+        log(f"[V2] ⚠️ Cutoff refinement interpreter failed: {e}")
+        return {"apply": False}
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -801,6 +1626,33 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 # Configuration
 DATA_DIR = Path(__file__).parent / "data"
+CUTOFF_SQL_STATES: List[str] = [
+    "ANDHRA PRADESH",
+    "ARUNACHAL PRADESH",
+    "BIHAR",
+    "CHHATTISGARH",
+    "DELHI",
+    "GUJARAT",
+    "HARYANA",
+    "HIMACHAL PRADESH",
+    "JAMMU & KASHMIR",
+    "JHARKHAND",
+    "KARNATAKA",
+    "KERALA",
+    "MADHYA PRADESH",
+    "MAHARASHTRA",
+    "MCC",
+    "NAGALAND",
+    "ODISHA",
+    "PUDUCHERRY",
+    "PUNJAB",
+    "RAJASTHAN",
+    "TAMILNADU",
+    "TELANGANA",
+    "UTTAR PRADESH",
+    "UTTARAKHAND",
+    "WEST BENGAL",
+]
 
 
 def _rag_text_from_node(node) -> tuple:
@@ -851,6 +1703,14 @@ def _interleave_chunks_by_filter(
     return texts_out, sources_out
 
 
+async def _get_cutoff_db_states_cached() -> List[str]:
+    """
+    Return fixed cutoff states list provided from DB distinct values.
+    No runtime DB call is made for state loading.
+    """
+    return CUTOFF_SQL_STATES
+
+
 # ============== LIFESPAN (Startup/Shutdown) ==============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -894,6 +1754,13 @@ async def lifespan(app: FastAPI):
             print("✅ OpenAI connection warmed")
         except Exception as e:
             print(f"⚠️ OpenAI warm failed: {e}")
+
+        # Warm and cache cutoff DB states once.
+        try:
+            states = await _get_cutoff_db_states_cached()
+            print(f"✅ Cutoff states cached ({len(states)})")
+        except Exception as e:
+            print(f"⚠️ Cutoff states warm failed: {e}")
 
     asyncio.create_task(warm_all_services())
     print("📡 Warming services in background...")
@@ -959,6 +1826,7 @@ class ChatRequest(BaseModel):
     user_id: Optional[int] = None  # For authenticated users' history
     user_preferences: Optional[UserPreferences] = None  # User preferences for smart routing
     clarified_scope: Optional[str] = None  # User's clarification: "central", "preference", or state name
+    preferred_language: Optional[str] = None  # optional override: en | hi | mr
 
 class Source(BaseModel):
     file_name: str
@@ -1151,16 +2019,25 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
                 {
                     "role": "system",
                     "content": (
-                        "You are a strict retrieval sufficiency evaluator for NEET counselling queries.\n"
-                        "Given a user question and retrieved knowledge-base content, decide if the KB content "
-                        "is enough to answer accurately without assumptions.\n"
-                        "Judge ONLY against the exact user ask.\n"
+                        "You are a retrieval sufficiency evaluator for NEET counselling queries.\n"
+                        "Given the user question and retrieved knowledge-base text, decide if the KB alone "
+                        "is enough to answer accurately without inventing facts.\n"
+                        "Judge against the user's intent, not naive substring matching.\n"
+                        "Same-institution matching: treat as the same college when the KB clearly refers to the institution "
+                        "the user meant—common abbreviations vs full official names, minor spelling variants of place names.\n"
+                        "Entity-specific questions (critical): If the user names a **specific** college or location "
+                        "(any state, any type—government/private/AIIMS/etc.), the KB must contain information that **applies "
+                        "to that named institution** for the topic asked (fees, cutoff, seats, etc.). "
+                        "Do **not** treat data for a **different** college as sufficient just because it is nearby, "
+                        "in the same state, or the same broad category (e.g. another government college). "
+                        "Only mark sufficient if the evidence clearly covers the asked institution—e.g. same row in a table, "
+                        "explicit naming of that college, or text that states one shared rule/fees for a defined group that "
+                        "unambiguously includes the one the user asked about.\n"
                         "Do NOT mark insufficient just because broader background is missing "
-                        "(for example geography/history when the user asked only fee/cutoff/process).\n"
-                        "If retrieved text contains the requested data-type and correct entity/scope, mark sufficient.\n"
-                        "Return ONLY valid JSON with keys: is_sufficient (boolean), reason (string).\n"
-                        "Mark is_sufficient=false if exact requested entity/detail is missing, ambiguous, "
-                        "or only similar entities are present."
+                        "(e.g. history when they only asked fee/cutoff).\n"
+                        "Mark is_sufficient=true when the KB contains the requested data for the correct scope/entity; "
+                        "mark false when the requested college/state/round/detail is absent, wrong, or ambiguous."
+                        "\nReturn ONLY valid JSON with keys: is_sufficient (boolean), reason (string)."
                     ),
                 },
                 {
@@ -1185,13 +2062,101 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
         return False, "Sufficiency check failed"
 
 
-def is_query_in_domain(question: str) -> bool:
+def _looks_like_contextual_in_domain_followup(
+    question: str,
+    conversation_context: Optional[Dict[str, object]] = None,
+) -> bool:
+    """
+    Detect short/contextual follow-ups that should stay in NEET domain flow.
+    Example: after counselling discussion, user asks "when is security money forfeited?"
+    """
+    if not conversation_context:
+        return False
+
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+
+    detected_topic = str(conversation_context.get("detected_topic") or "").lower()
+    detected_state = str(conversation_context.get("detected_state") or "").strip()
+    last_user_question = str(conversation_context.get("last_user_question") or "").lower()
+    is_followup = bool(conversation_context.get("is_followup"))
+
+    if not (is_followup or detected_topic or detected_state or last_user_question):
+        return False
+
+    followup_markers = [
+        "what about",
+        "in which case",
+        "which case",
+        "for this",
+        "for that",
+        "same for",
+        "and for",
+        "and what",
+    ]
+    domain_terms = [
+        "neet",
+        "counselling",
+        "admission",
+        "round",
+        "seat",
+        "quota",
+        "reservation",
+        "category",
+        "fee",
+        "security",
+        "security deposit",
+        "forfeit",
+        "forfeited",
+        "refund",
+        "upgradation",
+        "resignation",
+        "document",
+        "eligibility",
+        "mcc",
+        "aiq",
+        "state counselling",
+    ]
+
+    short_query = len(q.split()) <= 12
+    has_followup_marker = any(marker in q for marker in followup_markers)
+    has_domain_term = any(term in q for term in domain_terms)
+
+    prior_topic_is_domain = detected_topic in {
+        "fee",
+        "eligibility",
+        "dates",
+        "colleges",
+        "cutoff",
+        "reservation",
+        "process",
+        "documents",
+    }
+    prior_question_is_domain = any(term in last_user_question for term in domain_terms)
+
+    return (
+        (short_query or has_followup_marker or has_domain_term)
+        and (prior_topic_is_domain or bool(detected_state) or prior_question_is_domain)
+    )
+
+
+def is_query_in_domain(
+    question: str,
+    conversation_context: Optional[Dict[str, object]] = None,
+) -> bool:
     """
     Smart domain check using LLM to understand context.
     Quick rejection for obviously off-topic queries to save LLM cost.
     """
     question_lower = question.lower()
     
+    # Context-aware continuation override:
+    # if the user is clearly continuing a NEET counselling thread, keep it in-domain.
+    if _looks_like_contextual_in_domain_followup(question, conversation_context):
+        log("[INFO] ✅ Domain override: contextual in-domain follow-up detected")
+        return True
+
     # Quick rejection for obviously off-topic
     for keyword in OBVIOUSLY_OFF_TOPIC:
         if keyword in question_lower:
@@ -1226,7 +2191,12 @@ Be liberal - if there's ANY reasonable connection to education/admissions/exams,
                 },
                 {
                     "role": "user",
-                    "content": f"Is this query related to the education counselling domain?\n\nQuery: {question}"
+                    "content": (
+                        "Is this query related to the education counselling domain?\n\n"
+                        f"Conversation context (if available): {json.dumps(conversation_context or {})}\n\n"
+                        f"Query: {question}\n\n"
+                        "Important: If the query appears to be a follow-up to prior NEET/counselling context, respond YES."
+                    )
                 }
             ],
             max_tokens=5,
@@ -1691,9 +2661,16 @@ async def chat_stream(request: ChatRequest):
             except Exception as faq_error:
                 log(f"[WARN] FAQ search error: {faq_error}")
             
+            # ========== EXTRACT CONVERSATION CONTEXT ==========
+            conversation_context = None
+            if conversation_memory:
+                conversation_context = conversation_memory.extract_conversation_context()
+                if conversation_context.get("detected_state"):
+                    log(f"[INFO] 📝 Conversation context: state={conversation_context.get('detected_state')}, topic={conversation_context.get('detected_topic')}")
+
             # ========== GUARDRAILS: Domain restriction ==========
-            # Only check domain if FAQ didn't match
-            if not is_query_in_domain(request.question):
+            # Use conversation context so short follow-ups are not wrongly blocked.
+            if not is_query_in_domain(request.question, conversation_context):
                 log("[WARN] ❌ OUT OF DOMAIN - Query rejected")
                 yield f"data: {json.dumps({'type': 'sources', 'sources': []})}\n\n"
                 for token in sse_tokens_preserving_formatting(OUT_OF_DOMAIN_RESPONSE):
@@ -1704,13 +2681,6 @@ async def chat_stream(request: ChatRequest):
             
             log("[INFO] ✅ DOMAIN CHECK: Query is in domain")
             log(f"[INFO] 👤 USER STATE: {user_state or 'Not set'}")
-            
-            # ========== EXTRACT CONVERSATION CONTEXT FOR ROUTING ==========
-            conversation_context = None
-            if conversation_memory:
-                conversation_context = conversation_memory.extract_conversation_context()
-                if conversation_context.get("detected_state"):
-                    log(f"[INFO] 📝 Conversation context: state={conversation_context.get('detected_state')}, topic={conversation_context.get('detected_topic')}")
             
             # ========== SMART QUERY ROUTING ==========
             # FAQ already checked above - if we're here, no FAQ match or score too low
@@ -1873,6 +2843,7 @@ async def chat_stream(request: ChatRequest):
                 
                 # Build prompt based on intent
                 log("[INFO] 🤖 LLM GENERATION:")
+                registered_user_name = await _get_registered_user_name(request.user_id)
                 
                 # Get conversation history if available
                 conversation_history = ""
@@ -1918,6 +2889,14 @@ CONVERSATION HISTORY (for context continuity):
                     log(f"[INFO]    Context length: {len(context_str)} chars")
                     
                     # Build comprehensive system message + user prompt
+                    personalized_name_guidance = (
+                        f'\nPERSONALIZATION:\n'
+                        f'- The logged-in student name is "{registered_user_name}".\n'
+                        f"- Use the student's first name naturally in key moments (opening line, reassurance, action-oriented guidance), "
+                        f"but do not overuse it in every sentence.\n"
+                        if registered_user_name else ""
+                    )
+
                     system_message = f"""You are an expert NEET UG 2026 counselling assistant for Indian medical college admissions. You help students understand:
 - NEET exam details (syllabus, dates, eligibility, application, results)
 - State and All-India counselling processes (MCC, AIQ, state quotas)
@@ -1930,12 +2909,15 @@ CRITICAL RULES:
 2. If context has RELATED information (even partial), share it and clarify what's missing.
 3. Say "information not available" ONLY when context has NOTHING relevant.
 4. Be professional, accurate, and cite the brochure/bulletin when relevant.
+5. Use a human counsellor tone with light appreciation/validation when suitable (e.g., "Great question", "Thanks for sharing that").
+   Keep it brief and natural (max one short validation line), and avoid repetitive praise.
 
 CONVERSATION CONTINUITY:
 - The user may ask follow-up questions that refer to previous context.
 - If conversation history is provided, understand the ONGOING topic and state/region being discussed.
 - "What about ST category?" after discussing J&K fees means the user wants J&K ST category info, NOT a different state.
 - Always maintain context from previous messages when answering follow-ups.
+{personalized_name_guidance}
 
 Current Source: {source_label}"""
 
@@ -2619,7 +3601,7 @@ async def chat_v2_stream(request: ChatRequest):
     - Asks for clarification when truly needed
     - Generates accurate, concise responses
     
-    The LLM has access to a search_knowledge_base tool with optional state filter only.
+    The LLM has access to a search_knowledge_base tool with optional `state` or multi-state `states` filters.
     """
     from openai import OpenAI as OpenAIClient
     from services.unified_prompt import get_system_prompt, get_tools
@@ -2630,8 +3612,19 @@ async def chat_v2_stream(request: ChatRequest):
     )
     from database.connection import async_session_maker
     
+    preferred_language = (
+        _normalize_language_code(request.preferred_language)
+        if request.preferred_language
+        else _detect_user_language_sync(request.question)
+    )
+    original_user_question = request.question
+    if preferred_language != "en":
+        request.question = _translate_text_sync(request.question, preferred_language, "en")
+        if request.clarified_scope:
+            request.clarified_scope = _translate_text_sync(request.clarified_scope, preferred_language, "en")
+
     log(f"\n{'='*60}")
-    log(f"[V2] 📥 NEW QUERY: {request.question[:100]}...")
+    log(f"[V2] 📥 NEW QUERY: {request.question[:100]}... | lang={preferred_language}")
     if request.conversation_id:
         log(f"[V2] 💬 CONVERSATION ID: {request.conversation_id}")
     
@@ -2648,6 +3641,11 @@ async def chat_v2_stream(request: ChatRequest):
         round_stats: List[Dict] = []
         final_ttft_ms = 0.0
         final_stream_ms = 0.0
+        
+        def localize_output(text: str) -> str:
+            if preferred_language == "en":
+                return text
+            return _translate_text_sync(text, "en", preferred_language)
         
         try:
             if not request.question.strip():
@@ -2697,8 +3695,8 @@ async def chat_v2_stream(request: ChatRequest):
             if _is_session_close_intent(request.question):
                 med_ctx["stage"] = "closing"
                 med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
-                close_msg = _build_session_close_message(med_ctx)
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': ['Start new query', 'Compare fees', 'Counselling process']})}\n\n"
+                close_msg = localize_output(_build_session_close_message(med_ctx))
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': _session_close_suggested_replies(preferred_language)})}\n\n"
                 for token in sse_tokens_preserving_formatting(close_msg):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
@@ -2708,10 +3706,17 @@ async def chat_v2_stream(request: ChatRequest):
                 return
 
             if _is_greeting_only(request.question):
-                welcome = _first_visit_welcome_message() if is_first_visit else _return_visit_welcome_message()
+                registered_user_name = await _get_registered_user_name(request.user_id)
+                first_name = _extract_first_name(registered_user_name)
+                welcome = (
+                    _first_visit_welcome_message(first_name)
+                    if is_first_visit
+                    else _return_visit_welcome_message(first_name)
+                )
+                welcome = localize_output(welcome)
                 med_ctx["stage"] = "first_visit" if is_first_visit else "returning"
                 med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': _medbuddy_default_replies_for_language(preferred_language)})}\n\n"
                 for token in sse_tokens_preserving_formatting(welcome):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
@@ -2761,8 +3766,12 @@ async def chat_v2_stream(request: ChatRequest):
                 else:
                     cutoff_triggered = llm_route_decision
             if cutoff_triggered:
-                from services.cutoff_service import fetch_cutoff_recommendations, format_cutoff_markdown
+                from services.cutoff_service import (
+                    fetch_cutoff_recommendations,
+                    format_cutoff_markdown,
+                )
                 log("[V2] 🎯 Routing to CUTOFF SQL path")
+                cutoff_db_states = await _get_cutoff_db_states_cached()
 
                 cutoff_ctx = dict(med_ctx.get("cutoff") or {})
                 profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
@@ -2778,6 +3787,7 @@ async def chat_v2_stream(request: ChatRequest):
                         "- Specific state(s)\n\n"
                         "Example: `Government colleges in Bihar with State quota`."
                     )
+                    followup = localize_output(followup)
                     cutoff_ctx["awaiting_refinement_choice"] = False
                     cutoff_ctx["awaiting_refinement_details"] = True
                     med_ctx["cutoff"] = cutoff_ctx
@@ -2797,7 +3807,11 @@ async def chat_v2_stream(request: ChatRequest):
                         asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
                     return
 
-                detected_states = _extract_states_from_text(request.question)
+                detected_states = _extract_states_from_text(
+                    request.question,
+                    cutoff_db_states=cutoff_db_states,
+                    use_llm_fallback=True,
+                )
                 metric_type, metric_value = _extract_metric_from_text(request.question)
                 category = _extract_category(request.question) or cutoff_ctx.get("category") or onboarding.get("category")
                 explicit_home_state = _extract_home_state(request.question)
@@ -2832,7 +3846,10 @@ async def chat_v2_stream(request: ChatRequest):
                     cutoff_ctx["target_states"] = target_states
 
                 # Apply optional refinement filters from user's follow-up details.
-                refinement_updates = _extract_cutoff_refinements(request.question)
+                refinement_updates = _extract_cutoff_refinements(
+                    request.question,
+                    cutoff_db_states=cutoff_db_states,
+                )
                 if refinement_updates.get("target_states"):
                     cutoff_ctx["target_states"] = refinement_updates["target_states"]
                 if refinement_updates.get("college_type_patterns"):
@@ -2842,11 +3859,45 @@ async def chat_v2_stream(request: ChatRequest):
                 if cutoff_ctx.get("awaiting_refinement_details"):
                     cutoff_ctx["awaiting_refinement_details"] = False
 
+                # LLM-driven refinement interpreter (no hardcoded action wiring).
+                refinement_plan = await _llm_interpret_cutoff_refinement(
+                    request.question,
+                    cutoff_ctx,
+                    cutoff_db_states,
+                    current_turn_signals={
+                        "explicit_states_count": len(detected_states),
+                        "metric_detected": bool(metric_type is not None and metric_value is not None),
+                        "category_detected": bool(_extract_category(request.question)),
+                    },
+                )
+                if refinement_plan.get("apply"):
+                    planned_states = list(refinement_plan.get("target_states") or [])
+                    if planned_states:
+                        cutoff_ctx["target_states"] = planned_states
+                    if refinement_plan.get("clear_college_type"):
+                        cutoff_ctx.pop("college_type_patterns", None)
+                    if refinement_plan.get("clear_quota"):
+                        cutoff_ctx.pop("quota_patterns", None)
+                    log(
+                        "[V2] 🧩 Applied LLM cutoff refinement | "
+                        f"query='{request.question}' target_states={cutoff_ctx.get('target_states')} "
+                        f"clear_college_type={bool(refinement_plan.get('clear_college_type'))} "
+                        f"clear_quota={bool(refinement_plan.get('clear_quota'))}"
+                    )
+
                 med_ctx["cutoff"] = cutoff_ctx
                 missing = _missing_cutoff_fields(cutoff_ctx)
 
                 if missing:
-                    followup = _build_cutoff_followup_prompt(missing)
+                    followup = localize_output(_build_cutoff_followup_prompt(missing, cutoff_ctx))
+                    followup_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        followup,
+                        med_ctx,
+                        output_language=preferred_language,
+                    )
+                    if followup_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': followup_replies})}\n\n"
                     for token in sse_tokens_preserving_formatting(followup):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.01)
@@ -2882,6 +3933,7 @@ async def chat_v2_stream(request: ChatRequest):
                     quota_patterns=quota_patterns if isinstance(quota_patterns, list) else None,
                     total_limit=cutoff_result_limit,
                 )
+                cutoff_ctx["last_result_count"] = len(rows)
                 cutoff_answer = format_cutoff_markdown(
                     rows=rows,
                     metric_type=metric_type,
@@ -2891,6 +3943,7 @@ async def chat_v2_stream(request: ChatRequest):
                     target_states=target_states,
                     display_limit=cutoff_result_limit,
                 )
+                cutoff_answer = localize_output(cutoff_answer)
                 source = {
                     "file_name": "neet_ug_2025_cutoffs",
                     "document_type": "sql_cutoff_table",
@@ -2898,6 +3951,15 @@ async def chat_v2_stream(request: ChatRequest):
                     "text_snippet": f"Cutoff rows matched: {len(rows)}",
                 }
                 yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
+                cutoff_replies = await _generate_contextual_suggested_replies(
+                    request.question,
+                    cutoff_answer,
+                    med_ctx,
+                    retrieval_evidence=cutoff_answer,
+                    output_language=preferred_language,
+                )
+                if cutoff_replies:
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': cutoff_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(cutoff_answer):
                     yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                     await asyncio.sleep(0.01)
@@ -2963,6 +4025,7 @@ async def chat_v2_stream(request: ChatRequest):
                     faq_match = faq_matches[0]
                     log(f"[V2] ✅ FAQ MATCH! Score: {faq_match['score']:.3f}")
                     faq_answer = _apply_response_policy(faq_match["answer"], request.question)
+                    faq_answer = localize_output(faq_answer)
                     
                     faq_source = {
                         "file_name": "FAQ Database",
@@ -2975,7 +4038,14 @@ async def chat_v2_stream(request: ChatRequest):
                     }
                     yield f"data: {json.dumps({'type': 'sources', 'sources': [faq_source]})}\n\n"
                     
-                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                    faq_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        faq_answer,
+                        med_ctx,
+                        retrieval_evidence=str(faq_match.get("answer") or ""),
+                    )
+                    if faq_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': faq_replies})}\n\n"
                     for token in sse_tokens_preserving_formatting(faq_answer):
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         await asyncio.sleep(0.01)
@@ -3042,6 +4112,7 @@ async def chat_v2_stream(request: ChatRequest):
             web_fallback_enabled = await is_web_search_fallback_enabled()
             settings_ms = _elapsed_ms(t_settings)
             available_tools = get_tools()
+            registered_user_name = await _get_registered_user_name(request.user_id)
             if not web_fallback_enabled:
                 available_tools = [
                     t for t in available_tools
@@ -3058,6 +4129,15 @@ async def chat_v2_stream(request: ChatRequest):
                     + "If KB is insufficient and web tool is enabled, call `search_web`."
                 )
             })
+            if registered_user_name:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f'The logged-in student name is "{registered_user_name}". '
+                        "Personalize naturally by using the student's first name occasionally "
+                        "(opening line, reassurance, next-step guidance). Do not overuse the name."
+                    )
+                })
             
             # Add conversation history
             if conversation_memory:
@@ -3072,8 +4152,92 @@ async def chat_v2_stream(request: ChatRequest):
             
             # Add current question
             messages.append({"role": "user", "content": request.question})
-            
+
             log(f"[V2] 🤖 Calling LLM with {len(messages)} messages...")
+
+            # ========== CLARIFICATION-FIRST (NO KB/WEB) ==========
+            if _requires_entity_clarification_before_retrieval(request.question):
+                log(
+                    "[V2] 🔔 Clarification-first: skipped KB/web — question broadens scope "
+                    "without state/college anchors"
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "The user's latest message is too broad to search the knowledge base or the web "
+                        "(for example 'other colleges' or 'another state' without naming which college(s) or state/UT). "
+                        "Do NOT use any tools. Reply in plain text only: ask ONE short, friendly clarification "
+                        "so you know the exact college name(s) or state/UT to look up. "
+                        "Briefly say that searching without that scope would return unreliable or off-topic results."
+                    ),
+                })
+                t_clar = time.perf_counter()
+                clar_resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=0.25,
+                    max_tokens=500,
+                )
+                clar_llm_ms = _elapsed_ms(t_clar)
+                full_response = (clar_resp.choices[0].message.content or "").strip()
+                if not full_response:
+                    full_response = (
+                        "To share accurate fee details, please tell me which state or UT you mean, "
+                        "and ideally the exact college name(s)."
+                    )
+                full_response = _apply_response_policy(
+                    full_response,
+                    request.question,
+                    skip_compare_cta=True,
+                )
+                full_response = localize_output(full_response)
+                t_out = time.perf_counter()
+                _first_out = True
+                for token in sse_tokens_preserving_formatting(full_response):
+                    if _first_out:
+                        final_ttft_ms = _elapsed_ms(t_out)
+                        _first_out = False
+                    yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                    await asyncio.sleep(0.01)
+                final_stream_ms = _elapsed_ms(t_out)
+                if _v2_timing_log_enabled():
+                    log(
+                        f"[V2] ⏱ TIMING (clarification-first) wall≈{_elapsed_ms(t_wall):.0f}ms | "
+                        f"clarification_llm≈{clar_llm_ms:.0f}ms | stream≈{final_stream_ms:.0f}ms"
+                    )
+                log(f"[V2] ✅ RESPONSE COMPLETE: {len(full_response)} chars (clarification-first)")
+                med_ctx["stage"] = "normal_qa"
+                med_ctx["last_topic"] = _infer_topic_label(request.question)
+                if request.user_preferences and request.user_preferences.preferred_state:
+                    med_ctx["last_state"] = request.user_preferences.preferred_state
+                med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                if request.user_id and conversation_id:
+                    asyncio.create_task(
+                        v2_background_save_conversation_turn(
+                            conversation_id,
+                            request.question,
+                            full_response,
+                            int((datetime.now() - start_time).total_seconds() * 1000),
+                        )
+                    )
+                    asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                should_generate_title = (
+                    request.user_id
+                    and conversation_id
+                    and not _is_greeting_only(request.question)
+                    and await _v2_conversation_needs_title(conversation_id)
+                )
+                if should_generate_title:
+                    from services.conversation_memory import generate_conversation_title, update_conversation_title
+                    try:
+                        generated_title = await generate_conversation_title(request.question)
+                        async with async_session_maker() as title_db:
+                            await update_conversation_title(title_db, conversation_id, generated_title)
+                        yield f"data: {json.dumps({'type': 'title', 'title': generated_title, 'conversation_id': conversation_id})}\n\n"
+                    except Exception as title_err:
+                        log(f"[V2] ⚠️ Title generation error (clarification-first): {title_err}")
+                return
             
             # ========== TOOL LOOP (LLM decides if/when to call KB then web) ==========
             used_web_fallback = False
@@ -3085,6 +4249,8 @@ async def chat_v2_stream(request: ChatRequest):
             kb_marked_insufficient = False
             web_only_messages = None
             forced_fallback_response = None
+            last_kb_retrieval: Optional[str] = None
+            last_web_retrieval: Optional[str] = None
 
             for round_idx in range(max_tool_rounds):
                 log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -3122,9 +4288,10 @@ async def chat_v2_stream(request: ChatRequest):
                     if (
                         round_idx == 0
                         and _looks_like_neet_factual_query(request.question)
+                        and not _requires_entity_clarification_before_retrieval(request.question)
                         and not kb_attempted
                     ):
-                        forced_args: Dict[str, str] = {"query": request.question}
+                        forced_args: Dict[str, Any] = {"query": request.question}
                         if user_state:
                             forced_args["state"] = user_state
                         log(f"[V2] 🛟 Forced KB lookup (tool skipped by LLM): {forced_args}")
@@ -3134,6 +4301,7 @@ async def chat_v2_stream(request: ChatRequest):
                         suff_ms = 0.0
                         kb_attempted = True
                         if success:
+                            last_kb_retrieval = tool_result
                             t_suff = time.perf_counter()
                             is_sufficient, reason = assess_kb_sufficiency_with_llm(
                                 client=client,
@@ -3192,47 +4360,141 @@ async def chat_v2_stream(request: ChatRequest):
                     )
                     break
 
-                tool_call = assistant_message.tool_calls[0]
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments or "{}")
-                log(f"[V2] 🔧 TOOL CALL: {tool_name}")
-                log(f"[V2]    Args: {tool_args}")
+                tool_calls = assistant_message.tool_calls or []
+                kb_results_this_round: List[str] = []
+                round_tool_names: List[str] = []
+                round_tool_exec_ms = 0.0
 
-                t_tool = time.perf_counter()
-                tool_result, success = execute_tool_call(tool_name, tool_args)
-                tool_exec_ms = _elapsed_ms(t_tool)
-                if success:
-                    log("[V2] ✅ Tool returned results")
-                else:
-                    log(f"[V2] ⚠️ Tool error: {tool_result[:120]}")
+                for tool_call in tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments or "{}")
+                    round_tool_names.append(tool_name)
+                    log(f"[V2] 🔧 TOOL CALL: {tool_name}")
+                    log(f"[V2]    Args: {tool_args}")
+
+                    t_tool = time.perf_counter()
+                    tool_result, success = execute_tool_call(tool_name, tool_args)
+                    tool_exec_ms = _elapsed_ms(t_tool)
+                    round_tool_exec_ms += tool_exec_ms
+                    if success:
+                        log("[V2] ✅ Tool returned results")
+                        if tool_name == "search_knowledge_base":
+                            kb_results_this_round.append(tool_result)
+                        elif tool_name == "search_web":
+                            last_web_retrieval = tool_result
+                    else:
+                        log(f"[V2] ⚠️ Tool error: {tool_result[:120]}")
+
+                    # Emit sources for frontend when possible
+                    sources = []
+                    if tool_name == "search_web":
+                        for line in tool_result.split("\n"):
+                            if line.startswith("[") and "Title:" in line:
+                                title = line.split("Title:", 1)[1].strip()
+                                sources.append({"file_name": title, "document_type": "web_search"})
+                    elif "State:" in tool_result or "Type:" in tool_result:
+                        for line in tool_result.split("\n"):
+                            if line.startswith("[") and "] State:" in line:
+                                parts = line.split(" | ")
+                                source_info = {}
+                                for part in parts:
+                                    if "State:" in part:
+                                        source_info["state"] = part.split("State:", 1)[1].strip()
+                                    elif "Type:" in part:
+                                        source_info["document_type"] = part.split("Type:", 1)[1].strip()
+                                    elif "Source:" in part:
+                                        source_info["file_name"] = part.split("Source:", 1)[1].strip()
+                                    elif "Page:" in part:
+                                        source_info["page"] = part.split("Page:", 1)[1].strip()
+                                if source_info:
+                                    sources.append(source_info)
+
+                    if sources:
+                        yield f"data: {json.dumps({'type': 'sources', 'sources': sources[:5]})}\n\n"
+                        log(f"[V2] 📚 Parsed {len(sources)} source references from {tool_name}")
+                        for idx, src in enumerate(sources[:5], 1):
+                            log(
+                                f"[V2]    Source {idx}: "
+                                f"file={src.get('file_name', 'Unknown')} | "
+                                f"page={src.get('page', 'N/A')} | "
+                                f"state={src.get('state', 'N/A')} | "
+                                f"type={src.get('document_type', 'N/A')}"
+                            )
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": tool_call.function.arguments,
+                            }
+                        }]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result
+                    })
+
+                    if tool_name == "search_web":
+                        used_web_fallback = True
+                        force_web_search_next_round = False
+                        # When KB is insufficient and web is used, prevent leakage of KB values.
+                        if kb_marked_insufficient:
+                            web_only_messages = [
+                                {"role": "system", "content": get_system_prompt()},
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "Final answer mode: WEB-ONLY.\n"
+                                        "Knowledge-base retrieval was marked insufficient.\n"
+                                        "Use ONLY the latest web_search tool output as evidence.\n"
+                                        "Do NOT use any numbers/details from knowledge-base chunks.\n"
+                                        "If web snippets do not confirm exact values, clearly say not confirmed."
+                                    )
+                                },
+                                {"role": "user", "content": request.question},
+                                {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [{
+                                        "id": tool_call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": tool_call.function.arguments
+                                        }
+                                    }]
+                                },
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": tool_result
+                                },
+                            ]
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "CRITICAL: Earlier knowledge-base chunks were marked INSUFFICIENT for this question. "
+                                    "Do NOT use any numeric values, fees, or entity details from KB chunks in final answer. "
+                                    "Use only web_search evidence from this round. "
+                                    "If web snippets still lack exact numeric details, clearly say the exact fee is not confirmed."
+                                )
+                            })
 
                 suff_ms = 0.0
-                if tool_name == "search_knowledge_base":
+                if kb_results_this_round:
                     kb_attempted = True
+                    last_kb_retrieval = "\n\n".join(kb_results_this_round)
                     t_suff = time.perf_counter()
                     is_sufficient, reason = assess_kb_sufficiency_with_llm(
                         client=client,
                         user_question=request.question,
-                        kb_tool_result=tool_result
+                        kb_tool_result=last_kb_retrieval
                     )
-                    # Generic guardrails for sufficiency decisions (not fee-only):
-                    # 1) If query is entity-specific and entity is missing in KB text, force insufficient.
-                    # 2) If LLM marked insufficient but KB has strong structured signals for non-entity asks,
-                    #    allow a cautious sufficient override to reduce unnecessary web fallback.
-                    qn = _normalize_text(request.question)
-                    kb_txt = _normalize_text(tool_result)
-                    entity_hint = _extract_entity_hint(request.question)
-                    is_entity_query = _is_entity_specific_query(request.question)
-                    entity_present_in_kb = True if not entity_hint else (entity_hint in kb_txt)
-                    kb_has_multiple_hits = ("[1]" in tool_result or "[2]" in tool_result)
-                    kb_has_structured_signals = _has_structured_data_signals(tool_result)
-
-                    if is_entity_query and not entity_present_in_kb:
-                        is_sufficient = False
-                        reason = "Entity-specific query but exact entity not found in KB evidence"
-                    elif (not is_entity_query) and kb_has_multiple_hits and kb_has_structured_signals and not is_sufficient:
-                        is_sufficient = True
-                        reason = "Heuristic override: non-entity query with strong structured KB signals"
                     suff_ms = _elapsed_ms(t_suff)
                     log(f"[V2] 🧪 KB sufficiency: {is_sufficient} | reason: {reason}")
                     if not is_sufficient:
@@ -3241,78 +4503,23 @@ async def chat_v2_stream(request: ChatRequest):
                             force_web_search_next_round = True
                         else:
                             kb_insufficient_and_web_disabled = True
+
                 round_stats.append(
                     {
                         "i": round_idx + 1,
                         "llm": llm_round_ms,
-                        "tool": tool_name,
-                        "tool_exec": tool_exec_ms,
+                        "tool": ", ".join(round_tool_names) if round_tool_names else None,
+                        "tool_exec": round_tool_exec_ms,
                         "suff": suff_ms,
                     }
                 )
-                if tool_name == "search_web":
-                    used_web_fallback = True
-                    force_web_search_next_round = False
-
-                # Emit sources for frontend when possible
-                sources = []
-                if tool_name == "search_web":
-                    for line in tool_result.split("\n"):
-                        if line.startswith("[") and "Title:" in line:
-                            title = line.split("Title:", 1)[1].strip()
-                            sources.append({"file_name": title, "document_type": "web_search"})
-                elif "State:" in tool_result or "Type:" in tool_result:
-                    for line in tool_result.split("\n"):
-                        if line.startswith("[") and "] State:" in line:
-                            parts = line.split(" | ")
-                            source_info = {}
-                            for part in parts:
-                                if "State:" in part:
-                                    source_info["state"] = part.split("State:", 1)[1].strip()
-                                elif "Type:" in part:
-                                    source_info["document_type"] = part.split("Type:", 1)[1].strip()
-                                elif "Source:" in part:
-                                    source_info["file_name"] = part.split("Source:", 1)[1].strip()
-                                elif "Page:" in part:
-                                    source_info["page"] = part.split("Page:", 1)[1].strip()
-                            if source_info:
-                                sources.append(source_info)
-
-                if sources:
-                    yield f"data: {json.dumps({'type': 'sources', 'sources': sources[:5]})}\n\n"
-                    log(f"[V2] 📚 Parsed {len(sources)} source references from {tool_name}")
-                    for idx, src in enumerate(sources[:5], 1):
-                        log(
-                            f"[V2]    Source {idx}: "
-                            f"file={src.get('file_name', 'Unknown')} | "
-                            f"page={src.get('page', 'N/A')} | "
-                            f"state={src.get('state', 'N/A')} | "
-                            f"type={src.get('document_type', 'N/A')}"
-                        )
-
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": tool_call.function.arguments
-                        }
-                    }]
-                })
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result
-                })
 
                 if kb_insufficient_and_web_disabled:
                     forced_fallback_response = (
                         "I want to make sure you get accurate details.\n\n"
-                        "Right now, I do not have this exact information in the current knowledge base. "
-                        "Please verify from official MCC/state counselling websites for the latest confirmed values."
+                        "Right now, I do not have this exact information in the current knowledge base.\n\n"
+                        "> *Note — Disclaimer: Please verify from official MCC/state counselling websites "
+                        "for the latest confirmed values.*"
                     )
                     messages.append({
                         "role": "system",
@@ -3325,56 +4532,23 @@ async def chat_v2_stream(request: ChatRequest):
                     })
                     break
 
-                # When KB is insufficient and web is used, explicitly prevent leakage of KB values.
-                if tool_name == "search_web" and kb_marked_insufficient:
-                    # Build a web-only context for final answer generation (no KB tool outputs).
-                    web_only_messages = [
-                        {"role": "system", "content": get_system_prompt()},
-                        {
-                            "role": "system",
-                            "content": (
-                                "Final answer mode: WEB-ONLY.\n"
-                                "Knowledge-base retrieval was marked insufficient.\n"
-                                "Use ONLY the latest web_search tool output as evidence.\n"
-                                "Do NOT use any numbers/details from knowledge-base chunks.\n"
-                                "If web snippets do not confirm exact values, clearly say not confirmed."
-                            )
-                        },
-                        {"role": "user", "content": request.question},
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [{
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": tool_call.function.arguments
-                                }
-                            }]
-                        },
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_result
-                        },
-                    ]
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "CRITICAL: Earlier knowledge-base chunks were marked INSUFFICIENT for this question. "
-                            "Do NOT use any numeric values, fees, or entity details from KB chunks in final answer. "
-                            "Use only web_search evidence from this round. "
-                            "If web snippets still lack exact numeric details, clearly say the exact fee is not confirmed."
-                        )
-                    })
-
             # ========== FINAL RESPONSE ==========
+            # Suggestion chips must be grounded only in KB/RAG text, not web snippets.
+            chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
             if forced_fallback_response:
                 full_response = _apply_response_policy(forced_fallback_response, request.question)
+                full_response = localize_output(full_response)
                 t_out = time.perf_counter()
                 _first_out = True
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': ['Show more options', 'Compare colleges', 'Try another state']})}\n\n"
+                fallback_replies = await _generate_contextual_suggested_replies(
+                    request.question,
+                    full_response,
+                    med_ctx,
+                    retrieval_evidence=chip_evidence,
+                    output_language=preferred_language,
+                )
+                if fallback_replies:
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': fallback_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
                     if _first_out:
                         final_ttft_ms = _elapsed_ms(t_out)
@@ -3384,9 +4558,17 @@ async def chat_v2_stream(request: ChatRequest):
                 final_stream_ms = _elapsed_ms(t_out)
             elif assistant_message and not assistant_message.tool_calls and (assistant_message.content or "").strip():
                 full_response = _apply_response_policy(assistant_message.content or "", request.question)
+                full_response = localize_output(full_response)
                 t_out = time.perf_counter()
                 _first_out = True
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                direct_replies = await _generate_contextual_suggested_replies(
+                    request.question,
+                    full_response,
+                    med_ctx,
+                    output_language=preferred_language,
+                )
+                if direct_replies:
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': direct_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
                     if _first_out:
                         final_ttft_ms = _elapsed_ms(t_out)
@@ -3406,8 +4588,17 @@ async def chat_v2_stream(request: ChatRequest):
                 )
                 full_response = final_response.choices[0].message.content or ""
                 full_response = _apply_response_policy(full_response, request.question)
+                full_response = localize_output(full_response)
                 _first_out = True
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': MEDBUDDY_DEFAULT_REPLIES})}\n\n"
+                final_replies = await _generate_contextual_suggested_replies(
+                    request.question,
+                    full_response,
+                    med_ctx,
+                    retrieval_evidence=chip_evidence,
+                    output_language=preferred_language,
+                )
+                if final_replies:
+                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
                     if _first_out:
                         final_ttft_ms = _elapsed_ms(t_out)
