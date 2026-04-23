@@ -4717,7 +4717,12 @@ async def chat_v2_stream(request: ChatRequest):
                     if V2_STREAM_TOKEN_DELAY_SEC > 0:
                         await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
                 final_stream_ms = _elapsed_ms(t_out)
-            elif assistant_message and not assistant_message.tool_calls and (assistant_message.content or "").strip():
+            elif (
+                preferred_language != "en"
+                and assistant_message
+                and not assistant_message.tool_calls
+                and (assistant_message.content or "").strip()
+            ):
                 full_response = _apply_response_policy(assistant_message.content or "", request.question)
                 full_response = localize_output(full_response)
                 t_out = time.perf_counter()
