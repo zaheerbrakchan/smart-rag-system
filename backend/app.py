@@ -14,6 +14,7 @@ import tempfile
 import traceback
 import sys
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -53,7 +54,9 @@ def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMI
     return text[:limit] + "\n\n[Tool output truncated for model context]"
 
 
-def _stream_chat_completion_text(
+
+
+async def _stream_chat_completion_text(
     client,
     *,
     model: str,
@@ -64,20 +67,43 @@ def _stream_chat_completion_text(
     """
     Yield text deltas from OpenAI chat completion stream.
     """
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-    )
-    for chunk in stream:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    done = object()
+    error_holder: List[Exception] = []
+
+    def _producer() -> None:
         try:
-            delta = chunk.choices[0].delta.content
-        except Exception:
-            delta = None
-        if delta:
-            yield delta
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content
+                except Exception:
+                    delta = None
+                if delta:
+                    loop.call_soon_threadsafe(queue.put_nowait, delta)
+        except Exception as e:
+            error_holder.append(e)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, done)
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    while True:
+        item = await queue.get()
+        if item is done:
+            break
+        yield item
+
+    if error_holder:
+        raise error_holder[0]
 
 
 SUPPORTED_LANGUAGES = {"en", "hi", "mr"}
@@ -4365,7 +4391,7 @@ async def chat_v2_stream(request: ChatRequest):
                     t_llm = time.perf_counter()
                     _first_out = True
                     streamed_raw = ""
-                    for delta in _stream_chat_completion_text(
+                    async for delta in _stream_chat_completion_text(
                         client,
                         model="gpt-4o-mini",
                         messages=messages,
@@ -4751,7 +4777,7 @@ async def chat_v2_stream(request: ChatRequest):
                 if preferred_language == "en":
                     _first_out = True
                     streamed_raw = ""
-                    for delta in _stream_chat_completion_text(
+                    async for delta in _stream_chat_completion_text(
                         client,
                         model="gpt-4o-mini",
                         messages=final_messages,
