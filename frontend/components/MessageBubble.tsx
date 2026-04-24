@@ -16,6 +16,7 @@ interface MessageBubbleProps {
   message: Message;
   onSuggestedReply: (reply: string) => void;
   language: 'en' | 'hi' | 'mr';
+  referencesEnabledGlobal?: boolean;
 }
 
 /** True when the model likely refused or said it could not answer (avoid "Verified" in that case). */
@@ -125,7 +126,7 @@ function hasExternalWebSource(sources?: Source[]): boolean {
   });
 }
 
-export default function MessageBubble({ message, onSuggestedReply, language }: MessageBubbleProps) {
+export default function MessageBubble({ message, onSuggestedReply, language, referencesEnabledGlobal = true }: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
   const isUser = message.role === 'user';
   const youLabel = language === 'hi' ? 'आप' : language === 'mr' ? 'तुम्ही' : 'You';
@@ -136,12 +137,6 @@ export default function MessageBubble({ message, onSuggestedReply, language }: M
       : language === 'mr'
       ? ['संस्था', 'राज्य', 'प्रवर्ग', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
       : ['Institution Name', 'State', 'Category', 'Quota', 'Domicile', 'AIR', 'Score', 'Round'];
-  const noInfoRefLabel =
-    language === 'hi'
-      ? 'आधिकारिक PDF संदर्भ उपलब्ध — हो सकता है हर विवरण न दिया हो'
-      : language === 'mr'
-      ? 'अधिकृत PDF संदर्भ उपलब्ध — प्रत्येक तपशील असणे आवश्यक नाही'
-      : 'References from official PDFs — excerpts may not list every detail you asked for';
   const verifiedLabel =
     language === 'hi'
       ? 'आधिकारिक दस्तावेज़ से सत्यापित'
@@ -159,7 +154,16 @@ export default function MessageBubble({ message, onSuggestedReply, language }: M
   const contentForMarkdown = parsedCutoffTable ? parsedCutoffTable.contentWithoutTable : (message.content || '');
   const normalizedContent = normalizeMarkdownForRender(contentForMarkdown);
   const containsTable = hasMarkdownTable(normalizedContent);
-  const isExternalAnswer = hasExternalWebSource(message.sources);
+  const isExternalAnswer = message.sourceOrigin === 'web' || hasExternalWebSource(message.sources);
+  const isOfficialAnswer = message.sourceOrigin === 'kb' || ((message.sources?.length || 0) > 0 && !isExternalAnswer);
+  const referencesVisible = referencesEnabledGlobal && message.referencesEnabled !== false;
+  const shouldShowVerificationBadge =
+    !isUser &&
+    !message.isError &&
+    !message.needsClarification &&
+    Boolean(message.content && message.content.trim() !== '') &&
+    !isLikelyRefusalOrNoInfo(message.content) &&
+    (isExternalAnswer || isOfficialAnswer);
 
   // Don't render empty assistant messages (they're being streamed)
   if (!isUser && (!message.content || message.content.trim() === '') && !message.needsClarification) {
@@ -279,31 +283,24 @@ export default function MessageBubble({ message, onSuggestedReply, language }: M
         </div>
 
         {/* Source indicator for assistant - only show when there's actual content and not clarification */}
-        {!isUser && !message.isError && !message.needsClarification && message.content && message.content.trim() !== '' && message.sources && message.sources.length > 0 && (
+        {shouldShowVerificationBadge && (
           <div className="mt-2 flex items-center gap-2 flex-wrap">
-            {isLikelyRefusalOrNoInfo(message.content) ? (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full">
-                <BookOpen className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
-                <span className="text-xs font-medium text-amber-800 dark:text-amber-300">
-                  {noInfoRefLabel}
-                </span>
-              </div>
-            ) : isExternalAnswer ? (
+            {isExternalAnswer ? (
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/30 rounded-full">
                 <CheckCircle2 className="w-3.5 h-3.5 text-violet-700 dark:text-violet-300" />
                 <span className="text-xs font-medium text-violet-700 dark:text-violet-300">{externalVerifiedLabel}</span>
               </div>
-            ) : (
+            ) : isOfficialAnswer ? (
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 dark:bg-green-500/10 border border-green-200 dark:border-green-500/30 rounded-full">
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
                 <span className="text-xs font-medium text-green-700 dark:text-green-400">{verifiedLabel}</span>
               </div>
-            )}
+            ) : null}
           </div>
         )}
 
         {/* Sources section - only show when there's actual content and not clarification */}
-        {!isUser && !message.needsClarification && message.content && message.content.trim() !== '' && message.sources && message.sources.length > 0 && (
+        {referencesVisible && !isUser && !message.needsClarification && message.content && message.content.trim() !== '' && message.sources && message.sources.length > 0 && (
           <div className="mt-3">
             <button
               onClick={() => setShowSources(!showSources)}

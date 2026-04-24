@@ -197,13 +197,20 @@ export default function AdminPage() {
   const [autoLearningEnabled, setAutoLearningEnabled] = useState<boolean>(true);
   const [autoLearningLoading, setAutoLearningLoading] = useState<boolean>(false);
   const [autoLearningUpdatedAt, setAutoLearningUpdatedAt] = useState<string | null>(null);
+  const [autoLearningUpdatedBy, setAutoLearningUpdatedBy] = useState<number | null>(null);
   const [webFallbackEnabled, setWebFallbackEnabled] = useState<boolean>(false);
   const [webFallbackLoading, setWebFallbackLoading] = useState<boolean>(false);
   const [webFallbackUpdatedAt, setWebFallbackUpdatedAt] = useState<string | null>(null);
+  const [webFallbackUpdatedBy, setWebFallbackUpdatedBy] = useState<number | null>(null);
+  const [chatReferencesEnabled, setChatReferencesEnabled] = useState<boolean>(true);
+  const [chatReferencesLoading, setChatReferencesLoading] = useState<boolean>(false);
+  const [chatReferencesUpdatedAt, setChatReferencesUpdatedAt] = useState<string | null>(null);
+  const [chatReferencesUpdatedBy, setChatReferencesUpdatedBy] = useState<number | null>(null);
   const [cutoffResultLimit, setCutoffResultLimit] = useState<number>(10);
   const [cutoffResultLimitInput, setCutoffResultLimitInput] = useState<string>('10');
   const [cutoffResultLimitLoading, setCutoffResultLimitLoading] = useState<boolean>(false);
   const [cutoffResultLimitUpdatedAt, setCutoffResultLimitUpdatedAt] = useState<string | null>(null);
+  const [cutoffResultLimitUpdatedBy, setCutoffResultLimitUpdatedBy] = useState<number | null>(null);
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = useState<{
@@ -224,6 +231,14 @@ export default function AdminPage() {
       return JSON.parse(tokens).access_token;
     }
     return null;
+  };
+
+  const getAdminDisplayName = (adminId: number | null | undefined): string | null => {
+    if (!adminId) return null;
+    if (user?.id === adminId) return 'you';
+    const matched = users.find((u) => u.id === adminId);
+    if (matched?.full_name) return matched.full_name;
+    return `Admin #${adminId}`;
   };
   
   // Auth check
@@ -420,6 +435,7 @@ export default function AdminPage() {
         const data = await response.json();
         setAutoLearningEnabled(data.enabled);
         setAutoLearningUpdatedAt(data.updated_at);
+        setAutoLearningUpdatedBy(data.updated_by ?? null);
       }
     } catch (err) {
       console.error('Failed to fetch auto-learning status:', err);
@@ -440,6 +456,7 @@ export default function AdminPage() {
         const data = await response.json();
         setAutoLearningEnabled(data.enabled);
         setAutoLearningUpdatedAt(data.updated_at);
+        setAutoLearningUpdatedBy(data.updated_by ?? null);
         setSuccess(data.message);
       } else {
         const err = await response.json();
@@ -463,6 +480,7 @@ export default function AdminPage() {
         const data = await response.json();
         setWebFallbackEnabled(data.enabled);
         setWebFallbackUpdatedAt(data.updated_at);
+        setWebFallbackUpdatedBy(data.updated_by ?? null);
       }
     } catch (err) {
       console.error('Failed to fetch web fallback status:', err);
@@ -483,6 +501,7 @@ export default function AdminPage() {
         const data = await response.json();
         setWebFallbackEnabled(data.enabled);
         setWebFallbackUpdatedAt(data.updated_at);
+        setWebFallbackUpdatedBy(data.updated_by ?? null);
         setSuccess(data.message);
       } else {
         const err = await response.json();
@@ -492,6 +511,50 @@ export default function AdminPage() {
       setError('Failed to update web fallback setting');
     } finally {
       setWebFallbackLoading(false);
+    }
+  };
+
+  // Fetch chat references visibility setting
+  const fetchChatReferencesSetting = useCallback(async () => {
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/chat-references`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setChatReferencesEnabled(data.enabled);
+        setChatReferencesUpdatedAt(data.updated_at);
+        setChatReferencesUpdatedBy(data.updated_by ?? null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch chat references setting:', err);
+    }
+  }, []);
+
+  const toggleChatReferences = async () => {
+    setChatReferencesLoading(true);
+    try {
+      const token = getAuthToken();
+      const newStatus = !chatReferencesEnabled;
+      const response = await fetch(`${API_BASE_URL}/faq/settings/chat-references?enable=${newStatus}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setChatReferencesEnabled(data.enabled);
+        setChatReferencesUpdatedAt(data.updated_at);
+        setChatReferencesUpdatedBy(data.updated_by ?? null);
+        setSuccess(data.message);
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update chat references setting');
+      }
+    } catch (err) {
+      setError('Failed to update chat references setting');
+    } finally {
+      setChatReferencesLoading(false);
     }
   };
 
@@ -507,6 +570,7 @@ export default function AdminPage() {
         setCutoffResultLimit(data.limit);
         setCutoffResultLimitInput(String(data.limit));
         setCutoffResultLimitUpdatedAt(data.updated_at);
+        setCutoffResultLimitUpdatedBy(data.updated_by ?? null);
       }
     } catch (err) {
       console.error('Failed to fetch cutoff result limit:', err);
@@ -532,6 +596,7 @@ export default function AdminPage() {
         setCutoffResultLimit(data.limit);
         setCutoffResultLimitInput(String(data.limit));
         setCutoffResultLimitUpdatedAt(data.updated_at);
+        setCutoffResultLimitUpdatedBy(data.updated_by ?? null);
         setSuccess(data.message);
       } else {
         const err = await response.json();
@@ -576,6 +641,7 @@ export default function AdminPage() {
         fetchFaqStats(),
         fetchAutoLearningStatus(),
         fetchWebFallbackStatus(),
+        fetchChatReferencesSetting(),
         fetchCutoffResultLimit()
       ]);
       setInitialLoadDone(true);
@@ -583,7 +649,7 @@ export default function AdminPage() {
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchCutoffResultLimit]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchChatReferencesSetting, fetchCutoffResultLimit]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -1945,6 +2011,10 @@ export default function AdminPage() {
                   const latestReply = q.replies?.length ? q.replies[q.replies.length - 1] : null;
                   const alreadyReplied = (q.replies?.length || 0) > 0;
                   const isReplyLoading = supportActionLoading?.id === q.id && supportActionLoading?.action === 'reply';
+                  const responderName = getAdminDisplayName(latestReply?.responder_admin_id);
+                  const assigneeName = getAdminDisplayName(q.assigned_admin_id);
+                  const answeredByLabel = responderName || assigneeName;
+                  const closedByLabel = assigneeName || responderName;
                   return (
                     <div key={q.id} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5">
                       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -2029,6 +2099,8 @@ export default function AdminPage() {
 
                       <p className="text-xs text-slate-500 mt-3">
                         Created: {new Date(q.created_at).toLocaleString()} {q.answered_at ? `• Answered: ${new Date(q.answered_at).toLocaleString()}` : ''}
+                        {q.status === 'answered' && answeredByLabel ? ` • Answered by ${answeredByLabel}` : ''}
+                        {q.status === 'closed' && closedByLabel ? ` • Closed by ${closedByLabel}` : ''}
                       </p>
                     </div>
                   );
@@ -2106,6 +2178,7 @@ export default function AdminPage() {
                   {autoLearningUpdatedAt && (
                     <span className="text-xs text-slate-500 hidden md:block">
                       Last updated: {new Date(autoLearningUpdatedAt).toLocaleDateString()}
+                      {autoLearningUpdatedBy ? ` • Updated by ${getAdminDisplayName(autoLearningUpdatedBy)}` : ''}
                     </span>
                   )}
                   <button
@@ -2153,6 +2226,7 @@ export default function AdminPage() {
                   {webFallbackUpdatedAt && (
                     <span className="text-xs text-slate-500 hidden md:block">
                       Last updated: {new Date(webFallbackUpdatedAt).toLocaleDateString()}
+                      {webFallbackUpdatedBy ? ` • Updated by ${getAdminDisplayName(webFallbackUpdatedBy)}` : ''}
                     </span>
                   )}
                   <button
@@ -2186,6 +2260,7 @@ export default function AdminPage() {
                     {cutoffResultLimitUpdatedAt && (
                       <p className="text-xs text-slate-500 mt-1">
                         Last updated: {new Date(cutoffResultLimitUpdatedAt).toLocaleDateString()}
+                        {cutoffResultLimitUpdatedBy ? ` • Updated by ${getAdminDisplayName(cutoffResultLimitUpdatedBy)}` : ''}
                       </p>
                     )}
                   </div>
@@ -2212,6 +2287,54 @@ export default function AdminPage() {
               <p className="text-xs text-slate-500 mt-3">
                 Current active value: <span className="text-slate-300 font-medium">{cutoffResultLimit}</span>
               </p>
+            </div>
+
+            {/* Chat References Visibility */}
+            <div className={`rounded-2xl border p-4 transition-all duration-300 ${
+              chatReferencesEnabled
+                ? 'bg-gradient-to-r from-green-500/10 to-emerald-500/10 border-green-500/30'
+                : 'bg-gradient-to-r from-slate-500/10 to-slate-600/10 border-slate-500/30'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className={`p-3 rounded-xl ${chatReferencesEnabled ? 'bg-green-500/20' : 'bg-slate-500/20'}`}>
+                    <FileText className={`w-6 h-6 ${chatReferencesEnabled ? 'text-green-400' : 'text-slate-400'}`} />
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold flex items-center gap-2">
+                      Chat References Visibility
+                      <span className={`px-2 py-0.5 text-xs rounded-full ${chatReferencesEnabled ? 'bg-green-500/20 text-green-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                        {chatReferencesEnabled ? 'Visible' : 'Hidden'}
+                      </span>
+                    </h3>
+                    <p className="text-slate-400 text-sm mt-0.5">
+                      {chatReferencesEnabled
+                        ? 'Students can see verification badge and source references in chat'
+                        : 'Students will not see verification badge or source references in chat'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {chatReferencesUpdatedAt && (
+                    <span className="text-xs text-slate-500 hidden md:block">
+                      Last updated: {new Date(chatReferencesUpdatedAt).toLocaleDateString()}
+                      {chatReferencesUpdatedBy ? ` • Updated by ${getAdminDisplayName(chatReferencesUpdatedBy)}` : ''}
+                    </span>
+                  )}
+                  <button
+                    onClick={toggleChatReferences}
+                    disabled={chatReferencesLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      chatReferencesEnabled ? 'bg-green-500 focus:ring-green-500' : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle chat references visibility</span>
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${chatReferencesEnabled ? 'translate-x-8' : 'translate-x-1'}`}>
+                      {chatReferencesLoading && <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />}
+                    </span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}

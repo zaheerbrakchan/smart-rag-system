@@ -48,6 +48,7 @@ class SettingsKeys:
     AUTO_LEARNING_MIN_CONFIDENCE = "auto_learning_min_confidence"
     FAQ_SCORE_THRESHOLD = "faq_score_threshold"
     WEB_SEARCH_FALLBACK_ENABLED = "web_search_fallback_enabled"
+    CHAT_REFERENCES_ENABLED = "chat_references_enabled"
     CUTOFF_COLLEGE_RESULT_LIMIT = "cutoff_college_result_limit"
     SUPPORT_EMAIL_ENABLED = "support_email_enabled"
     SUPPORT_SMS_ENABLED = "support_sms_enabled"

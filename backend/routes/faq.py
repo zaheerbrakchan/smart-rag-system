@@ -602,6 +602,14 @@ async def get_web_search_fallback_status(db: AsyncSession) -> bool:
     return setting.value.lower() == "true"
 
 
+async def get_chat_references_enabled_status(db: AsyncSession) -> bool:
+    """Get current chat reference visibility setting."""
+    setting = await db.get(SystemSettings, SettingsKeys.CHAT_REFERENCES_ENABLED)
+    if setting is None:
+        return True  # Default: enabled for transparency
+    return setting.value.lower() == "true"
+
+
 async def get_cutoff_college_result_limit(db: AsyncSession) -> int:
     """Get current cutoff result row limit."""
     setting = await db.get(SystemSettings, SettingsKeys.CUTOFF_COLLEGE_RESULT_LIMIT)
@@ -738,6 +746,63 @@ async def get_cutoff_result_limit_setting(
         "updated_at": setting.updated_at.isoformat() if setting else None,
         "updated_by": setting.updated_by if setting else None,
         "description": "Maximum number of cutoff rows shown to user from SQL output."
+    }
+
+
+@router.get("/settings/chat-references")
+async def get_chat_references_setting(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Get chat references visibility configuration."""
+    is_enabled = await get_chat_references_enabled_status(db)
+    setting = await db.get(SystemSettings, SettingsKeys.CHAT_REFERENCES_ENABLED)
+    return {
+        "enabled": is_enabled,
+        "updated_at": setting.updated_at.isoformat() if setting else None,
+        "updated_by": setting.updated_by if setting else None,
+        "description": "Show/hide reference badges and reference list in student chat responses."
+    }
+
+
+@router.get("/settings/chat-references/public")
+async def get_chat_references_setting_public(
+    db: AsyncSession = Depends(get_db),
+):
+    """Public read-only endpoint used by chat UI to decide reference visibility."""
+    is_enabled = await get_chat_references_enabled_status(db)
+    return {"enabled": is_enabled}
+
+
+@router.post("/settings/chat-references")
+async def toggle_chat_references(
+    enable: bool = Query(..., description="Enable or disable chat references in UI"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin)
+):
+    """Toggle chat reference visibility."""
+    setting = await db.get(SystemSettings, SettingsKeys.CHAT_REFERENCES_ENABLED)
+    if setting is None:
+        setting = SystemSettings(
+            key=SettingsKeys.CHAT_REFERENCES_ENABLED,
+            value=str(enable).lower(),
+            description="Enable/disable chat reference badges and source list visibility",
+            updated_by=current_admin.id
+        )
+        db.add(setting)
+    else:
+        setting.value = str(enable).lower()
+        setting.updated_by = current_admin.id
+
+    await db.commit()
+    await db.refresh(setting)
+    status = "enabled" if enable else "disabled"
+    return {
+        "success": True,
+        "enabled": enable,
+        "message": f"Chat references have been {status}",
+        "updated_at": setting.updated_at.isoformat(),
+        "updated_by": current_admin.id
     }
 
 
