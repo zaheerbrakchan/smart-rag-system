@@ -27,6 +27,9 @@ import {
   User, LogOut, ChevronDown, Menu, MessageCircleQuestion, Bell
 } from 'lucide-react';
 
+/** Same base URL pattern as `services/api.ts` — used for direct fetch calls in this page. */
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 type GuidedIntent =
   | 'neet_exam_guidance'
   | 'counselling_process'
