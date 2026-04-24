@@ -98,6 +98,7 @@ export async function streamChatMessage(
   model: ModelType,
   onToken: (token: string) => void,
   onSources: (sources: any[]) => void,
+  onMeta: (meta: any) => void,
   onDone: (filters?: any, conversationId?: number) => void,
   onError: (error: string) => void,
   userPreferences?: UserPreferences,
@@ -161,6 +162,8 @@ export async function streamChatMessage(
               onToken(data.token);
             } else if (data.type === 'sources' && data.sources) {
               onSources(data.sources);
+            } else if (data.type === 'meta') {
+              onMeta(data);
             } else if (data.type === 'clarification_needed' && onClarificationNeeded) {
               onClarificationNeeded(data.options, data.message);
             } else if (data.type === 'suggested_replies' && onSuggestedReplies) {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ChatWindow from '@/components/ChatWindow';
@@ -134,10 +134,10 @@ const TRANSLATIONS: Record<
     latestReplyLabel: 'Latest reply',
     markRead: 'Mark read',
     starter: {
-      neet_exam_guidance: 'NEET exam guidance',
-      counselling_process: 'Counselling process',
-      college_shortlist: 'College shortlist',
-      college_fee_structure: 'College fee structure',
+      neet_exam_guidance: 'NEET Exam Guidance',
+      counselling_process: 'Counselling Process',
+      college_shortlist: 'College Shortlist',
+      college_fee_structure: 'College Fee Structure',
     },
     guidedPrompts: {
       neet_exam_guidance: 'Great choice. What would you like to know in NEET exam guidance?',
@@ -315,9 +315,35 @@ export default function Home() {
   const [myNotifications, setMyNotifications] = useState<SupportNotification[]>([]);
   const [supportUnreadCount, setSupportUnreadCount] = useState(0);
   const [supportPanelLoading, setSupportPanelLoading] = useState(false);
+  const [chatReferencesEnabledGlobal, setChatReferencesEnabledGlobal] = useState(true);
   const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const t = TRANSLATIONS[selectedLanguage];
+  const isAdminUser = user?.role === 'admin' || user?.role === 'super_admin';
+  const displayedMessages = useMemo(
+    () =>
+      messages.map((msg) => {
+        if (chatReferencesEnabledGlobal || msg.role !== 'assistant') return msg;
+        const inferredOrigin =
+          msg.sourceOrigin ??
+          ((msg.sources || []).some((s: any) => {
+            const dtype = String(s?.document_type || '').toLowerCase();
+            const name = String(s?.file_name || '').toLowerCase();
+            return dtype.includes('web') || name.startsWith('http://') || name.startsWith('https://');
+          })
+            ? 'web'
+            : (msg.sources || []).length > 0
+            ? 'kb'
+            : undefined);
+        return {
+          ...msg,
+          sourceOrigin: inferredOrigin,
+          sources: undefined,
+          referencesEnabled: false,
+        };
+      }),
+    [messages, chatReferencesEnabledGlobal]
+  );
 
   const resolveGuidedIntent = (reply: string): GuidedIntent | null => {
     const val = reply.trim();
@@ -354,6 +380,24 @@ export default function Home() {
     } catch (e) {
       console.error('Failed to refresh support notifications', e);
     }
+  };
+
+  const refreshChatReferencesVisibility = async (): Promise<boolean> => {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/faq/settings/chat-references/public?t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
+      if (!response.ok) return chatReferencesEnabledGlobal;
+      const data = await response.json();
+      if (typeof data?.enabled === 'boolean') {
+        setChatReferencesEnabledGlobal(data.enabled);
+        return data.enabled;
+      }
+    } catch (e) {
+      console.error('Failed to refresh chat references visibility', e);
+    }
+    return chatReferencesEnabledGlobal;
   };
 
   const loadSupportPanelData = async () => {
@@ -432,6 +476,7 @@ export default function Home() {
   useEffect(() => {
     if (!token) return;
     void refreshSupportNotifications();
+    void refreshChatReferencesVisibility();
     const stream = connectSupportNotificationStream(
       token,
       (event) => {
@@ -449,7 +494,16 @@ export default function Home() {
     return () => stream.close();
   }, [token]);
 
+  useEffect(() => {
+    const onFocus = () => {
+      void refreshChatReferencesVisibility();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refreshChatReferencesVisibility]);
+
   const handleSendMessage = async (quickReply?: string) => {
+    const referencesEnabledForTurn = await refreshChatReferencesVisibility();
     const trimmed = (quickReply ?? inputValue).trim();
     const pending = pendingClarification;
 
@@ -528,6 +582,7 @@ export default function Home() {
         content: '',
         timestamp: new Date(),
         sources: [],
+        referencesEnabled: referencesEnabledForTurn,
       };
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setInputValue('');
@@ -558,10 +613,34 @@ export default function Home() {
         },
         // onSources - set sources
         (sources) => {
+          const hasWeb = Array.isArray(sources) && sources.some((s) => {
+            const dtype = String(s?.document_type || '').toLowerCase();
+            const name = String(s?.file_name || '').toLowerCase();
+            return dtype.includes('web') || name.startsWith('http://') || name.startsWith('https://');
+          });
           setMessages((prev) => 
             prev.map((msg) => 
               msg.id === assistantMessageId 
-                ? { ...msg, sources }
+                ? { ...msg, sources, sourceOrigin: hasWeb ? 'web' : 'kb' }
+                : msg
+            )
+          );
+        },
+        // onMeta - set retrieval origin for badge rendering
+        (meta) => {
+          const refsEnabled = meta?.chat_references_enabled;
+          const origin = meta?.source_origin;
+          const hasOrigin = origin === 'web' || origin === 'kb' || origin === 'none';
+          const hasRefsFlag = typeof refsEnabled === 'boolean';
+          if (!hasOrigin && !hasRefsFlag) return;
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    ...(hasOrigin ? { sourceOrigin: origin } : {}),
+                    ...(hasRefsFlag ? { referencesEnabled: refsEnabled } : {}),
+                  }
                 : msg
             )
           );
@@ -681,6 +760,7 @@ export default function Home() {
         content: m.content,
         timestamp: new Date(m.created_at),
         sources: m.sources || undefined,
+        sourceOrigin: (m.sources || []).some((s: any) => String(s?.document_type || '').toLowerCase().includes('web')) ? 'web' : ((m.sources || []).length > 0 ? 'kb' : undefined),
       }));
       
       setMessages(loadedMessages);
@@ -768,30 +848,34 @@ export default function Home() {
               <option value="mr">{TRANSLATIONS.mr.languageLabel}</option>
             </select>
 
-            <button
-              onClick={() => {
-                setSupportError(null);
-                setSupportSuccess(null);
-                setShowSupportModal(true);
-              }}
-              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-blue-200 dark:border-blue-700 rounded-lg text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30"
-            >
-              <MessageCircleQuestion className="w-3.5 h-3.5" />
-              <span>{t.contactSupport}</span>
-            </button>
+            {!isAdminUser && (
+              <>
+                <button
+                  onClick={() => {
+                    setSupportError(null);
+                    setSupportSuccess(null);
+                    setShowSupportModal(true);
+                  }}
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-blue-200 dark:border-blue-700 rounded-lg text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+                >
+                  <MessageCircleQuestion className="w-3.5 h-3.5" />
+                  <span>{t.contactSupport}</span>
+                </button>
 
-            <button
-              onClick={() => setShowSupportPanel(true)}
-              className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 dark:border-slate-600 rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700 relative"
-            >
-              <Bell className="w-3.5 h-3.5" />
-              <span>{t.mySupportUpdates}</span>
-              {supportUnreadCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center font-semibold">
-                  {supportUnreadCount > 99 ? '99+' : supportUnreadCount}
-                </span>
-              )}
-            </button>
+                <button
+                  onClick={() => setShowSupportPanel(true)}
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 dark:border-slate-600 rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700 relative"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>{t.mySupportUpdates}</span>
+                  {supportUnreadCount > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center font-semibold">
+                      {supportUnreadCount > 99 ? '99+' : supportUnreadCount}
+                    </span>
+                  )}
+                </button>
+              </>
+            )}
             
             {/* Theme Toggle */}
             <ThemeToggle language={selectedLanguage} />
@@ -961,11 +1045,12 @@ export default function Home() {
           </div>
         ) : (
           <ChatWindow
-            messages={messages}
+            messages={displayedMessages}
             isLoading={isLoading}
             messagesEndRef={messagesEndRef}
             onSuggestedReply={handleSuggestedReply}
             language={selectedLanguage}
+            referencesEnabledGlobal={chatReferencesEnabledGlobal}
           />
         )}
       </div>

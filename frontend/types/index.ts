@@ -47,6 +47,8 @@ export interface Message {
   content: string;
   timestamp: Date;
   sources?: Source[];
+  sourceOrigin?: 'kb' | 'web' | 'none';
+  referencesEnabled?: boolean;
   modelUsed?: string;
   isError?: boolean;
   needsClarification?: boolean;

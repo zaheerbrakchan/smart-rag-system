@@ -11,6 +11,7 @@ interface ChatWindowProps {
   messagesEndRef: RefObject<HTMLDivElement>;
   onSuggestedReply: (reply: string) => void;
   language: 'en' | 'hi' | 'mr';
+  referencesEnabledGlobal?: boolean;
 }
 
 export default function ChatWindow({
@@ -19,6 +20,7 @@ export default function ChatWindow({
   messagesEndRef,
   onSuggestedReply,
   language,
+  referencesEnabledGlobal = true,
 }: ChatWindowProps) {
   const assistantLabel = language === 'hi' ? 'NEET सहायक' : language === 'mr' ? 'NEET सहाय्यक' : 'NEET Assistant';
   const searchingLabel =
@@ -39,7 +41,13 @@ export default function ChatWindow({
     <div className="h-full overflow-y-auto px-4 py-6">
       <div className="max-w-4xl mx-auto space-y-6">
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} onSuggestedReply={onSuggestedReply} language={language} />
+          <MessageBubble
+            key={message.id}
+            message={message}
+            onSuggestedReply={onSuggestedReply}
+            language={language}
+            referencesEnabledGlobal={referencesEnabledGlobal}
+          />
         ))}
 
         {/* Loading indicator - only show when waiting for first response */}

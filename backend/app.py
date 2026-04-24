@@ -54,8 +54,6 @@ def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMI
     return text[:limit] + "\n\n[Tool output truncated for model context]"
 
 
-
-
 async def _stream_chat_completion_text(
     client,
     *,
@@ -802,6 +800,36 @@ def _looks_like_neet_factual_query(question: str) -> bool:
     )
 
 
+def _requires_strict_grounding_guard(question: str) -> bool:
+    """
+    High-risk factual asks where numeric/entity hallucinations are costly.
+    """
+    q = _normalize_text(question)
+    high_risk_terms = [
+        "fee",
+        "fees",
+        "tuition",
+        "hostel fee",
+        "security fee",
+        "registration fee",
+        "cutoff",
+        "cut off",
+        "rank",
+        "score",
+        "marks",
+        "air",
+        "seat matrix",
+        "seat",
+        "reservation",
+        "quota",
+        "percentile",
+        "eligibility criteria",
+        "deadline",
+        "last date",
+    ]
+    return any(term in q for term in high_risk_terms)
+
+
 _VAGUE_SCOPE_EXPANSION_PATTERNS: Tuple[str, ...] = (
     "what about other",
     "other colleges",
@@ -847,14 +875,10 @@ def _question_has_retrieval_scope_anchor(question: str) -> bool:
 
 def _requires_entity_clarification_before_retrieval(question: str) -> bool:
     """
-    Broad follow-ups like 'other colleges' fees' need a named scope before KB/web search.
+    Clarification gating is LLM-driven via prompt instructions.
+    Keep this helper disabled to avoid hardcoded retrieval rejection logic.
     """
-    q = _normalize_text(question)
-    if not any(p in q for p in _VAGUE_SCOPE_EXPANSION_PATTERNS):
-        return False
-    if _question_has_retrieval_scope_anchor(question):
-        return False
-    return True
+    return False
 
 
 def _is_cutoff_intent(question: str) -> bool:
@@ -929,6 +953,11 @@ Route **TRUE** for vague asks like "help me find a good college", "which college
 Route **FALSE** for general counselling process, exam-only guidance, fee structure, documents, dates, reservation policy
 **without** college prediction, or pure definitions.
 
+Important disambiguation:
+- The phrase "state counselling" alone does **not** mean cutoff prediction.
+- Route **FALSE** for asks like "state counselling details", "counselling process", "how counselling works", "registration steps", unless the user clearly asks prediction/chances/shortlist.
+- Route **TRUE** only when intent is explicitly about "which college can I get", "college prediction", "cutoff for my rank/score", "shortlist colleges".
+
 Conversation last topic: {med_ctx.get("last_topic") or "unknown"}
 Cutoff context already present: {bool(cutoff_ctx)}
 Cutoff context keys: {list(cutoff_ctx.keys())}
@@ -937,7 +966,8 @@ User message: "{question}"
 Critical continuation rule:
 - If recent conversation is already in cutoff shortlisting flow and current user message is a short follow-up
   (state name, category, rank/score value, yes/no, refinement detail), keep routing to SQL cutoff.
-- Only route away from SQL cutoff if user clearly changes topic to fees/process/docs/exam/general info.
+- If current message itself asks counselling process/details (not prediction), route away from SQL cutoff even if previous turn was cutoff.
+- Only continue SQL cutoff when the follow-up is clearly profile/refinement data for prediction.
 
 Respond ONLY JSON:
 {{
@@ -2071,6 +2101,22 @@ async def is_web_search_fallback_enabled() -> bool:
         return False
 
 
+async def is_chat_references_enabled() -> bool:
+    """Read runtime setting for chat reference visibility."""
+    try:
+        from database.connection import async_session_maker
+        from models.system_settings import SystemSettings, SettingsKeys
+
+        async with async_session_maker() as db:
+            setting = await db.get(SystemSettings, SettingsKeys.CHAT_REFERENCES_ENABLED)
+            if setting is None:
+                return True  # Default: enabled
+            return setting.value.lower() == "true"
+    except Exception as err:
+        log(f"[V2] ⚠️ Could not read chat references setting: {err}")
+        return True
+
+
 async def is_faq_lookup_enabled() -> bool:
     """
     Read runtime FAQ toggle from admin-managed settings.
@@ -2165,6 +2211,75 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
     except Exception as err:
         log(f"[V2] ⚠️ KB sufficiency check failed, defaulting to insufficient: {err}")
         return False, "Sufficiency check failed"
+
+
+def assess_answer_grounding_with_llm(
+    client,
+    user_question: str,
+    draft_answer: str,
+    retrieval_evidence: str,
+) -> tuple[bool, str, str]:
+    """
+    Verify final draft is grounded in retrieved evidence.
+    Returns: (is_grounded, safe_answer, reason)
+    """
+    evidence = _trim_tool_result_for_model(retrieval_evidence or "", limit=7000)
+    if not evidence.strip():
+        safe = (
+            "I want to make sure I only share verified details.\n\n"
+            "I do not have enough confirmed evidence for this exact query right now.\n\n"
+            "> *Note — Disclaimer: Please verify on official MCC/state counselling websites.*"
+        )
+        return False, safe, "No retrieval evidence available"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict grounding verifier for a NEET counselling assistant.\n"
+                        "Check whether the DRAFT_ANSWER is fully supported by EVIDENCE.\n"
+                        "Critical numeric guard: every numeric/date/rank/fee/cutoff value in DRAFT_ANSWER must be explicitly present "
+                        "or directly inferable from EVIDENCE.\n"
+                        "If any unsupported claim exists, set is_grounded=false and produce a corrected_answer that uses ONLY supported facts.\n"
+                        "When evidence is insufficient, corrected_answer must clearly say specific detail is not confirmed.\n"
+                        "Return JSON only with keys: is_grounded (boolean), reason (string), corrected_answer (string)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"USER_QUESTION:\n{user_question}\n\n"
+                        f"DRAFT_ANSWER:\n{draft_answer}\n\n"
+                        f"EVIDENCE:\n{evidence}\n\n"
+                        "Return JSON only."
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=450,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        grounded = bool(parsed.get("is_grounded", False))
+        reason = str(parsed.get("reason", "")).strip() or "No reason provided"
+        corrected = str(parsed.get("corrected_answer", "")).strip()
+        if grounded:
+            return True, draft_answer, reason
+        if corrected:
+            return False, corrected, reason
+        safe = (
+            "I want to make sure I only share verified details.\n\n"
+            "I do not have enough confirmed evidence for this exact query right now.\n\n"
+            "> *Note — Disclaimer: Please verify on official MCC/state counselling websites.*"
+        )
+        return False, safe, reason
+    except Exception as err:
+        log(f"[V2] ⚠️ Grounding verifier failed: {err}")
+        return True, draft_answer, "Verifier failed; passthrough"
 
 
 def _looks_like_contextual_in_domain_followup(
@@ -2643,6 +2758,8 @@ async def chat_stream(request: ChatRequest):
         try:
             # Emit an immediate frame to encourage early proxy/client flush for SSE.
             yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
+            references_enabled = await is_chat_references_enabled()
+            yield f"data: {json.dumps({'type': 'meta', 'chat_references_enabled': references_enabled})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
@@ -3752,6 +3869,7 @@ async def chat_v2_stream(request: ChatRequest):
         round_stats: List[Dict] = []
         final_ttft_ms = 0.0
         final_stream_ms = 0.0
+        grounding_ms = 0.0
         
         def localize_output(text: str) -> str:
             if preferred_language == "en":
@@ -3761,6 +3879,8 @@ async def chat_v2_stream(request: ChatRequest):
         try:
             # Emit an immediate frame to encourage early proxy/client flush for SSE.
             yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
+            references_enabled = await is_chat_references_enabled()
+            yield f"data: {json.dumps({'type': 'meta', 'chat_references_enabled': references_enabled})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
@@ -4277,8 +4397,9 @@ async def chat_v2_stream(request: ChatRequest):
 
             log(f"[V2] 🤖 Calling LLM with {len(messages)} messages...")
 
-            # ========== CLARIFICATION-FIRST (NO KB/WEB) ==========
-            if _requires_entity_clarification_before_retrieval(request.question):
+            # Clarification-first is now fully prompt-driven by the LLM.
+            # Keep this branch disabled to avoid backend hardcoded gating.
+            if False:
                 log(
                     "[V2] 🔔 Clarification-first: skipped KB/web — question broadens scope "
                     "without state/college anchors"
@@ -4376,6 +4497,8 @@ async def chat_v2_stream(request: ChatRequest):
             last_kb_retrieval: Optional[str] = None
             last_web_retrieval: Optional[str] = None
             streamed_final_in_loop = False
+            source_origin_emitted = False
+            strict_grounding_required = _requires_strict_grounding_guard(request.question)
 
             for round_idx in range(max_tool_rounds):
                 log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -4387,6 +4510,7 @@ async def chat_v2_stream(request: ChatRequest):
                     and kb_attempted
                     and not kb_marked_insufficient
                     and not force_web_search_next_round
+                    and not strict_grounding_required
                 ):
                     t_llm = time.perf_counter()
                     _first_out = True
@@ -4464,7 +4588,6 @@ async def chat_v2_stream(request: ChatRequest):
                     if (
                         round_idx == 0
                         and _looks_like_neet_factual_query(request.question)
-                        and not _requires_entity_clarification_before_retrieval(request.question)
                         and not kb_attempted
                     ):
                         forced_args: Dict[str, Any] = {"query": request.question}
@@ -4556,8 +4679,14 @@ async def chat_v2_stream(request: ChatRequest):
                         log("[V2] ✅ Tool returned results")
                         if tool_name == "search_knowledge_base":
                             kb_results_this_round.append(tool_result)
+                            if not source_origin_emitted:
+                                yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'kb'})}\n\n"
+                                source_origin_emitted = True
                         elif tool_name == "search_web":
                             last_web_retrieval = tool_result
+                            if not source_origin_emitted:
+                                yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
+                                source_origin_emitted = True
                     else:
                         log(f"[V2] ⚠️ Tool error: {tool_result[:120]}")
 
@@ -4585,7 +4714,7 @@ async def chat_v2_stream(request: ChatRequest):
                                 if source_info:
                                     sources.append(source_info)
 
-                    if sources:
+                    if sources and references_enabled:
                         yield f"data: {json.dumps({'type': 'sources', 'sources': sources[:5]})}\n\n"
                         log(f"[V2] 📚 Parsed {len(sources)} source references from {tool_name}")
                         for idx, src in enumerate(sources[:5], 1):
@@ -4596,6 +4725,8 @@ async def chat_v2_stream(request: ChatRequest):
                                 f"state={src.get('state', 'N/A')} | "
                                 f"type={src.get('document_type', 'N/A')}"
                             )
+                    elif sources and not references_enabled:
+                        log(f"[V2] 🫥 Sources suppressed by chat_references_enabled=false ({len(sources)} parsed)")
 
                     messages.append({
                         "role": "assistant",
@@ -4774,7 +4905,8 @@ async def chat_v2_stream(request: ChatRequest):
                 final_messages = web_only_messages if (used_web_fallback and web_only_messages) else messages
                 t_out = time.perf_counter()
                 # True end-to-end stream for final generation (English path).
-                if preferred_language == "en":
+                # For strict grounding mode, avoid pre-streaming so we can verify before emission.
+                if preferred_language == "en" and not strict_grounding_required:
                     _first_out = True
                     streamed_raw = ""
                     async for delta in _stream_chat_completion_text(
@@ -4814,7 +4946,7 @@ async def chat_v2_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
                     final_stream_ms = _elapsed_ms(t_out)
                 else:
-                    # Non-English still uses post-translation finalization path.
+                    # Non-English (and strict-grounding English) use non-stream finalization path.
                     final_response = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=final_messages,
@@ -4823,6 +4955,21 @@ async def chat_v2_stream(request: ChatRequest):
                     )
                     full_response = final_response.choices[0].message.content or ""
                     full_response = _apply_response_policy(full_response, request.question)
+                    if strict_grounding_required:
+                        t_ground = time.perf_counter()
+                        combined_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
+                        is_grounded, guarded_answer, grounded_reason = assess_answer_grounding_with_llm(
+                            client=client,
+                            user_question=request.question,
+                            draft_answer=full_response,
+                            retrieval_evidence=combined_evidence,
+                        )
+                        grounding_ms = _elapsed_ms(t_ground)
+                        if not is_grounded:
+                            log(f"[V2] 🛡️ Grounding guard rewrote answer: {grounded_reason}")
+                        else:
+                            log(f"[V2] 🛡️ Grounding guard passed: {grounded_reason}")
+                        full_response = guarded_answer
                     full_response = localize_output(full_response)
                     _first_out = True
                     final_replies = await _generate_contextual_suggested_replies(
@@ -4844,9 +4991,11 @@ async def chat_v2_stream(request: ChatRequest):
                     final_stream_ms = _elapsed_ms(t_out)
 
             if used_web_fallback:
-                yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True})}\n\n"
+                yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True, 'source_origin': 'web'})}\n\n"
                 log("[V2] 🌐 Final response generated with web fallback context")
             else:
+                source_origin = "kb" if last_kb_retrieval else "none"
+                yield f"data: {json.dumps({'type': 'meta', 'source_origin': source_origin})}\n\n"
                 log("[V2] 🧠 Final response generated with RAG tool context")
                 
             log(f"[V2] ✅ RESPONSE COMPLETE: {len(full_response)} chars")
@@ -4891,6 +5040,8 @@ async def chat_v2_stream(request: ChatRequest):
                     )
                 parts.append(f"answer_ttft={final_ttft_ms:.0f}ms")
                 parts.append(f"answer_stream_total={final_stream_ms:.0f}ms")
+                if grounding_ms > 0:
+                    parts.append(f"grounding_guard={grounding_ms:.0f}ms")
                 parts.append("save_db=deferred(background)")
                 log(
                     "[V2] ⏱ TIMING SUMMARY (V2_TIMING_LOG=false to hide) → "
