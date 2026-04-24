@@ -54,8 +54,6 @@ def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMI
     return text[:limit] + "\n\n[Tool output truncated for model context]"
 
 
-
-
 async def _stream_chat_completion_text(
     client,
     *,
@@ -847,14 +845,10 @@ def _question_has_retrieval_scope_anchor(question: str) -> bool:
 
 def _requires_entity_clarification_before_retrieval(question: str) -> bool:
     """
-    Broad follow-ups like 'other colleges' fees' need a named scope before KB/web search.
+    Clarification gating is LLM-driven via prompt instructions.
+    Keep this helper disabled to avoid hardcoded retrieval rejection logic.
     """
-    q = _normalize_text(question)
-    if not any(p in q for p in _VAGUE_SCOPE_EXPANSION_PATTERNS):
-        return False
-    if _question_has_retrieval_scope_anchor(question):
-        return False
-    return True
+    return False
 
 
 def _is_cutoff_intent(question: str) -> bool:
@@ -929,6 +923,11 @@ Route **TRUE** for vague asks like "help me find a good college", "which college
 Route **FALSE** for general counselling process, exam-only guidance, fee structure, documents, dates, reservation policy
 **without** college prediction, or pure definitions.
 
+Important disambiguation:
+- The phrase "state counselling" alone does **not** mean cutoff prediction.
+- Route **FALSE** for asks like "state counselling details", "counselling process", "how counselling works", "registration steps", unless the user clearly asks prediction/chances/shortlist.
+- Route **TRUE** only when intent is explicitly about "which college can I get", "college prediction", "cutoff for my rank/score", "shortlist colleges".
+
 Conversation last topic: {med_ctx.get("last_topic") or "unknown"}
 Cutoff context already present: {bool(cutoff_ctx)}
 Cutoff context keys: {list(cutoff_ctx.keys())}
@@ -937,7 +936,8 @@ User message: "{question}"
 Critical continuation rule:
 - If recent conversation is already in cutoff shortlisting flow and current user message is a short follow-up
   (state name, category, rank/score value, yes/no, refinement detail), keep routing to SQL cutoff.
-- Only route away from SQL cutoff if user clearly changes topic to fees/process/docs/exam/general info.
+- If current message itself asks counselling process/details (not prediction), route away from SQL cutoff even if previous turn was cutoff.
+- Only continue SQL cutoff when the follow-up is clearly profile/refinement data for prediction.
 
 Respond ONLY JSON:
 {{
@@ -2071,6 +2071,22 @@ async def is_web_search_fallback_enabled() -> bool:
         return False
 
 
+async def is_chat_references_enabled() -> bool:
+    """Read runtime setting for chat reference visibility."""
+    try:
+        from database.connection import async_session_maker
+        from models.system_settings import SystemSettings, SettingsKeys
+
+        async with async_session_maker() as db:
+            setting = await db.get(SystemSettings, SettingsKeys.CHAT_REFERENCES_ENABLED)
+            if setting is None:
+                return True  # Default: enabled
+            return setting.value.lower() == "true"
+    except Exception as err:
+        log(f"[V2] ⚠️ Could not read chat references setting: {err}")
+        return True
+
+
 async def is_faq_lookup_enabled() -> bool:
     """
     Read runtime FAQ toggle from admin-managed settings.
@@ -2643,6 +2659,8 @@ async def chat_stream(request: ChatRequest):
         try:
             # Emit an immediate frame to encourage early proxy/client flush for SSE.
             yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
+            references_enabled = await is_chat_references_enabled()
+            yield f"data: {json.dumps({'type': 'meta', 'chat_references_enabled': references_enabled})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
@@ -3761,6 +3779,8 @@ async def chat_v2_stream(request: ChatRequest):
         try:
             # Emit an immediate frame to encourage early proxy/client flush for SSE.
             yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
+            references_enabled = await is_chat_references_enabled()
+            yield f"data: {json.dumps({'type': 'meta', 'chat_references_enabled': references_enabled})}\n\n"
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
@@ -4277,8 +4297,9 @@ async def chat_v2_stream(request: ChatRequest):
 
             log(f"[V2] 🤖 Calling LLM with {len(messages)} messages...")
 
-            # ========== CLARIFICATION-FIRST (NO KB/WEB) ==========
-            if _requires_entity_clarification_before_retrieval(request.question):
+            # Clarification-first is now fully prompt-driven by the LLM.
+            # Keep this branch disabled to avoid backend hardcoded gating.
+            if False:
                 log(
                     "[V2] 🔔 Clarification-first: skipped KB/web — question broadens scope "
                     "without state/college anchors"
@@ -4376,6 +4397,7 @@ async def chat_v2_stream(request: ChatRequest):
             last_kb_retrieval: Optional[str] = None
             last_web_retrieval: Optional[str] = None
             streamed_final_in_loop = False
+            source_origin_emitted = False
 
             for round_idx in range(max_tool_rounds):
                 log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -4464,7 +4486,6 @@ async def chat_v2_stream(request: ChatRequest):
                     if (
                         round_idx == 0
                         and _looks_like_neet_factual_query(request.question)
-                        and not _requires_entity_clarification_before_retrieval(request.question)
                         and not kb_attempted
                     ):
                         forced_args: Dict[str, Any] = {"query": request.question}
@@ -4556,8 +4577,14 @@ async def chat_v2_stream(request: ChatRequest):
                         log("[V2] ✅ Tool returned results")
                         if tool_name == "search_knowledge_base":
                             kb_results_this_round.append(tool_result)
+                            if not source_origin_emitted:
+                                yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'kb'})}\n\n"
+                                source_origin_emitted = True
                         elif tool_name == "search_web":
                             last_web_retrieval = tool_result
+                            if not source_origin_emitted:
+                                yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
+                                source_origin_emitted = True
                     else:
                         log(f"[V2] ⚠️ Tool error: {tool_result[:120]}")
 
@@ -4585,7 +4612,7 @@ async def chat_v2_stream(request: ChatRequest):
                                 if source_info:
                                     sources.append(source_info)
 
-                    if sources:
+                    if sources and references_enabled:
                         yield f"data: {json.dumps({'type': 'sources', 'sources': sources[:5]})}\n\n"
                         log(f"[V2] 📚 Parsed {len(sources)} source references from {tool_name}")
                         for idx, src in enumerate(sources[:5], 1):
@@ -4596,6 +4623,8 @@ async def chat_v2_stream(request: ChatRequest):
                                 f"state={src.get('state', 'N/A')} | "
                                 f"type={src.get('document_type', 'N/A')}"
                             )
+                    elif sources and not references_enabled:
+                        log(f"[V2] 🫥 Sources suppressed by chat_references_enabled=false ({len(sources)} parsed)")
 
                     messages.append({
                         "role": "assistant",
@@ -4844,9 +4873,11 @@ async def chat_v2_stream(request: ChatRequest):
                     final_stream_ms = _elapsed_ms(t_out)
 
             if used_web_fallback:
-                yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True})}\n\n"
+                yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True, 'source_origin': 'web'})}\n\n"
                 log("[V2] 🌐 Final response generated with web fallback context")
             else:
+                source_origin = "kb" if last_kb_retrieval else "none"
+                yield f"data: {json.dumps({'type': 'meta', 'source_origin': source_origin})}\n\n"
                 log("[V2] 🧠 Final response generated with RAG tool context")
                 
             log(f"[V2] ✅ RESPONSE COMPLETE: {len(full_response)} chars")
