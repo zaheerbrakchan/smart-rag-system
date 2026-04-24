@@ -77,24 +77,9 @@ class SupportNotificationService:
             print(f"[SUPPORT_SMS][DEV] to={phone} body={body}")
             return True, None
 
-        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        from_phone = os.getenv("TWILIO_MESSAGING_FROM") or os.getenv("TWILIO_PHONE_NUMBER")
-        if not account_sid or not auth_token or not from_phone:
-            return False, "twilio sms config missing"
-
-        try:
-            from twilio.rest import Client
-
-            client = Client(account_sid, auth_token)
-            client.messages.create(
-                to=phone,
-                from_=from_phone,
-                body=body[:1550],
-            )
-            return True, None
-        except Exception as e:
-            return False, str(e)
+        # Twilio SMS integration removed from this codebase.
+        # Keep graceful behavior when SMS is enabled in settings but no provider is configured.
+        return False, "sms provider not configured"
 
     @staticmethod
     def notify_support_inbox_new_query(

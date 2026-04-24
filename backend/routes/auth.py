@@ -3,19 +3,21 @@ Authentication Routes
 Handles user registration, login, logout, OTP verification
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
 from database.connection import get_db
 from models.user import User, UserRole
+from models.otp_verification import OTPVerification
 from models.activity_log import ActionType
 from repositories.user_repository import UserRepository
 from repositories.activity_log_repository import ActivityLogRepository
 from services.auth_service import AuthService
-from services.otp_service import OTPService
+from services.whatsapp_otp import generate_otp, normalize_phone, send_whatsapp_otp
 from dependencies.auth import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -30,7 +32,7 @@ class SendOTPRequest(BaseModel):
 
 class VerifyOTPRequest(BaseModel):
     phone: str = Field(..., min_length=10, max_length=15)
-    otp: str = Field(..., min_length=4, max_length=8)
+    otp: str = Field(..., min_length=6, max_length=6)
     purpose: str = Field(default="registration")
 
 
@@ -111,41 +113,107 @@ async def send_otp(
                 ),
             )
 
-    result = OTPService.send_otp(request.phone, request.purpose)
-    
-    if not result["success"]:
+    normalized_phone = normalize_phone(request.phone)
+    if len(normalized_phone) < 10:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=result["message"]
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid phone number format",
         )
-    
-    return result
+
+    otp = generate_otp()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=10)
+
+    # Invalidate old active OTPs for this phone/purpose.
+    existing_query = select(OTPVerification).where(
+        OTPVerification.phone == normalized_phone,
+        OTPVerification.purpose == request.purpose,
+        OTPVerification.is_used == False,  # noqa: E712
+    )
+    existing = (await db.execute(existing_query)).scalars().all()
+    for row in existing:
+        row.is_used = True
+        row.used_at = now
+
+    record = OTPVerification(
+        phone=normalized_phone,
+        otp=otp,
+        purpose=request.purpose,
+        expires_at=expires_at,
+        is_used=False,
+    )
+    db.add(record)
+    await db.flush()
+
+    accepted = await send_whatsapp_otp(normalized_phone, otp)
+    if not accepted:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send OTP",
+        )
+
+    return {"success": True, "message": "OTP sent successfully"}
 
 
 @router.post("/verify-otp")
-async def verify_otp(request: VerifyOTPRequest):
+async def verify_otp(
+    request: VerifyOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Verify OTP entered by user.
     Returns a verification_token to use during registration.
     """
-    result = OTPService.verify_otp(request.phone, request.otp, request.purpose)
-    
-    if not result["success"]:
+    normalized_phone = normalize_phone(request.phone)
+    otp_query = (
+        select(OTPVerification)
+        .where(
+            OTPVerification.phone == normalized_phone,
+            OTPVerification.purpose == request.purpose,
+        )
+        .order_by(OTPVerification.created_at.desc())
+    )
+    otp_row = (await db.execute(otp_query)).scalars().first()
+
+    if not otp_row:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result["message"]
+            detail="No OTP found. Please request a new OTP.",
         )
-    
-    # Generate verification token for use in registration
-    # Use formatted phone to ensure consistency with registration
-    formatted_phone = OTPService._format_phone(request.phone)
+
+    now = datetime.now(timezone.utc)
+    expires_at = otp_row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if otp_row.is_used:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP already used. Please request a new OTP.",
+        )
+    if now > expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP expired. Please request a new OTP.",
+        )
+    if otp_row.otp != request.otp:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid OTP",
+        )
+
+    otp_row.is_used = True
+    otp_row.used_at = now
+
     verification_token = AuthService.create_phone_verification_token(
-        phone=formatted_phone,
+        phone=normalized_phone,
         purpose=request.purpose
     )
     
     return {
-        **result,
+        "success": True,
+        "verified": True,
+        "message": "Phone number verified successfully",
         "verification_token": verification_token
     }
 
@@ -166,7 +234,7 @@ async def register(
     # Verify phone verification token
     if not AuthService.verify_phone_verification_token(
         token=request.verification_token,
-        expected_phone=OTPService._format_phone(request.phone),
+        expected_phone=normalize_phone(request.phone),
         expected_purpose="registration"
     ):
         raise HTTPException(
@@ -174,7 +242,25 @@ async def register(
             detail="Phone verification expired or invalid. Please verify with OTP again."
         )
     
-    normalized_phone = OTPService._format_phone(request.phone)
+    normalized_phone = normalize_phone(request.phone)
+    recent_verified_query = (
+        select(OTPVerification)
+        .where(
+            OTPVerification.phone == normalized_phone,
+            OTPVerification.purpose == "registration",
+            OTPVerification.is_used == True,  # noqa: E712
+            OTPVerification.used_at.isnot(None),
+            OTPVerification.used_at >= datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        .order_by(OTPVerification.used_at.desc())
+    )
+    recent_verified = (await db.execute(recent_verified_query)).scalars().first()
+    if not recent_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP verification not found or expired. Please verify OTP again.",
+        )
+
     existing_phone_user = await user_repo.find_by_normalized_phone(normalized_phone)
     if existing_phone_user:
         raise HTTPException(
@@ -203,9 +289,6 @@ async def register(
     )
     
     user = await user_repo.create(user)
-    
-    # Clear OTP
-    OTPService.clear_otp(request.phone)
     
     # Log activity
     await activity_repo.log_action(
@@ -251,7 +334,7 @@ async def login(
     user_repo = UserRepository(db)
     activity_repo = ActivityLogRepository(db)
     
-    normalized_phone = OTPService._format_phone(request.phone)
+    normalized_phone = normalize_phone(request.phone)
     if not AuthService.verify_phone_verification_token(
         token=request.verification_token,
         expected_phone=normalized_phone,
@@ -276,9 +359,26 @@ async def login(
             detail="Account is deactivated"
         )
     
+    recent_verified_query = (
+        select(OTPVerification)
+        .where(
+            OTPVerification.phone == normalized_phone,
+            OTPVerification.purpose == "login",
+            OTPVerification.is_used == True,  # noqa: E712
+            OTPVerification.used_at.isnot(None),
+            OTPVerification.used_at >= datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        .order_by(OTPVerification.used_at.desc())
+    )
+    recent_verified = (await db.execute(recent_verified_query)).scalars().first()
+    if not recent_verified:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login OTP verification expired or invalid. Please verify OTP again."
+        )
+
     # Update last login
     await user_repo.update_last_login(user.id)
-    OTPService.clear_otp(normalized_phone)
     
     # Log successful login
     await activity_repo.log_action(

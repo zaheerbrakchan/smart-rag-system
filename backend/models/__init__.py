@@ -7,6 +7,7 @@ from .indexed_document import IndexedDocument
 from .faq import FAQ
 from .system_settings import SystemSettings, SettingsKeys
 from .support_query import SupportQuery, SupportQueryReply, UserNotification, SupportQueryStatus
+from .otp_verification import OTPVerification
 
 __all__ = [
     "User", "UserRole",
@@ -17,4 +18,5 @@ __all__ = [
     "FAQ",
     "SystemSettings", "SettingsKeys",
     "SupportQuery", "SupportQueryReply", "UserNotification", "SupportQueryStatus",
+    "OTPVerification",
 ]
