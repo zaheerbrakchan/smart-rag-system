@@ -2445,6 +2445,7 @@ CATEGORIES = {
 
 DOCUMENT_TYPES = {
     "nta_bulletin": ["nta", "bulletin", "information bulletin", "neet ug"],
+    "mcc_counseling": ["mcc", "all india counselling", "all india counseling", "aiq", "15% quota"],
     "state_counseling": ["counselling", "counseling", "state counseling", "state counselling"],
     "college_info": ["college", "institute", "university", "medical college"],
     "cutoffs": ["cutoff", "cut off", "previous year", "rank"],
@@ -4130,6 +4131,7 @@ async def get_metadata_options():
         ],
         "document_types": [
             {"value": "nta_bulletin", "label": "NTA Official Bulletin"},
+            {"value": "mcc_counseling", "label": "MCC Counseling Guide"},
             {"value": "state_counseling", "label": "State Counseling Guide"},
             {"value": "college_info", "label": "College/Institute Info"},
             {"value": "cutoffs", "label": "Previous Year Cutoffs"},
