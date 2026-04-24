@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -11,10 +11,12 @@ function topicLabel(code: string | null | undefined): string {
   return code.replace(/_/g, ' ');
 }
 import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, CheckCircle2, BookOpen } from 'lucide-react';
+import { getCutoffProfileOptions } from '@/services/api';
 
 interface MessageBubbleProps {
   message: Message;
   onSuggestedReply: (reply: string) => void;
+  onCutoffProfileSubmit: (payload: { state: string; category: string; subCategory?: string }) => void;
   language: 'en' | 'hi' | 'mr';
   referencesEnabledGlobal?: boolean;
 }
@@ -126,8 +128,20 @@ function hasExternalWebSource(sources?: Source[]): boolean {
   });
 }
 
-export default function MessageBubble({ message, onSuggestedReply, language, referencesEnabledGlobal = true }: MessageBubbleProps) {
+export default function MessageBubble({
+  message,
+  onSuggestedReply,
+  onCutoffProfileSubmit,
+  language,
+  referencesEnabledGlobal = true,
+}: MessageBubbleProps) {
   const [showSources, setShowSources] = useState(false);
+  const [selectedState, setSelectedState] = useState(message.cutoffProfileForm?.selectedState || '');
+  const [selectedCategory, setSelectedCategory] = useState(message.cutoffProfileForm?.selectedCategory || '');
+  const [selectedSubCategory, setSelectedSubCategory] = useState(message.cutoffProfileForm?.selectedSubCategory || 'NOT_SURE');
+  const [categoryOptions, setCategoryOptions] = useState<string[]>(message.cutoffProfileForm?.categories || []);
+  const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>(message.cutoffProfileForm?.subCategories || []);
+  const [profileSubmitting, setProfileSubmitting] = useState(false);
   const isUser = message.role === 'user';
   const youLabel = language === 'hi' ? 'आप' : language === 'mr' ? 'तुम्ही' : 'You';
   const buddyLabel = 'Med Buddy';
@@ -164,6 +178,71 @@ export default function MessageBubble({ message, onSuggestedReply, language, ref
     Boolean(message.content && message.content.trim() !== '') &&
     !isLikelyRefusalOrNoInfo(message.content) &&
     (isExternalAnswer || isOfficialAnswer);
+  const hasCutoffProfileForm = !isUser && !!message.cutoffProfileForm;
+  const stateOptions = (message.cutoffProfileForm?.states || []).filter(
+    (st) => String(st).toUpperCase() !== 'MCC'
+  );
+
+  useEffect(() => {
+    setSelectedState(message.cutoffProfileForm?.selectedState || '');
+    setSelectedCategory(message.cutoffProfileForm?.selectedCategory || '');
+    setSelectedSubCategory(message.cutoffProfileForm?.selectedSubCategory || 'NOT_SURE');
+    setCategoryOptions(message.cutoffProfileForm?.categories || []);
+    setSubCategoryOptions(message.cutoffProfileForm?.subCategories || []);
+  }, [message.cutoffProfileForm]);
+
+  useEffect(() => {
+    if (!hasCutoffProfileForm || !selectedState || selectedState === 'NOT_SURE') {
+      setCategoryOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const loadCategories = async () => {
+      try {
+        const data = await getCutoffProfileOptions(selectedState);
+        if (!cancelled) {
+          setCategoryOptions(data.categories || []);
+        }
+      } catch {
+        // Keep existing options on transient failures.
+      }
+    };
+    void loadCategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCutoffProfileForm, selectedState]);
+
+  useEffect(() => {
+    if (
+      !hasCutoffProfileForm
+      || !selectedState
+      || selectedState === 'NOT_SURE'
+      || !selectedCategory
+      || selectedCategory === 'NOT_SURE'
+    ) {
+      setSubCategoryOptions([]);
+      setSelectedSubCategory('NOT_SURE');
+      return;
+    }
+    let cancelled = false;
+    const loadSubCategories = async () => {
+      try {
+        const data = await getCutoffProfileOptions(selectedState, selectedCategory);
+        if (!cancelled) {
+          setSubCategoryOptions(data.sub_categories || []);
+        }
+      } catch {
+        if (!cancelled) {
+          setSubCategoryOptions([]);
+        }
+      }
+    };
+    void loadSubCategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCutoffProfileForm, selectedState, selectedCategory]);
 
   // Don't render empty assistant messages (they're being streamed)
   if (!isUser && (!message.content || message.content.trim() === '') && !message.needsClarification) {
@@ -337,6 +416,80 @@ export default function MessageBubble({ message, onSuggestedReply, language, ref
                 {reply}
               </button>
             ))}
+          </div>
+        )}
+
+        {/* Cutoff profile form */}
+        {hasCutoffProfileForm && (
+          <div className="mt-3 rounded-xl border border-blue-200 dark:border-blue-500/70 bg-blue-50/70 dark:bg-slate-900 p-3 space-y-3 shadow-sm dark:shadow-lg dark:shadow-black/20">
+            <div>
+              <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Home state</label>
+              <select
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                value={selectedState}
+                onChange={(e) => {
+                  setSelectedState(e.target.value);
+                  setSelectedCategory('');
+                  setSelectedSubCategory('NOT_SURE');
+                }}
+              >
+                <option value="">Select state</option>
+                {stateOptions.map((st) => (
+                  <option key={st} value={st}>{st}</option>
+                ))}
+                <option value="NOT_SURE">Not sure</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Category</label>
+              <select
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                value={selectedCategory}
+                onChange={(e) => {
+                  setSelectedCategory(e.target.value);
+                  setSelectedSubCategory('NOT_SURE');
+                }}
+                disabled={!selectedState}
+              >
+                <option value="">Select category</option>
+                <option value="NOT_SURE">Not sure</option>
+                {categoryOptions.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Sub-category (optional)</label>
+              <select
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                value={selectedSubCategory}
+                onChange={(e) => setSelectedSubCategory(e.target.value)}
+                disabled={!selectedState || !selectedCategory || selectedCategory === 'NOT_SURE'}
+              >
+                <option value="NOT_SURE">Not sure</option>
+                {subCategoryOptions.map((sub) => (
+                  <option key={sub} value={sub}>{sub}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              disabled={!selectedState || !selectedCategory || profileSubmitting}
+              onClick={async () => {
+                setProfileSubmitting(true);
+                try {
+                  onCutoffProfileSubmit({
+                    state: selectedState,
+                    category: selectedCategory,
+                    subCategory: selectedSubCategory !== 'NOT_SURE' ? selectedSubCategory : undefined,
+                  });
+                } finally {
+                  setProfileSubmitting(false);
+                }
+              }}
+            >
+              {profileSubmitting ? 'Submitting...' : 'Submit details'}
+            </button>
           </div>
         )}
 

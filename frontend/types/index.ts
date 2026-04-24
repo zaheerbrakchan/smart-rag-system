@@ -55,6 +55,14 @@ export interface Message {
   clarificationOptions?: string[];
   suggestedReplies?: string[];
   originalQuestion?: string;
+  cutoffProfileForm?: {
+    states: string[];
+    categories: string[];
+    subCategories: string[];
+    selectedState?: string;
+    selectedCategory?: string;
+    selectedSubCategory?: string;
+  };
 }
 
 // API response

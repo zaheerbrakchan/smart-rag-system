@@ -146,7 +146,7 @@ const TRANSLATIONS: Record<
       neet_exam_guidance: 'Great choice. What would you like to know in NEET exam guidance?',
       counselling_process: 'Sure — please type the state/UT counselling details you want to know.',
       college_shortlist:
-        'To shortlist accurately, please share your NEET rank (or expected rank), category, and preferred state.',
+        'Great — I can help with college shortlist. I will quickly collect your needed details and then suggest the best matches. Can you please tell your home state?',
       college_fee_structure:
         'Sure — tell me which state or college fee structure you want, and if possible mention college type.',
     },
@@ -208,7 +208,7 @@ const TRANSLATIONS: Record<
       neet_exam_guidance: 'बहुत बढ़िया। NEET परीक्षा मार्गदर्शन में आप क्या जानना चाहते हैं?',
       counselling_process: 'ज़रूर — जिस राज्य/केंद्र शासित प्रदेश की काउंसलिंग जानकारी चाहिए, वह लिखें।',
       college_shortlist:
-        'सटीक शॉर्टलिस्ट के लिए अपना NEET रैंक (या अपेक्षित रैंक/स्कोर), श्रेणी और पसंदीदा राज्य बताएं।',
+        'बहुत बढ़िया — मैं कॉलेज शॉर्टलिस्ट में मदद करूंगा। जरूरी जानकारी लेकर सबसे उपयुक्त विकल्प बताऊंगा। कृपया अपना होम स्टेट बताएं।',
       college_fee_structure:
         'ज़रूर — जिस राज्य या कॉलेज की फीस संरचना चाहिए, बताएं; संभव हो तो कॉलेज प्रकार भी लिखें।',
     },
@@ -270,7 +270,7 @@ const TRANSLATIONS: Record<
       neet_exam_guidance: 'छान निवड. NEET परीक्षा मार्गदर्शनात तुम्हाला काय जाणून घ्यायचे आहे?',
       counselling_process: 'नक्की — ज्या राज्य/केंद्रशासित प्रदेशाची समुपदेशन माहिती हवी आहे ती टाइप करा.',
       college_shortlist:
-        'अचूक शॉर्टलिस्टसाठी तुमचा NEET रँक (किंवा अपेक्षित रँक/स्कोर), प्रवर्ग आणि पसंतीचे राज्य सांगा.',
+        'छान — मी कॉलेज शॉर्टलिस्टमध्ये मदत करीन. आवश्यक माहिती घेऊन योग्य पर्याय सुचवेन. कृपया तुमचे होम स्टेट सांगा.',
       college_fee_structure:
         'नक्की — कोणत्या राज्य/कॉलेजची फी संरचना हवी ते सांगा; शक्य असल्यास कॉलेज प्रकारही नमूद करा.',
     },
@@ -321,6 +321,7 @@ export default function Home() {
   const [chatReferencesEnabledGlobal, setChatReferencesEnabledGlobal] = useState(true);
   const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const conversationIdRef = useRef<number | null>(null);
   const t = TRANSLATIONS[selectedLanguage];
   const isAdminUser = user?.role === 'admin' || user?.role === 'super_admin';
   const displayedMessages = useMemo(
@@ -458,6 +459,10 @@ export default function Home() {
 
   // Redirect to login if not authenticated
   useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  useEffect(() => {
     if (!authLoading && !isAuthenticated) {
       router.replace('/login');
     }
@@ -505,9 +510,13 @@ export default function Home() {
     return () => window.removeEventListener('focus', onFocus);
   }, [refreshChatReferencesVisibility]);
 
-  const handleSendMessage = async (quickReply?: string) => {
+  const handleSendMessage = async (
+    quickReply?: string,
+    options?: { hideUserMessage?: boolean }
+  ) => {
     const referencesEnabledForTurn = await refreshChatReferencesVisibility();
     const trimmed = (quickReply ?? inputValue).trim();
+    const hideUserMessage = Boolean(options?.hideUserMessage);
     const pending = pendingClarification;
 
     if (isLoading) return;
@@ -515,6 +524,10 @@ export default function Home() {
     if (!pending && quickReply) {
       const intent = resolveGuidedIntent(quickReply);
       if (intent) {
+        if (intent === 'college_shortlist') {
+          // Send directly to backend so cutoff profile form appears immediately.
+          setGuidedIntent(null);
+        } else {
         const guideMessage = t.guidedPrompts[intent];
         const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const userMessage: Message = {
@@ -533,6 +546,7 @@ export default function Home() {
         setMessages((prev) => [...prev, userMessage, assistantMessage]);
         setInputValue('');
         return;
+        }
       }
     }
 
@@ -572,12 +586,6 @@ export default function Home() {
       clarifiedScope = undefined;
       // Must never collide: (Date.now()+1) then Date.now() can equal the assistant id if the clock ticks 1ms.
       const turnId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      const userMessage: Message = {
-        id: `user-${turnId}`,
-        role: 'user',
-        content: trimmed,
-        timestamp: new Date(),
-      };
       assistantMessageId = `assistant-${turnId}`;
       const assistantMessage: Message = {
         id: assistantMessageId,
@@ -587,7 +595,17 @@ export default function Home() {
         sources: [],
         referencesEnabled: referencesEnabledForTurn,
       };
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      if (hideUserMessage) {
+        setMessages((prev) => [...prev, assistantMessage]);
+      } else {
+        const userMessage: Message = {
+          id: `user-${turnId}`,
+          role: 'user',
+          content: trimmed,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      }
       setInputValue('');
     }
 
@@ -601,6 +619,8 @@ export default function Home() {
       } : undefined;
       
       // Stream response from API
+      const conversationIdForRequest =
+        messages.length === 0 ? undefined : (conversationIdRef.current || undefined);
       await streamChatMessage(
         question,
         selectedModel,
@@ -712,8 +732,32 @@ export default function Home() {
             setAllowStarterReplies(false);
           }
         },
+        // onCutoffProfileForm
+        (payload) => {
+          const states = Array.isArray(payload?.states) ? payload.states : [];
+          const categories = Array.isArray(payload?.categories) ? payload.categories : [];
+          const subCategories = Array.isArray(payload?.sub_categories) ? payload.sub_categories : [];
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    content: '',
+                    cutoffProfileForm: {
+                      states,
+                      categories,
+                      subCategories,
+                      selectedState: payload?.state || '',
+                      selectedCategory: payload?.category || '',
+                      selectedSubCategory: payload?.sub_category || '',
+                    },
+                  }
+                : msg
+            )
+          );
+        },
         // conversationId and userId
-        conversationId || undefined,
+        conversationIdForRequest,
         user?.id,
         // onTitle - refresh sidebar when title is generated
         (title, convId) => {
@@ -739,6 +783,26 @@ export default function Home() {
   const handleSuggestedReply = (reply: string) => {
     if (isLoading) return;
     void handleSendMessage(reply);
+  };
+
+  const handleCutoffProfileSubmit = (payload: { state: string; category: string; subCategory?: string }) => {
+    if (isLoading) return;
+    const lines: string[] = [];
+    if (payload.state && payload.state !== 'NOT_SURE') {
+      lines.push(`Home state: ${payload.state}`);
+    } else {
+      lines.push('Home state: Not sure');
+    }
+    if (payload.category && payload.category !== 'NOT_SURE') {
+      lines.push(`Category: ${payload.category}`);
+    } else {
+      lines.push('Category: Not sure');
+    }
+    if (payload.subCategory) {
+      lines.push(`Sub-category: ${payload.subCategory}`);
+    }
+    lines.push('Proceed with college shortlist.');
+    void handleSendMessage(lines.join('\n'), { hideUserMessage: true });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -782,6 +846,7 @@ export default function Home() {
   const handleNewChat = () => {
     setMessages([]);
     setConversationId(null);
+    conversationIdRef.current = null;
     setPendingClarification(null);
     setGuidedIntent(null);
     setAllowStarterReplies(true);
@@ -1052,6 +1117,7 @@ export default function Home() {
             isLoading={isLoading}
             messagesEndRef={messagesEndRef}
             onSuggestedReply={handleSuggestedReply}
+            onCutoffProfileSubmit={handleCutoffProfileSubmit}
             language={selectedLanguage}
             referencesEnabledGlobal={chatReferencesEnabledGlobal}
           />

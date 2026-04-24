@@ -13,6 +13,13 @@ export interface UserPreferences {
 }
 
 export type SupportQueryStatus = 'pending' | 'in_progress' | 'answered' | 'closed';
+export interface CutoffProfileOptionsResponse {
+  states: string[];
+  categories: string[];
+  sub_categories: string[];
+  selected_state?: string | null;
+  selected_category?: string | null;
+}
 
 export interface SupportQueryReply {
   id: number;
@@ -105,6 +112,7 @@ export async function streamChatMessage(
   clarifiedScope?: string,
   onClarificationNeeded?: (options: string[], message: string) => void,
   onSuggestedReplies?: (replies: string[]) => void,
+  onCutoffProfileForm?: (payload: any) => void,
   conversationId?: number,
   userId?: number,
   onTitle?: (title: string, conversationId: number) => void,
@@ -168,6 +176,8 @@ export async function streamChatMessage(
               onClarificationNeeded(data.options, data.message);
             } else if (data.type === 'suggested_replies' && onSuggestedReplies) {
               onSuggestedReplies(data.replies || []);
+            } else if (data.type === 'cutoff_profile_form' && onCutoffProfileForm) {
+              onCutoffProfileForm(data);
             } else if (data.type === 'done') {
               onDone(data.filters_applied, data.conversation_id);
             } else if (data.type === 'title' && onTitle) {
@@ -184,6 +194,22 @@ export async function streamChatMessage(
   } catch (error) {
     onError(error instanceof Error ? error.message : 'Stream failed');
   }
+}
+
+export async function getCutoffProfileOptions(
+  state?: string,
+  category?: string
+): Promise<CutoffProfileOptionsResponse> {
+  const params = new URLSearchParams();
+  if (state) params.set('state', state);
+  if (category) params.set('category', category);
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/cutoff/profile/options${qs ? `?${qs}` : ''}`;
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error('Failed to load cutoff profile options');
+  }
+  return response.json();
 }
 
 /**

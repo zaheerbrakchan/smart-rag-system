@@ -10,6 +10,7 @@ interface ChatWindowProps {
   isLoading: boolean;
   messagesEndRef: RefObject<HTMLDivElement>;
   onSuggestedReply: (reply: string) => void;
+  onCutoffProfileSubmit: (payload: { state: string; category: string; subCategory?: string }) => void;
   language: 'en' | 'hi' | 'mr';
   referencesEnabledGlobal?: boolean;
 }
@@ -19,6 +20,7 @@ export default function ChatWindow({
   isLoading,
   messagesEndRef,
   onSuggestedReply,
+  onCutoffProfileSubmit,
   language,
   referencesEnabledGlobal = true,
 }: ChatWindowProps) {
@@ -45,6 +47,7 @@ export default function ChatWindow({
             key={message.id}
             message={message}
             onSuggestedReply={onSuggestedReply}
+            onCutoffProfileSubmit={onCutoffProfileSubmit}
             language={language}
             referencesEnabledGlobal={referencesEnabledGlobal}
           />

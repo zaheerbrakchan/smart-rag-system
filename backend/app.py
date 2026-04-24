@@ -17,8 +17,9 @@ import logging
 import threading
 from pathlib import Path
 from datetime import datetime
+from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -914,6 +915,20 @@ def _is_cutoff_intent(question: str) -> bool:
     )
 
 
+def _is_explicit_college_shortlist_trigger(question: str) -> bool:
+    q = _normalize_text(question)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", q)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    phrases = {
+        "college shortlist",
+        "shortlist colleges",
+        "shortlist college",
+        "college shortlisting",
+        "start college shortlist",
+    }
+    return normalized in phrases
+
+
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, object]]:
     raw = (raw_text or "").strip()
     if not raw:
@@ -1069,6 +1084,40 @@ def _should_continue_cutoff_from_context(question: str, cutoff_ctx: Dict[str, ob
     return False
 
 
+def _is_recent_iso_timestamp(ts: Optional[str], within_minutes: int) -> bool:
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            now_dt = datetime.now(dt.tzinfo)
+        else:
+            now_dt = datetime.utcnow()
+        return (now_dt - dt) <= timedelta(minutes=within_minutes)
+    except Exception:
+        return False
+
+
+def _expire_stale_cutoff_run_state(cutoff_ctx: Dict[str, object], freshness_minutes: int = 30) -> None:
+    """
+    Keep profile preferences, but expire run-specific cutoff fields after inactivity.
+    """
+    last_turn_at = str(cutoff_ctx.get("last_turn_at") or "")
+    if _is_recent_iso_timestamp(last_turn_at, freshness_minutes):
+        return
+    for key in [
+        "metric_type",
+        "metric_value",
+        "target_states",
+        "awaiting_refinement_choice",
+        "awaiting_refinement_details",
+        "college_type_patterns",
+        "quota_patterns",
+        "last_result_count",
+    ]:
+        cutoff_ctx.pop(key, None)
+
+
 def _looks_like_cutoff_profile_payload(question: str) -> bool:
     q = _normalize_text(question)
     metric_type, metric_value = _extract_metric_from_text(question)
@@ -1208,8 +1257,14 @@ def _extract_states_from_text(
 
 def _extract_home_state(question: str) -> Optional[str]:
     q = _normalize_text(question)
-    m = re.search(r"(?:i am from|i'm from|my home state is|from)\s+([a-z\s&]+)", q)
-    if m:
+    patterns = [
+        r"(?:i am from|i'm from|my home state is|my state is|i belong to|from)\s+([a-z\s&]+)",
+        r"([a-z\s&]+)\s+(?:home state|domicile)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, q)
+        if not m:
+            continue
         phrase = m.group(1).strip()
         for alias, canonical in STATES.items():
             if canonical == "All-India":
@@ -1229,6 +1284,13 @@ def _canonicalize_state_name(raw: Optional[str]) -> Optional[str]:
     for canonical in sorted(set(STATES.values()), key=len, reverse=True):
         if canonical.lower() == s:
             return None if canonical == "All-India" else canonical
+    # Fallback for cutoff DB exact states (handles values like "Jammu & Kashmir", "Tamilnadu").
+    raw_text = str(raw).strip()
+    if raw_text:
+        raw_key = _normalize_state_key(raw_text)
+        for db_state in CUTOFF_SQL_STATES:
+            if _normalize_state_key(db_state) == raw_key:
+                return db_state
     return None
 
 
@@ -1287,6 +1349,142 @@ async def _get_registered_user_name(user_id: Optional[int]) -> Optional[str]:
         return None
 
 
+def _normalize_cutoff_category(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    raw = str(value).strip().upper().replace("-", "").replace(" ", "")
+    mapping = {
+        "GENERAL": "GENERAL",
+        "GEN": "GENERAL",
+        "UR": "GENERAL",
+        "OBC": "OBC",
+        "SC": "SC",
+        "ST": "ST",
+        "EWS": "EWS",
+        "PWD": "PWD",
+        "PWBD": "PWD",
+    }
+    return mapping.get(raw) or str(value).strip().upper()
+
+
+async def _load_user_cutoff_profile(user_id: Optional[int]) -> Dict[str, object]:
+    if not user_id:
+        return {}
+    try:
+        from database.connection import async_session_maker
+
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return {}
+            profile_data = dict(getattr(user, "profile_data", {}) or {})
+            cutoff_profile = dict(profile_data.get("cutoff_profile") or {})
+            home_state = _canonicalize_state_name(cutoff_profile.get("home_state"))
+            category = _normalize_cutoff_category(cutoff_profile.get("category"))
+            sub_category_raw = str(cutoff_profile.get("sub_category") or "").strip()
+            preferences_set = bool(home_state and category)
+            out: Dict[str, object] = {}
+            if home_state:
+                out["home_state"] = home_state
+            if category:
+                out["category"] = category
+            if sub_category_raw:
+                out["sub_category"] = sub_category_raw.upper()
+            out["preferences_set"] = preferences_set
+            return out
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load user cutoff profile: {e}")
+        return {}
+
+
+async def _save_user_cutoff_profile(user_id: Optional[int], cutoff_ctx: Dict[str, object]) -> None:
+    if not user_id:
+        return
+    try:
+        from database.connection import async_session_maker
+
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return
+            profile_data = dict(getattr(user, "profile_data", {}) or {})
+            cutoff_profile = dict(profile_data.get("cutoff_profile") or {})
+
+            home_state = _canonicalize_state_name(cutoff_ctx.get("home_state"))
+            category = _normalize_cutoff_category(cutoff_ctx.get("category"))
+            sub_category = str(cutoff_ctx.get("sub_category") or "").strip().upper() or None
+
+            if home_state:
+                cutoff_profile["home_state"] = home_state
+            if category:
+                cutoff_profile["category"] = category
+            if sub_category:
+                cutoff_profile["sub_category"] = sub_category
+            cutoff_profile["preferences_set"] = bool(home_state and category)
+            cutoff_profile["updated_at"] = datetime.utcnow().isoformat()
+
+            profile_data["cutoff_profile"] = cutoff_profile
+            user.profile_data = profile_data
+            await db.commit()
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not save user cutoff profile: {e}")
+
+
+async def _get_cutoff_category_options(state: Optional[str]) -> List[str]:
+    if not state:
+        return []
+    try:
+        from database.connection import async_session_maker
+        from sqlalchemy import text
+
+        async with async_session_maker() as db:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT TRIM(UPPER(category)) AS category
+                    FROM neet_ug_2025_cutoffs
+                    WHERE TRIM(state) ILIKE :state_like
+                      AND category IS NOT NULL
+                      AND TRIM(category) <> ''
+                    ORDER BY 1
+                    """
+                ),
+                {"state_like": state},
+            )
+            return [str(row[0]).strip().upper() for row in result.fetchall() if row[0]]
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load cutoff category options: {e}")
+        return []
+
+
+async def _get_cutoff_subcategory_options(state: Optional[str], category: Optional[str]) -> List[str]:
+    if not state or not category:
+        return []
+    try:
+        from database.connection import async_session_maker
+        from sqlalchemy import text
+
+        async with async_session_maker() as db:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT TRIM(UPPER(sub_category)) AS sub_category
+                    FROM neet_ug_2025_cutoffs
+                    WHERE TRIM(state) ILIKE :state_like
+                      AND category ILIKE :category_like
+                      AND sub_category IS NOT NULL
+                      AND TRIM(sub_category) <> ''
+                    ORDER BY 1
+                    """
+                ),
+                {"state_like": state, "category_like": f"%{category}%"},
+            )
+            return [str(row[0]).strip().upper() for row in result.fetchall() if row[0]]
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load cutoff sub-category options: {e}")
+        return []
+
+
 def _extract_category(question: str) -> Optional[str]:
     q = _normalize_text(question)
     if "obc" in q:
@@ -1313,28 +1511,40 @@ def _missing_cutoff_fields(cutoff_ctx: Dict[str, object]) -> List[str]:
     4) Category — seat-type cutoffs vary by category.
     """
     missing: List[str] = []
+    preferences_set = bool(cutoff_ctx.get("preferences_set"))
+
+    # First-time cutoff flow: collect profile preferences first.
+    if not preferences_set:
+        if not cutoff_ctx.get("home_state"):
+            missing.append("home_state")
+        if not cutoff_ctx.get("category"):
+            missing.append("category")
+        return missing
+
     if not cutoff_ctx.get("metric_type") or not cutoff_ctx.get("metric_value"):
         missing.append("metric")
-    if not cutoff_ctx.get("home_state"):
-        missing.append("home_state")
-    if not cutoff_ctx.get("target_states"):
+    if not cutoff_ctx.get("target_states") or not bool(cutoff_ctx.get("target_states_confirmed")):
         missing.append("target_states")
-    if not cutoff_ctx.get("category"):
-        missing.append("category")
     return missing
 
 
 def _build_cutoff_followup_prompt(
     missing_fields: List[str],
     cutoff_ctx: Optional[Dict[str, object]] = None,
+    category_options: Optional[List[str]] = None,
+    sub_category_options: Optional[List[str]] = None,
 ) -> str:
     ctx = dict(cutoff_ctx or {})
     friend = str(ctx.get("profile_mode") or "") == "friend_or_general"
+    if "metric" in missing_fields and "target_states" in missing_fields:
+        return (
+            "To shortlist accurately, please share **your NEET AIR rank (or score/marks)** and tell me "
+            "which **state(s) you want to explore**."
+        )
     if "metric" in missing_fields:
         return (
             "To suggest colleges from cutoff data, I first need **your NEET AIR rank or your NEET score/marks** "
-            "(whichever you use).\n\n"
-            "Example: `AIR 5400` or `Score 540`."
+            "(whichever you use)."
         )
     if "home_state" in missing_fields:
         if friend:
@@ -1342,20 +1552,53 @@ def _build_cutoff_followup_prompt(
                 "Please share the **candidate's home state** (domicile / home state for the person you are asking about). "
                 "I need this to apply **domicile vs non-domicile** cutoff rows correctly."
             )
+        if ctx.get("category"):
+            return (
+                f"Thanks. I already have your category as **{ctx.get('category')}**.\n\n"
+                "Please share your **home state** (domicile/home state) so I can match cutoff rows correctly."
+            )
         return (
             "Please tell me your **home state** (domicile / home state).\n\n"
             "I use this with your target state(s) to apply **domicile vs non-domicile** rules correctly."
         )
     if "target_states" in missing_fields:
+        hs = str(ctx.get("home_state") or "").strip()
+        if hs:
+            return (
+                "Before I fetch colleges, tell me your **preferred target state(s)**.\n\n"
+                f"You can choose your **home state ({hs})** or any other state(s)."
+            )
         return (
             "Which **state(s) or UT(s)** should I pull college cutoff options from?\n\n"
-            "This can match your home state or include other states you are exploring. "
-            "Example: `Bihar` or `Delhi, Haryana`."
+            "This can match your home state or include other states you are exploring."
         )
     if "category" in missing_fields:
+        if ctx.get("home_state"):
+            prefix = (
+                f"Thanks. I already have your home state as **{ctx.get('home_state')}**.\n\n"
+            )
+        else:
+            prefix = ""
+        if category_options:
+            opts = " / ".join(category_options[:10])
+            return (
+                f"{prefix}Which **NEET category** should I use for **{ctx.get('home_state') or 'your state'}**?\n\n"
+                f"Available categories in cutoff data: {opts}\n\n"
+                "Reply with one option so cutoff rows match your seat type."
+            )
         return (
-            "Which **NEET category** should I use? (General / OBC / SC / ST / EWS / PwD)\n\n"
+            f"{prefix}Which **NEET category** should I use? (General / OBC / SC / ST / EWS / PwD)\n\n"
             "Reply with your category so cutoff rows match your seat type."
+        )
+    if "sub_category" in missing_fields:
+        if sub_category_options:
+            opts = " / ".join(sub_category_options[:12])
+            return (
+                f"Please choose your **sub-category** for **{ctx.get('category') or 'selected category'}**.\n\n"
+                f"Available options in cutoff data: {opts}"
+            )
+        return (
+            "Please share your **sub-category** (if applicable) so I can match more accurate cutoff rows."
         )
     return "Please share a bit more detail so I can run cutoff analysis."
 
@@ -1675,8 +1918,11 @@ async def _llm_interpret_cutoff_refinement(
                         "- If explicit_states_count > 0 OR metric_detected=true OR category_detected=true, treat this as primary profile input.\n"
                         "- For primary profile input, DO NOT auto-broaden states. Return apply=false unless user explicitly asks refine/relax/nearby/broader/change.\n"
                         "- Use only states from allowed_states.\n"
-                        "- If user asks nearby/closest/broader options, expand target_states intelligently using geography around current/home state.\n"
-                        "- If user asks home-state only, set target_states to [home_state] when available.\n"
+                        "- If user asks nearby/closest/broader options, expand target_states intelligently around the CURRENT active target scope; do not stay stuck on an older state when user asks to switch.\n"
+                        "- Never infer target_states from home_state implicitly; require explicit state preference in the current user message, except when user clearly says home-state intent.\n"
+                        "- If user says 'home state only', set target_states to [home_state] and replace previous target states.\n"
+                        "- If user says 'check in X' or 'switch to X', target_states should become [X] unless they ask for multiple states.\n"
+                        "- If user says 'include nearby states', expand around the currently requested state(s), not stale states from old turns.\n"
                         "- If user asks relax quota/type, set clear flags.\n"
                         "- If no actionable refinement intent, return apply=false."
                     ),
@@ -1713,6 +1959,141 @@ async def _llm_interpret_cutoff_refinement(
     except Exception as e:
         log(f"[V2] ⚠️ Cutoff refinement interpreter failed: {e}")
         return {"apply": False}
+
+
+async def _llm_extract_cutoff_profile_turn(
+    question: str,
+    cutoff_ctx: Dict[str, object],
+    allowed_states: List[str],
+    pending_fields: Optional[List[str]] = None,
+    allowed_sub_categories: Optional[List[str]] = None,
+) -> Dict[str, object]:
+    """
+    LLM-only extraction for cutoff profile fields from current user turn.
+    Avoids regex/pattern hardcoding for home state / target states / category / metric.
+    """
+    if not question:
+        return {}
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        payload = {
+            "question": question,
+            "current_context": {
+                "metric_type": cutoff_ctx.get("metric_type"),
+                "metric_value": cutoff_ctx.get("metric_value"),
+                "category": cutoff_ctx.get("category"),
+                "home_state": cutoff_ctx.get("home_state"),
+                "target_states": list(cutoff_ctx.get("target_states") or []),
+            },
+            "allowed_states": allowed_states,
+            "pending_fields": list(pending_fields or []),
+            "allowed_sub_categories": list(allowed_sub_categories or []),
+        }
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract NEET cutoff profile fields from the current user message.\n"
+                        "Return JSON only with keys:\n"
+                        "metric_type ('rank'|'score'|null), metric_value (int|null), category (string|null), "
+                        "home_state (exact string from allowed_states or null), "
+                        "target_states (array of exact strings from allowed_states), "
+                        "sub_category (exact string from allowed_sub_categories or null), "
+                        "signals (object with booleans: metric_detected, category_detected, explicit_states_detected, home_state_detected).\n"
+                        "Rules:\n"
+                        "- Use ONLY states from allowed_states.\n"
+                        "- Prefer the CURRENT user message; use current_context only for short follow-ups.\n"
+                        "- If pending_fields includes 'category', interpret short replies like 'ST', 'SC', "
+                        "'OBC', 'EWS', 'General', 'PwD' as category with high confidence.\n"
+                        "- If user says just a single state like 'Delhi' while discussing missing profile details, "
+                        "interpret it as likely home_state and include it in target_states too when reasonable.\n"
+                        "- If user says 'home state only', mark explicit_states_detected=true and set target_states to [home_state from current_context when available].\n"
+                        "- If user says 'check in Maharashtra' (or any state), treat that as explicit state override for target_states.\n"
+                        "- For rank-only/score-only replies (for example: '23000' or 'Score 540') do not fabricate target_states.\n"
+                        "- If pending_fields includes 'sub_category', map from allowed_sub_categories only.\n"
+                        "- Do not invent values.\n"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+            temperature=0,
+            max_tokens=260,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return {}
+        allowed = {s for s in allowed_states}
+
+        out: Dict[str, object] = {}
+        mt = parsed.get("metric_type")
+        if mt in {"rank", "score"}:
+            out["metric_type"] = mt
+        mv = parsed.get("metric_value")
+        if isinstance(mv, (int, float)) and int(mv) > 0:
+            out["metric_value"] = int(mv)
+        cat = parsed.get("category")
+        if isinstance(cat, str) and cat.strip():
+            out["category"] = cat.strip().upper()
+        sub_cat = str(parsed.get("sub_category") or "").strip().upper()
+        allowed_sub = {str(s).strip().upper() for s in list(allowed_sub_categories or []) if str(s).strip()}
+        if sub_cat and (not allowed_sub or sub_cat in allowed_sub):
+            out["sub_category"] = sub_cat
+        hs = parsed.get("home_state")
+        if isinstance(hs, str) and hs in allowed:
+            out["home_state"] = hs
+        ts = parsed.get("target_states", [])
+        if isinstance(ts, list):
+            deduped: List[str] = []
+            seen = set()
+            for st in ts:
+                if isinstance(st, str) and st in allowed and st not in seen:
+                    deduped.append(st)
+                    seen.add(st)
+            if deduped:
+                out["target_states"] = deduped[:6]
+        signals = parsed.get("signals")
+        if isinstance(signals, dict):
+            out["signals"] = {
+                "metric_detected": bool(signals.get("metric_detected", False)),
+                "category_detected": bool(signals.get("category_detected", False)),
+                "explicit_states_detected": bool(signals.get("explicit_states_detected", False)),
+                "home_state_detected": bool(signals.get("home_state_detected", False)),
+            }
+        if "category" in (pending_fields or []) and not out.get("category"):
+            # Retry with a strict category-only extraction prompt for terse user replies.
+            retry = client.chat.completions.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract NEET category from user text.\n"
+                            "Return JSON only: {\"category\": <GENERAL|OBC|SC|ST|EWS|PWD|null>}.\n"
+                            "If user text is exactly or mainly one category token, map it directly.\n"
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps({"question": question})},
+                ],
+                temperature=0,
+                max_tokens=80,
+            )
+            retry_raw = (retry.choices[0].message.content or "").strip()
+            retry_parsed = json.loads(retry_raw)
+            retry_cat = str(retry_parsed.get("category") or "").strip().upper()
+            if retry_cat in {"GENERAL", "OBC", "SC", "ST", "EWS", "PWD"}:
+                out["category"] = retry_cat
+                signals_obj = dict(out.get("signals") or {})
+                signals_obj["category_detected"] = True
+                out["signals"] = signals_obj
+        return out
+    except Exception as e:
+        log(f"[V2] ⚠️ Cutoff profile extractor failed: {e}")
+        return {}
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -1757,31 +2138,34 @@ load_dotenv(dotenv_path=ENV_PATH)
 # Configuration
 DATA_DIR = Path(__file__).parent / "data"
 CUTOFF_SQL_STATES: List[str] = [
-    "ANDHRA PRADESH",
-    "ARUNACHAL PRADESH",
-    "BIHAR",
-    "CHHATTISGARH",
-    "DELHI",
-    "GUJARAT",
-    "HARYANA",
-    "HIMACHAL PRADESH",
-    "JAMMU & KASHMIR",
-    "JHARKHAND",
-    "KARNATAKA",
-    "KERALA",
-    "MADHYA PRADESH",
-    "MAHARASHTRA",
+    "Andhra Pradesh",
+    "Arunachal Pradesh",
+    "Assam",
+    "Bihar",
+    "Chhattisgarh",
+    "Delhi",
+    "Gujarat",
+    "Haryana",
+    "Himachal Pradesh",
+    "Jammu & Kashmir",
+    "Jharkhand",
+    "Karnataka",
+    "Kerala",
     "MCC",
-    "NAGALAND",
-    "ODISHA",
-    "PUDUCHERRY",
-    "PUNJAB",
-    "RAJASTHAN",
-    "TAMILNADU",
-    "TELANGANA",
-    "UTTAR PRADESH",
-    "UTTARAKHAND",
-    "WEST BENGAL",
+    "Madhya Pradesh",
+    "Maharashtra",
+    "Manipur",
+    "Nagaland",
+    "Odisha",
+    "Puducherry",
+    "Punjab",
+    "Rajasthan",
+    "Tamilnadu",
+    "Telangana",
+    "Tripura",
+    "Uttar Pradesh",
+    "Uttarakhand",
+    "West Bengal",
 ]
 
 
@@ -2017,6 +2401,10 @@ STATES = {
     "punjab": "Punjab",
     "haryana": "Haryana",
     "delhi": "Delhi",
+    "jammu and kashmir": "Jammu & Kashmir",
+    "jammu & kashmir": "Jammu & Kashmir",
+    "j&k": "Jammu & Kashmir",
+    "jk": "Jammu & Kashmir",
     "assam": "Assam",
     "jharkhand": "Jharkhand",
     "chhattisgarh": "Chhattisgarh",
@@ -2636,6 +3024,30 @@ async def health_check():
             "status": "degraded",
             "error": str(e)
         }
+
+
+@app.get("/cutoff/profile/options")
+async def get_cutoff_profile_options(
+    state: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+):
+    """Public options endpoint for cutoff profile form dropdowns."""
+    states = [s for s in await _get_cutoff_db_states_cached() if str(s).upper() != "MCC"]
+    selected_state = _canonicalize_state_name(state) if state else None
+    normalized_category = _normalize_cutoff_category(category) if category else None
+    categories = await _get_cutoff_category_options(selected_state) if selected_state else []
+    sub_categories = (
+        await _get_cutoff_subcategory_options(selected_state, normalized_category)
+        if selected_state and normalized_category
+        else []
+    )
+    return {
+        "states": states,
+        "categories": categories,
+        "sub_categories": sub_categories,
+        "selected_state": selected_state,
+        "selected_category": normalized_category,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -3977,12 +4389,19 @@ async def chat_v2_stream(request: ChatRequest):
             # ========== CUTOFF SQL PATH (TABLE-BASED, NO VECTOR SEARCH) ==========
             cutoff_ctx_peek = dict(med_ctx.get("cutoff") or {})
             cutoff_triggered = False
+            explicit_shortlist_start = False
+            continuing_cutoff_flow = False
             if MEDBUDDY_CAPS["cutoff"]:
                 if _is_fee_followup_with_context(request.question, med_ctx):
                     log("[V2] 🧭 Fee-context follow-up detected; skipping cutoff SQL routing")
                     cutoff_triggered = False
+                elif _is_explicit_college_shortlist_trigger(request.question):
+                    cutoff_triggered = True
+                    explicit_shortlist_start = True
+                    log("[V2] 🧭 Explicit college shortlist trigger detected; forcing cutoff SQL profile flow")
                 elif _should_continue_cutoff_from_context(request.question, cutoff_ctx_peek):
                     cutoff_triggered = True
+                    continuing_cutoff_flow = True
                     log("[V2] 🧭 Continuing cutoff refinement flow from conversation context")
                 if cutoff_triggered:
                     llm_route_decision = True
@@ -4012,10 +4431,58 @@ async def chat_v2_stream(request: ChatRequest):
                 cutoff_db_states = await _get_cutoff_db_states_cached()
 
                 cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+                _expire_stale_cutoff_run_state(cutoff_ctx, freshness_minutes=30)
+                if explicit_shortlist_start or not continuing_cutoff_flow:
+                    # Fresh shortlist run: keep saved profile preferences, but clear stale
+                    # rank/target/refinement context from previous cutoff answers.
+                    for key in [
+                        "metric_type",
+                        "metric_value",
+                        "target_states",
+                        "target_states_confirmed",
+                        "awaiting_refinement_choice",
+                        "awaiting_refinement_details",
+                        "college_type_patterns",
+                        "quota_patterns",
+                        "last_result_count",
+                    ]:
+                        cutoff_ctx.pop(key, None)
                 profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
                 if _is_friend_or_general_profile_mode(request.question):
                     profile_mode = "friend_or_general"
                 cutoff_ctx["profile_mode"] = profile_mode
+                if profile_mode == "self" and request.user_id and not cutoff_ctx.get("profile_bootstrapped"):
+                    stored_profile = await _load_user_cutoff_profile(request.user_id)
+                    if stored_profile.get("home_state") and not cutoff_ctx.get("home_state"):
+                        cutoff_ctx["home_state"] = stored_profile["home_state"]
+                    if stored_profile.get("category") and not cutoff_ctx.get("category"):
+                        cutoff_ctx["category"] = stored_profile["category"]
+                    if stored_profile.get("sub_category") and not cutoff_ctx.get("sub_category"):
+                        cutoff_ctx["sub_category"] = stored_profile["sub_category"]
+                    cutoff_ctx["preferences_set"] = bool(stored_profile.get("preferences_set", False))
+                    cutoff_ctx["profile_bootstrapped"] = True
+                    if stored_profile:
+                        log(
+                            "[V2] 👤 Bootstrapped cutoff profile from user profile | "
+                            f"user_id={request.user_id} has_home_state={bool(stored_profile.get('home_state'))} "
+                            f"has_category={bool(stored_profile.get('category'))} "
+                            f"has_sub_category={bool(stored_profile.get('sub_category'))} "
+                            f"preferences_set={bool(stored_profile.get('preferences_set', False))}"
+                        )
+                category_state_for_options = cutoff_ctx.get("home_state")
+                if not category_state_for_options and cutoff_ctx.get("target_states"):
+                    category_state_for_options = list(cutoff_ctx.get("target_states") or [None])[0]
+                category_options = await _get_cutoff_category_options(
+                    str(category_state_for_options) if category_state_for_options else None
+                )
+                sub_category_options: List[str] = []
+                if cutoff_ctx.get("category"):
+                    sub_category_options = await _get_cutoff_subcategory_options(
+                        str(category_state_for_options) if category_state_for_options else None,
+                        str(cutoff_ctx.get("category")),
+                    )
+                cutoff_ctx["needs_sub_category"] = bool(sub_category_options)
+                missing_before_turn = _missing_cutoff_fields(cutoff_ctx)
                 if cutoff_ctx.get("awaiting_refinement_choice") and _is_affirmative_reply(request.question):
                     followup = (
                         "Sure — happy to refine this.\n\n"
@@ -4046,33 +4513,24 @@ async def chat_v2_stream(request: ChatRequest):
                         asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
                     return
 
-                detected_states = _extract_states_from_text(
+                profile_turn = await _llm_extract_cutoff_profile_turn(
                     request.question,
-                    cutoff_db_states=cutoff_db_states,
-                    use_llm_fallback=True,
+                    cutoff_ctx,
+                    cutoff_db_states,
+                    pending_fields=missing_before_turn,
+                    allowed_sub_categories=sub_category_options,
                 )
-                metric_type, metric_value = _extract_metric_from_text(request.question)
-                category = _extract_category(request.question) or cutoff_ctx.get("category") or onboarding.get("category")
-                explicit_home_state = _extract_home_state(request.question)
-                home_state = explicit_home_state or cutoff_ctx.get("home_state")
+                metric_type = profile_turn.get("metric_type")
+                metric_value = profile_turn.get("metric_value")
+                detected_states = list(profile_turn.get("target_states") or [])
+                category = profile_turn.get("category") or cutoff_ctx.get("category")
+                home_state = profile_turn.get("home_state") or cutoff_ctx.get("home_state")
 
-                # Default to registered user home state only for self-mode.
-                if not home_state and profile_mode != "friend_or_general":
-                    registered_home_state = await _get_registered_home_state(request.user_id)
-                    if registered_home_state:
-                        home_state = registered_home_state
-                    elif request.user_preferences and request.user_preferences.preferred_state:
-                        home_state = request.user_preferences.preferred_state
-
-                # Target states must be explicit from user message or previously provided in this
-                # cutoff context. Never auto-inject home/profile state into target_states.
-                if detected_states:
+                explicit_states_in_turn = bool(profile_turn.get("signals", {}).get("explicit_states_detected"))
+                if detected_states and explicit_states_in_turn:
                     target_states = detected_states
                 else:
                     target_states = list(cutoff_ctx.get("target_states") or [])
-
-                if not category and request.user_preferences and request.user_preferences.category:
-                    category = request.user_preferences.category
 
                 if metric_type and metric_value:
                     cutoff_ctx["metric_type"] = metric_type
@@ -4081,8 +4539,33 @@ async def chat_v2_stream(request: ChatRequest):
                     cutoff_ctx["category"] = str(category).upper()
                 if home_state:
                     cutoff_ctx["home_state"] = str(home_state)
+                if profile_turn.get("sub_category"):
+                    cutoff_ctx["sub_category"] = str(profile_turn.get("sub_category"))
                 if target_states:
                     cutoff_ctx["target_states"] = target_states
+                    if explicit_states_in_turn:
+                        cutoff_ctx["target_states_confirmed"] = True
+                category_state_for_options = cutoff_ctx.get("home_state")
+                if not category_state_for_options and cutoff_ctx.get("target_states"):
+                    category_state_for_options = list(cutoff_ctx.get("target_states") or [None])[0]
+                sub_category_options = []
+                if cutoff_ctx.get("category"):
+                    sub_category_options = await _get_cutoff_subcategory_options(
+                        str(category_state_for_options) if category_state_for_options else None,
+                        str(cutoff_ctx.get("category")),
+                    )
+                cutoff_ctx["needs_sub_category"] = bool(sub_category_options)
+                if not cutoff_ctx.get("needs_sub_category"):
+                    cutoff_ctx.pop("sub_category", None)
+                if profile_mode == "self" and request.user_id:
+                    await _save_user_cutoff_profile(request.user_id, cutoff_ctx)
+                cutoff_ctx["preferences_set"] = bool(cutoff_ctx.get("home_state") and cutoff_ctx.get("category"))
+                category_state_for_options = cutoff_ctx.get("home_state")
+                if not category_state_for_options and cutoff_ctx.get("target_states"):
+                    category_state_for_options = list(cutoff_ctx.get("target_states") or [None])[0]
+                category_options = await _get_cutoff_category_options(
+                    str(category_state_for_options) if category_state_for_options else None
+                )
 
                 # Apply optional refinement filters from user's follow-up details.
                 refinement_updates = _extract_cutoff_refinements(
@@ -4091,6 +4574,7 @@ async def chat_v2_stream(request: ChatRequest):
                 )
                 if refinement_updates.get("target_states"):
                     cutoff_ctx["target_states"] = refinement_updates["target_states"]
+                    cutoff_ctx["target_states_confirmed"] = True
                 if refinement_updates.get("college_type_patterns"):
                     cutoff_ctx["college_type_patterns"] = refinement_updates["college_type_patterns"]
                 if refinement_updates.get("quota_patterns"):
@@ -4099,20 +4583,32 @@ async def chat_v2_stream(request: ChatRequest):
                     cutoff_ctx["awaiting_refinement_details"] = False
 
                 # LLM-driven refinement interpreter (no hardcoded action wiring).
-                refinement_plan = await _llm_interpret_cutoff_refinement(
-                    request.question,
-                    cutoff_ctx,
-                    cutoff_db_states,
-                    current_turn_signals={
-                        "explicit_states_count": len(detected_states),
-                        "metric_detected": bool(metric_type is not None and metric_value is not None),
-                        "category_detected": bool(_extract_category(request.question)),
-                    },
+                # Guard: do not allow implicit target_state inference on profile/rank-only turns.
+                should_run_refinement_llm = bool(
+                    cutoff_ctx.get("awaiting_refinement_details")
+                    or cutoff_ctx.get("awaiting_refinement_choice")
+                    or refinement_updates.get("target_states")
+                    or refinement_updates.get("college_type_patterns")
+                    or refinement_updates.get("quota_patterns")
                 )
+                if should_run_refinement_llm:
+                    refinement_plan = await _llm_interpret_cutoff_refinement(
+                        request.question,
+                        cutoff_ctx,
+                        cutoff_db_states,
+                        current_turn_signals={
+                            "explicit_states_count": len(detected_states) if profile_turn.get("signals", {}).get("explicit_states_detected") else 0,
+                            "metric_detected": bool(profile_turn.get("signals", {}).get("metric_detected", False)),
+                            "category_detected": bool(profile_turn.get("signals", {}).get("category_detected", False)),
+                        },
+                    )
+                else:
+                    refinement_plan = {"apply": False}
                 if refinement_plan.get("apply"):
                     planned_states = list(refinement_plan.get("target_states") or [])
                     if planned_states:
                         cutoff_ctx["target_states"] = planned_states
+                        cutoff_ctx["target_states_confirmed"] = True
                     if refinement_plan.get("clear_college_type"):
                         cutoff_ctx.pop("college_type_patterns", None)
                     if refinement_plan.get("clear_quota"):
@@ -4124,11 +4620,72 @@ async def chat_v2_stream(request: ChatRequest):
                         f"clear_quota={bool(refinement_plan.get('clear_quota'))}"
                     )
 
+                cutoff_ctx["last_turn_at"] = datetime.utcnow().isoformat()
                 med_ctx["cutoff"] = cutoff_ctx
                 missing = _missing_cutoff_fields(cutoff_ctx)
 
                 if missing:
-                    followup = localize_output(_build_cutoff_followup_prompt(missing, cutoff_ctx))
+                    needs_profile_form = (
+                        profile_mode == "self"
+                        and not bool(cutoff_ctx.get("preferences_set"))
+                        and ("home_state" in missing or "category" in missing)
+                    )
+                    if needs_profile_form:
+                        intro = localize_output(
+                            "Great - I can help with college shortlist. Please fill the details below so I can suggest the best matches."
+                        )
+                        category_state = cutoff_ctx.get("home_state")
+                        if not category_state and cutoff_ctx.get("target_states"):
+                            category_state = list(cutoff_ctx.get("target_states") or [None])[0]
+                        profile_categories = await _get_cutoff_category_options(
+                            str(category_state) if category_state else None
+                        )
+                        profile_sub_categories = []
+                        if category_state and cutoff_ctx.get("category"):
+                            profile_sub_categories = await _get_cutoff_subcategory_options(
+                                str(category_state),
+                                str(cutoff_ctx.get("category")),
+                            )
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    "type": "cutoff_profile_form",
+                                    "message": intro,
+                                    "state": cutoff_ctx.get("home_state"),
+                                    "category": cutoff_ctx.get("category"),
+                                    "sub_category": cutoff_ctx.get("sub_category"),
+                                    "states": cutoff_db_states,
+                                    "categories": profile_categories,
+                                    "sub_categories": profile_sub_categories,
+                                }
+                            )
+                            + "\n\n"
+                        )
+                        for token in sse_tokens_preserving_formatting(intro):
+                            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                            if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+                        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                        if request.user_id and conversation_id:
+                            asyncio.create_task(
+                                v2_background_save_conversation_turn(
+                                    conversation_id,
+                                    request.question,
+                                    intro,
+                                    int((datetime.now() - start_time).total_seconds() * 1000),
+                                )
+                            )
+                            asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+                        return
+                    followup = localize_output(
+                        _build_cutoff_followup_prompt(
+                            missing,
+                            cutoff_ctx,
+                            category_options=category_options,
+                            sub_category_options=sub_category_options,
+                        )
+                    )
                     followup_replies = await _generate_contextual_suggested_replies(
                         request.question,
                         followup,
@@ -4158,6 +4715,7 @@ async def chat_v2_stream(request: ChatRequest):
                 metric_value = int(cutoff_ctx.get("metric_value"))
                 home_state = str(cutoff_ctx.get("home_state"))
                 category = str(cutoff_ctx.get("category"))
+                sub_category = str(cutoff_ctx.get("sub_category")) if cutoff_ctx.get("sub_category") else None
                 target_states = [str(s) for s in list(cutoff_ctx.get("target_states") or [])]
                 college_type_patterns = cutoff_ctx.get("college_type_patterns")
                 quota_patterns = cutoff_ctx.get("quota_patterns")
@@ -4169,6 +4727,7 @@ async def chat_v2_stream(request: ChatRequest):
                     home_state=home_state,
                     target_states=target_states,
                     category=category,
+                    sub_category=sub_category,
                     college_type_patterns=college_type_patterns if isinstance(college_type_patterns, list) else None,
                     quota_patterns=quota_patterns if isinstance(quota_patterns, list) else None,
                     total_limit=cutoff_result_limit,
@@ -4179,6 +4738,7 @@ async def chat_v2_stream(request: ChatRequest):
                     metric_type=metric_type,
                     metric_value=metric_value,
                     category=category,
+                    sub_category=sub_category,
                     home_state=home_state,
                     target_states=target_states,
                     display_limit=cutoff_result_limit,
