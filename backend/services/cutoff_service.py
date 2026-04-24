@@ -90,6 +90,7 @@ async def fetch_cutoff_recommendations(
     home_state: str,
     target_states: List[str],
     category: str,
+    sub_category: Optional[str] = None,
     college_type_patterns: Optional[List[str]] = None,
     quota_patterns: Optional[List[str]] = None,
     total_limit: int = 20,
@@ -105,7 +106,7 @@ async def fetch_cutoff_recommendations(
         return []
 
     per_state_limits = _state_limits(target_states, total_limit)
-    category_like = f"%{category.strip()}%"
+    category_norm = str(category or "").strip().upper()
     all_rows: List[Dict] = []
 
     score_sql_base = """
@@ -128,7 +129,7 @@ async def fetch_cutoff_recommendations(
         WHERE state ILIKE :state_like
           AND score IS NOT NULL
           AND score <= :user_score
-          AND category ILIKE :category_like
+          AND TRIM(UPPER(COALESCE(category, ''))) = :category_exact
           __DOMICILE_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
@@ -156,7 +157,7 @@ async def fetch_cutoff_recommendations(
         WHERE state ILIKE :state_like
           AND air_rank IS NOT NULL
           AND air_rank >= :user_rank
-          AND category ILIKE :category_like
+          AND TRIM(UPPER(COALESCE(category, ''))) = :category_exact
           __DOMICILE_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
@@ -175,7 +176,7 @@ async def fetch_cutoff_recommendations(
             params = {
                 "state": state,
                 "state_like": state,
-                "category_like": category_like,
+                "category_exact": category_norm,
                 "state_limit": per_state_limits.get(state, 1),
             }
             domicile_filter = _domicile_sql_filter(home_state=home_state, row_state=state)
@@ -193,6 +194,12 @@ async def fetch_cutoff_recommendations(
                     "          AND quota ILIKE ANY(:quota_patterns)\n        ORDER BY",
                 )
                 params["quota_patterns"] = quota_patterns
+            if sub_category:
+                sql_base = sql_base.replace(
+                    "        ORDER BY",
+                    "          AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_category_exact\n        ORDER BY",
+                )
+                params["sub_category_exact"] = str(sub_category).strip().upper()
             sql_text_compact = _compact_sql(sql_base)
 
             if metric_type == "score":
@@ -243,6 +250,7 @@ def format_cutoff_markdown(
     metric_type: str,
     metric_value: int,
     category: str,
+    sub_category: Optional[str],
     home_state: str,
     target_states: List[str],
     display_limit: int = 10,
@@ -250,19 +258,32 @@ def format_cutoff_markdown(
     if not rows:
         metric_label = "AIR Rank" if metric_type == "rank" else "Score"
         states_label = ", ".join(target_states) if target_states else "your selected states"
+        has_sub_category = bool(str(sub_category or "").strip())
         domicile_mode = (
             "NON-DOMICILE or OPEN (home state differs from target state)"
             if any(s.lower() != (home_state or "").lower() for s in target_states)
             else "DOMICILE or OPEN (home state matches target state)"
         )
+        profile_lines = [
+            "### Profile I Used",
+            "",
+            f"- {metric_label}: **{metric_value}**",
+            f"- Category: **{category}**",
+        ]
+        if has_sub_category:
+            profile_lines.append(f"- Sub-category: **{str(sub_category).strip()}**")
+        profile_lines.extend(
+            [
+                f"- Home state: **{home_state}**",
+                f"- Target state(s): **{states_label}**",
+                f"- Eligibility mode applied: **{domicile_mode}**",
+            ]
+        )
+        profile_block = "\n".join(profile_lines)
+
         return (
             "I checked the 2025 cutoff records carefully, but I could not find a direct match for your current preference set.\n\n"
-            "### Profile I Used\n\n"
-            f"- {metric_label}: **{metric_value}**\n"
-            f"- Category: **{category}**\n"
-            f"- Home state: **{home_state}**\n"
-            f"- Target state(s): **{states_label}**\n"
-            f"- Eligibility mode applied: **{domicile_mode}**\n\n"
+            f"{profile_block}\n\n"
             "### What This Means\n\n"
             "This usually happens when the selected combination is too strict for the available rows "
             "(for example: specific quota + college type + domicile mode at this rank/score range).\n\n"
@@ -277,6 +298,7 @@ def format_cutoff_markdown(
     shown = rows[:display_limit]
     metric_label = "Score" if metric_type == "score" else "AIR Rank"
     states_label = ", ".join(target_states)
+    has_sub_category = bool(str(sub_category or "").strip())
 
     lines = [
         "### Best-Match Colleges (Based on 2025 Cutoff Data)",
@@ -289,6 +311,8 @@ def format_cutoff_markdown(
         "| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |",
         "|---|---|---|---|---|---|---:|---:|---|",
     ]
+    if has_sub_category:
+        lines.insert(4, f"- Sub-category: **{str(sub_category).strip()}**")
 
     for idx, row in enumerate(shown, start=1):
         lines.append(

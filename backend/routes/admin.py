@@ -8,14 +8,15 @@ import os
 import time
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, delete
 from pydantic import BaseModel, Field
 from database.connection import get_db
 from models.user import User, UserRole
 from models.indexed_document import IndexedDocument
+from models.neet_ug_cutoff import NeetUg2025Cutoff
 from models.activity_log import ActionType
 from repositories.user_repository import UserRepository
 from repositories.activity_log_repository import ActivityLogRepository
@@ -27,6 +28,7 @@ from services.document_chunking import (
     format_page_label,
     get_chunk_settings_for_document,
 )
+from services.cutoff_excel_ingest import parse_cutoff_workbook, replace_cutoff_rows
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -969,6 +971,119 @@ async def get_document_file(
             "Content-Disposition": f'{disposition}; filename="{safe_name}"'
         },
     )
+
+
+# ============== CUTOFF EXCEL MANAGEMENT ==============
+
+@router.get("/cutoffs/summary")
+async def get_cutoff_summary(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    total_rows = await db.scalar(select(func.count(NeetUg2025Cutoff.id))) or 0
+    state_counts_query = (
+        select(NeetUg2025Cutoff.state, func.count(NeetUg2025Cutoff.id))
+        .group_by(NeetUg2025Cutoff.state)
+        .order_by(func.count(NeetUg2025Cutoff.id).desc())
+    )
+    state_counts_raw = (await db.execute(state_counts_query)).all()
+    state_counts = [
+        {"state": row[0] or "Unknown", "rows": int(row[1] or 0)}
+        for row in state_counts_raw
+    ]
+    preview_query = (
+        select(
+            NeetUg2025Cutoff.state,
+            NeetUg2025Cutoff.college_name,
+            NeetUg2025Cutoff.category,
+            NeetUg2025Cutoff.quota,
+            NeetUg2025Cutoff.air_rank,
+            NeetUg2025Cutoff.score,
+            NeetUg2025Cutoff.round,
+        )
+        .order_by(NeetUg2025Cutoff.id.desc())
+        .limit(12)
+    )
+    preview_rows = (await db.execute(preview_query)).all()
+    preview = [
+        {
+            "state": row[0],
+            "college_name": row[1],
+            "category": row[2],
+            "quota": row[3],
+            "air_rank": row[4],
+            "score": row[5],
+            "round": row[6],
+        }
+        for row in preview_rows
+    ]
+    return {
+        "total_rows": int(total_rows),
+        "total_states": len(state_counts),
+        "states": state_counts,
+        "preview": preview,
+    }
+
+
+@router.post("/cutoffs/upload")
+async def upload_cutoff_excel(
+    file: UploadFile = File(...),
+    state: Optional[str] = Query(default=None, description="Optional specific state sheet to ingest"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Please upload an .xlsx file")
+
+    import tempfile
+    from pathlib import Path
+
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+            tmp.write(await file.read())
+
+        rows, state_counts, ingested_states = parse_cutoff_workbook(
+            str(temp_path),
+            only_state=state,
+        )
+        if not rows:
+            raise HTTPException(status_code=400, detail="No valid cutoff rows found in uploaded file")
+
+        inserted = await replace_cutoff_rows(db, rows=rows, states=ingested_states)
+        return {
+            "success": True,
+            "message": "Cutoff data uploaded successfully",
+            "inserted_rows": inserted,
+            "states_updated": ingested_states,
+            "state_counts": state_counts,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process cutoff Excel: {e}")
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+
+
+@router.delete("/cutoffs")
+async def delete_cutoff_rows(
+    state: Optional[str] = Query(default=None, description="Delete only this state; omit for all data"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    if state:
+        delete_q = delete(NeetUg2025Cutoff).where(NeetUg2025Cutoff.state == state)
+        result = await db.execute(delete_q)
+        deleted = result.rowcount or 0
+        return {"success": True, "deleted_rows": int(deleted), "state": state}
+
+    result = await db.execute(delete(NeetUg2025Cutoff))
+    deleted = result.rowcount or 0
+    return {"success": True, "deleted_rows": int(deleted), "state": "ALL"}
 
 
 # ============== ACTIVITY LOG ROUTES ==============

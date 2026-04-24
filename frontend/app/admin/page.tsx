@@ -115,7 +115,22 @@ interface SupportQueryItem {
   replies: SupportReply[];
 }
 
-type TabType = 'overview' | 'users' | 'documents' | 'faqs' | 'queries' | 'configurations';
+interface CutoffStateCount {
+  state: string;
+  rows: number;
+}
+
+interface CutoffPreviewRow {
+  state: string;
+  college_name: string;
+  category: string;
+  quota: string;
+  air_rank: number | null;
+  score: number | null;
+  round: string | null;
+}
+
+type TabType = 'overview' | 'users' | 'documents' | 'faqs' | 'queries' | 'cutoffs' | 'configurations';
 
 export default function AdminPage() {
   const router = useRouter();
@@ -211,6 +226,19 @@ export default function AdminPage() {
   const [cutoffResultLimitLoading, setCutoffResultLimitLoading] = useState<boolean>(false);
   const [cutoffResultLimitUpdatedAt, setCutoffResultLimitUpdatedAt] = useState<string | null>(null);
   const [cutoffResultLimitUpdatedBy, setCutoffResultLimitUpdatedBy] = useState<number | null>(null);
+
+  // Cutoff Excel management state
+  const [cutoffDataLoading, setCutoffDataLoading] = useState(false);
+  const [cutoffUploadLoading, setCutoffUploadLoading] = useState(false);
+  const [cutoffDeleteLoading, setCutoffDeleteLoading] = useState<string | null>(null);
+  const [cutoffSummary, setCutoffSummary] = useState<{
+    total_rows: number;
+    total_states: number;
+    states: CutoffStateCount[];
+    preview: CutoffPreviewRow[];
+  } | null>(null);
+  const [cutoffExcelFile, setCutoffExcelFile] = useState<File | null>(null);
+  const [cutoffUploadState, setCutoffUploadState] = useState<string>('');
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = useState<{
@@ -609,6 +637,79 @@ export default function AdminPage() {
     }
   };
 
+  const fetchCutoffSummary = useCallback(async () => {
+    setCutoffDataLoading(true);
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/admin/cutoffs/summary`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error('Failed to fetch cutoff summary');
+      const data = await response.json();
+      setCutoffSummary(data);
+    } catch (err) {
+      console.error('Failed to fetch cutoff summary:', err);
+      setError('Failed to fetch cutoff summary');
+    } finally {
+      setCutoffDataLoading(false);
+    }
+  }, []);
+
+  const handleCutoffUpload = async () => {
+    if (!cutoffExcelFile) {
+      setError('Please select an Excel file first');
+      return;
+    }
+    setCutoffUploadLoading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const token = getAuthToken();
+      const formData = new FormData();
+      formData.append('file', cutoffExcelFile);
+      const query = cutoffUploadState ? `?state=${encodeURIComponent(cutoffUploadState)}` : '';
+      const response = await fetch(`${API_BASE_URL}/admin/cutoffs/upload${query}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Failed to upload cutoff excel');
+      setSuccess(
+        `Uploaded successfully: ${data.inserted_rows} rows across ${data.states_updated?.length || 0} sheet(s)`
+      );
+      setCutoffExcelFile(null);
+      setCutoffUploadState('');
+      await fetchCutoffSummary();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to upload cutoff excel');
+    } finally {
+      setCutoffUploadLoading(false);
+    }
+  };
+
+  const handleDeleteCutoffData = async (state?: string) => {
+    setCutoffDeleteLoading(state || 'ALL');
+    setError(null);
+    setSuccess(null);
+    try {
+      const token = getAuthToken();
+      const query = state ? `?state=${encodeURIComponent(state)}` : '';
+      const response = await fetch(`${API_BASE_URL}/admin/cutoffs${query}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Failed to delete cutoff data');
+      setSuccess(`Deleted ${data.deleted_rows} row(s) for ${data.state}`);
+      await fetchCutoffSummary();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete cutoff data');
+    } finally {
+      setCutoffDeleteLoading(null);
+    }
+  };
+
   // Fetch metadata options
   const fetchMetadataOptions = useCallback(async () => {
     try {
@@ -642,14 +743,15 @@ export default function AdminPage() {
         fetchAutoLearningStatus(),
         fetchWebFallbackStatus(),
         fetchChatReferencesSetting(),
-        fetchCutoffResultLimit()
+        fetchCutoffResultLimit(),
+        fetchCutoffSummary()
       ]);
       setInitialLoadDone(true);
     };
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchChatReferencesSetting, fetchCutoffResultLimit]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchChatReferencesSetting, fetchCutoffResultLimit, fetchCutoffSummary]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -1159,6 +1261,7 @@ export default function AdminPage() {
                   if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); fetchAutoLearningStatus(); fetchWebFallbackStatus(); }
                   if (activeTab === 'queries') fetchSupportQueries();
                   if (activeTab === 'configurations') { fetchAutoLearningStatus(); fetchWebFallbackStatus(); fetchCutoffResultLimit(); }
+                  if (activeTab === 'cutoffs') { fetchCutoffSummary(); }
                 }}
                 className="p-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 rounded-lg"
               >
@@ -1297,6 +1400,7 @@ export default function AdminPage() {
             { id: 'documents', label: 'Documents', icon: FileText },
             { id: 'faqs', label: 'FAQs', icon: MessageSquare, badge: faqStats?.pending_review },
             { id: 'queries', label: 'Queries', icon: ShieldAlert, badge: supportQueries.filter((q) => q.status === 'pending').length },
+            { id: 'cutoffs', label: 'Cutoffs', icon: Database },
             { id: 'configurations', label: 'Configurations', icon: Settings }
           ].map((tab) => (
             <button
@@ -2139,6 +2243,97 @@ export default function AdminPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Cutoffs Tab */}
+        {activeTab === 'cutoffs' && (
+          <div className="space-y-6">
+            <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-5">
+              <h3 className="text-white font-semibold text-lg mb-2">NEET UG 2025 Cutoff Excel Upload</h3>
+              <p className="text-slate-400 text-sm mb-4">
+                Upload a workbook with state sheets + MCC. You can upload full workbook or target a specific state sheet.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <input
+                  type="file"
+                  accept=".xlsx"
+                  onChange={(e) => setCutoffExcelFile(e.target.files?.[0] || null)}
+                  className="px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-slate-200"
+                />
+                <input
+                  type="text"
+                  placeholder="Optional state (e.g. Gujarat)"
+                  value={cutoffUploadState}
+                  onChange={(e) => setCutoffUploadState(e.target.value)}
+                  className="px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-white"
+                />
+                <button
+                  onClick={handleCutoffUpload}
+                  disabled={cutoffUploadLoading || !cutoffExcelFile}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {cutoffUploadLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                  Upload & Ingest
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
+                <p className="text-slate-400 text-sm">Total Rows</p>
+                <p className="text-2xl font-bold text-white">{cutoffSummary?.total_rows || 0}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
+                <p className="text-slate-400 text-sm">States / Sheets Loaded</p>
+                <p className="text-2xl font-bold text-white">{cutoffSummary?.total_states || 0}</p>
+              </div>
+              <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4">
+                <p className="text-slate-300 text-sm mb-2">Danger Zone</p>
+                <button
+                  onClick={() => handleDeleteCutoffData()}
+                  disabled={cutoffDeleteLoading === 'ALL'}
+                  className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-50 flex items-center gap-2"
+                >
+                  {cutoffDeleteLoading === 'ALL' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  Delete All Cutoff Data
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-white font-semibold">State-wise Data Distribution</h3>
+                <button
+                  onClick={fetchCutoffSummary}
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm flex items-center gap-2"
+                >
+                  {cutoffDataLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Refresh
+                </button>
+              </div>
+              <div className="space-y-2 max-h-80 overflow-auto">
+                {(cutoffSummary?.states || []).map((item) => (
+                  <div key={item.state} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2">
+                    <div>
+                      <p className="text-white text-sm font-medium">{item.state}</p>
+                      <p className="text-slate-400 text-xs">{item.rows.toLocaleString()} rows</p>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteCutoffData(item.state)}
+                      disabled={cutoffDeleteLoading === item.state}
+                      className="px-2.5 py-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-md text-xs disabled:opacity-50 flex items-center gap-1"
+                    >
+                      {cutoffDeleteLoading === item.state ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                      Delete
+                    </button>
+                  </div>
+                ))}
+                {!cutoffDataLoading && (!cutoffSummary || cutoffSummary.states.length === 0) && (
+                  <p className="text-slate-400 text-sm">No cutoff rows found yet.</p>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
