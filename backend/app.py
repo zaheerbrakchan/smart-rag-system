@@ -753,9 +753,12 @@ def _apply_response_policy(
     answer: str,
     question: str,
     skip_compare_cta: bool = False,
+    allow_factual_addons: bool = True,
 ) -> str:
     text = (answer or "").strip()
     if not text:
+        return text
+    if not allow_factual_addons:
         return text
     q = _normalize_text(question)
     factual = any(k in q for k in ["fee", "cutoff", "rank", "date", "reservation", "seat"])
@@ -5124,8 +5127,6 @@ async def chat_v2_stream(request: ChatRequest):
                         t for t in available_tools
                         if t.get("function", {}).get("name") == "search_web"
                     ]
-                    # If KB is marked insufficient and web is enabled, force a web lookup.
-                    tool_choice_mode = "required"
                 elif round_idx == 0:
                     round_tools = [
                         t for t in available_tools
@@ -5144,72 +5145,6 @@ async def chat_v2_stream(request: ChatRequest):
                 assistant_message = response.choices[0].message
 
                 if not assistant_message.tool_calls:
-                    # Runtime safety net:
-                    # If the model skips tools on a NEET factual query, force a KB lookup
-                    # so we can still run normal KB/web fallback logic.
-                    if (
-                        round_idx == 0
-                        and _looks_like_neet_factual_query(request.question)
-                        and not kb_attempted
-                    ):
-                        forced_args: Dict[str, Any] = {"query": request.question}
-                        if user_state:
-                            forced_args["state"] = user_state
-                        log(f"[V2] 🛟 Forced KB lookup (tool skipped by LLM): {forced_args}")
-                        t_tool = time.perf_counter()
-                        tool_result, success = execute_tool_call("search_knowledge_base", forced_args)
-                        tool_exec_ms = _elapsed_ms(t_tool)
-                        suff_ms = 0.0
-                        kb_attempted = True
-                        if success:
-                            last_kb_retrieval = tool_result
-                            t_suff = time.perf_counter()
-                            is_sufficient, reason = assess_kb_sufficiency_with_llm(
-                                client=client,
-                                user_question=request.question,
-                                kb_tool_result=tool_result,
-                            )
-                            suff_ms = _elapsed_ms(t_suff)
-                            log(f"[V2] 🧪 KB sufficiency (forced): {is_sufficient} | reason: {reason}")
-                            if not is_sufficient and web_fallback_enabled:
-                                force_web_search_next_round = True
-                                kb_marked_insufficient = True
-                            elif not is_sufficient and not web_fallback_enabled:
-                                kb_insufficient_and_web_disabled = True
-                                kb_marked_insufficient = True
-                        else:
-                            log(f"[V2] ⚠️ Forced KB lookup error: {tool_result[:120]}")
-
-                        round_stats.append(
-                            {
-                                "i": round_idx + 1,
-                                "llm": llm_round_ms,
-                                "tool": "forced_search_knowledge_base",
-                                "tool_exec": tool_exec_ms,
-                                "suff": suff_ms,
-                            }
-                        )
-
-                        messages.append({
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [{
-                                "id": "forced_kb_lookup",
-                                "type": "function",
-                                "function": {
-                                    "name": "search_knowledge_base",
-                                    "arguments": json.dumps(forced_args),
-                                }
-                            }]
-                        })
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": "forced_kb_lookup",
-                            "content": _trim_tool_result_for_model(tool_result),
-                        })
-                        # Continue loop so final response generation can use tool context.
-                        continue
-
                     round_stats.append(
                         {
                             "i": round_idx + 1,
@@ -5404,30 +5339,38 @@ async def chat_v2_stream(request: ChatRequest):
             # ========== FINAL RESPONSE ==========
             # Suggestion chips must be grounded only in KB/RAG text, not web snippets.
             chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
+            policy_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
+            has_retrieval_evidence = bool((policy_evidence or "").strip())
             if streamed_final_in_loop:
-                final_replies = await _generate_contextual_suggested_replies(
-                    request.question,
-                    full_response,
-                    med_ctx,
-                    retrieval_evidence=chip_evidence,
-                    output_language=preferred_language,
-                )
-                if final_replies:
-                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+                if has_retrieval_evidence:
+                    final_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        full_response,
+                        med_ctx,
+                        retrieval_evidence=chip_evidence,
+                        output_language=preferred_language,
+                    )
+                    if final_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
             elif forced_fallback_response:
-                full_response = _apply_response_policy(forced_fallback_response, request.question)
+                full_response = _apply_response_policy(
+                    forced_fallback_response,
+                    request.question,
+                    allow_factual_addons=has_retrieval_evidence,
+                )
                 full_response = localize_output(full_response)
                 t_out = time.perf_counter()
                 _first_out = True
-                fallback_replies = await _generate_contextual_suggested_replies(
-                    request.question,
-                    full_response,
-                    med_ctx,
-                    retrieval_evidence=chip_evidence,
-                    output_language=preferred_language,
-                )
-                if fallback_replies:
-                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': fallback_replies})}\n\n"
+                if has_retrieval_evidence:
+                    fallback_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        full_response,
+                        med_ctx,
+                        retrieval_evidence=chip_evidence,
+                        output_language=preferred_language,
+                    )
+                    if fallback_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': fallback_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
                     if _first_out:
                         final_ttft_ms = _elapsed_ms(t_out)
@@ -5442,18 +5385,23 @@ async def chat_v2_stream(request: ChatRequest):
                 and not assistant_message.tool_calls
                 and (assistant_message.content or "").strip()
             ):
-                full_response = _apply_response_policy(assistant_message.content or "", request.question)
+                full_response = _apply_response_policy(
+                    assistant_message.content or "",
+                    request.question,
+                    allow_factual_addons=has_retrieval_evidence,
+                )
                 full_response = localize_output(full_response)
                 t_out = time.perf_counter()
                 _first_out = True
-                direct_replies = await _generate_contextual_suggested_replies(
-                    request.question,
-                    full_response,
-                    med_ctx,
-                    output_language=preferred_language,
-                )
-                if direct_replies:
-                    yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': direct_replies})}\n\n"
+                if has_retrieval_evidence:
+                    direct_replies = await _generate_contextual_suggested_replies(
+                        request.question,
+                        full_response,
+                        med_ctx,
+                        output_language=preferred_language,
+                    )
+                    if direct_replies:
+                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': direct_replies})}\n\n"
                 for token in sse_tokens_preserving_formatting(full_response):
                     if _first_out:
                         final_ttft_ms = _elapsed_ms(t_out)
@@ -5485,7 +5433,11 @@ async def chat_v2_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
 
                     # Keep response policy behavior while preserving streamed output.
-                    full_response = _apply_response_policy(streamed_raw, request.question)
+                    full_response = _apply_response_policy(
+                        streamed_raw,
+                        request.question,
+                        allow_factual_addons=has_retrieval_evidence,
+                    )
                     if full_response.startswith(streamed_raw):
                         tail = full_response[len(streamed_raw):]
                         if tail:
@@ -5497,15 +5449,16 @@ async def chat_v2_stream(request: ChatRequest):
                         # Rare case: policy changed non-tail text; keep what user already saw.
                         full_response = streamed_raw
 
-                    final_replies = await _generate_contextual_suggested_replies(
-                        request.question,
-                        full_response,
-                        med_ctx,
-                        retrieval_evidence=chip_evidence,
-                        output_language=preferred_language,
-                    )
-                    if final_replies:
-                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+                    if has_retrieval_evidence:
+                        final_replies = await _generate_contextual_suggested_replies(
+                            request.question,
+                            full_response,
+                            med_ctx,
+                            retrieval_evidence=chip_evidence,
+                            output_language=preferred_language,
+                        )
+                        if final_replies:
+                            yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
                     final_stream_ms = _elapsed_ms(t_out)
                 else:
                     # Non-English (and strict-grounding English) use non-stream finalization path.
@@ -5516,33 +5469,41 @@ async def chat_v2_stream(request: ChatRequest):
                         max_tokens=V2_FINAL_MAX_TOKENS
                     )
                     full_response = final_response.choices[0].message.content or ""
-                    full_response = _apply_response_policy(full_response, request.question)
+                    full_response = _apply_response_policy(
+                        full_response,
+                        request.question,
+                        allow_factual_addons=has_retrieval_evidence,
+                    )
                     if strict_grounding_required:
-                        t_ground = time.perf_counter()
                         combined_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
-                        is_grounded, guarded_answer, grounded_reason = assess_answer_grounding_with_llm(
-                            client=client,
-                            user_question=request.question,
-                            draft_answer=full_response,
-                            retrieval_evidence=combined_evidence,
-                        )
-                        grounding_ms = _elapsed_ms(t_ground)
-                        if not is_grounded:
-                            log(f"[V2] 🛡️ Grounding guard rewrote answer: {grounded_reason}")
+                        if (combined_evidence or "").strip():
+                            t_ground = time.perf_counter()
+                            is_grounded, guarded_answer, grounded_reason = assess_answer_grounding_with_llm(
+                                client=client,
+                                user_question=request.question,
+                                draft_answer=full_response,
+                                retrieval_evidence=combined_evidence,
+                            )
+                            grounding_ms = _elapsed_ms(t_ground)
+                            if not is_grounded:
+                                log(f"[V2] 🛡️ Grounding guard rewrote answer: {grounded_reason}")
+                            else:
+                                log(f"[V2] 🛡️ Grounding guard passed: {grounded_reason}")
+                            full_response = guarded_answer
                         else:
-                            log(f"[V2] 🛡️ Grounding guard passed: {grounded_reason}")
-                        full_response = guarded_answer
+                            log("[V2] 🛡️ Grounding guard skipped: no retrieval evidence")
                     full_response = localize_output(full_response)
                     _first_out = True
-                    final_replies = await _generate_contextual_suggested_replies(
-                        request.question,
-                        full_response,
-                        med_ctx,
-                        retrieval_evidence=chip_evidence,
-                        output_language=preferred_language,
-                    )
-                    if final_replies:
-                        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
+                    if has_retrieval_evidence:
+                        final_replies = await _generate_contextual_suggested_replies(
+                            request.question,
+                            full_response,
+                            med_ctx,
+                            retrieval_evidence=chip_evidence,
+                            output_language=preferred_language,
+                        )
+                        if final_replies:
+                            yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
                     for token in sse_tokens_preserving_formatting(full_response):
                         if _first_out:
                             final_ttft_ms = _elapsed_ms(t_out)
