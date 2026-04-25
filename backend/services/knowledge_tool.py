@@ -51,6 +51,26 @@ class SearchResponse:
 _vector_index: Optional[VectorStoreIndex] = None
 
 
+def _reset_vector_index() -> None:
+    global _vector_index
+    _vector_index = None
+
+
+def _is_transient_db_disconnect(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(
+        sig in text
+        for sig in [
+            "server closed the connection unexpectedly",
+            "connection is closed",
+            "connection already closed",
+            "terminating connection due to administrator command",
+            "could not receive data from server",
+            "ssl connection has been closed unexpectedly",
+        ]
+    )
+
+
 def get_vector_index() -> VectorStoreIndex:
     """Get or create the vector store index."""
     global _vector_index
@@ -178,7 +198,27 @@ def _search_knowledge_base_single_state(
         log(f"[TOOL] Retrieved {len(nodes)} results (state={state or 'ALL'})")
     except Exception as e:
         log(f"[TOOL] Search error: {e}")
-        if filters:
+
+        # Common on remote Postgres after idle timeout / transient restart:
+        # recreate PGVector index once and retry same query immediately.
+        if _is_transient_db_disconnect(e):
+            try:
+                log("[TOOL] Detected transient DB disconnect; rebuilding vector index and retrying...")
+                _reset_vector_index()
+                index = get_vector_index()
+                retriever = index.as_retriever(similarity_top_k=top_k, filters=filters)
+                nodes = retriever.retrieve(query)
+                log(f"[TOOL] Retry succeeded with {len(nodes)} results (state={state or 'ALL'})")
+            except Exception as retry_err:
+                log(f"[TOOL] Retry after reconnect failed: {retry_err}")
+                if filters:
+                    log("[TOOL] Retrying without filters...")
+                    retriever = index.as_retriever(similarity_top_k=top_k)
+                    nodes = retriever.retrieve(query)
+                    filters_applied = {}
+                else:
+                    nodes = []
+        elif filters:
             log("[TOOL] Retrying without filters...")
             retriever = index.as_retriever(similarity_top_k=top_k)
             nodes = retriever.retrieve(query)
