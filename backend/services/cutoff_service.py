@@ -29,13 +29,12 @@ def _to_sql_literal(value: object) -> str:
         return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float)):
         return str(value)
-    text = str(value).replace("'", "''")
-    return f"'{text}'"
+    text_val = str(value).replace("'", "''")
+    return f"'{text_val}'"
 
 
 def _render_sql_for_debug(sql: str, params: Dict[str, object]) -> str:
     rendered = sql
-    # Replace longer keys first to avoid accidental partial replacement.
     for key in sorted(params.keys(), key=len, reverse=True):
         rendered = rendered.replace(f":{key}", _to_sql_literal(params[key]))
     return rendered
@@ -43,14 +42,13 @@ def _render_sql_for_debug(sql: str, params: Dict[str, object]) -> str:
 
 def _domicile_sql_filter(*, home_state: str, row_state: str) -> str:
     """
-    Domicile column uses exact semantic values (case may vary): DOMICILE, NON-DOMICILE, OPEN.
+    Domicile column uses exact semantic values: DOMICILE, NON DOMICILE, OPEN.
 
     - OPEN: always eligible (any student from any state).
-    - Same home state as the college's state: DOMICILE or OPEN (not NON-DOMICILE-only rows).
-    - Different home state: NON-DOMICILE or OPEN (not DOMICILE-only rows).
+    - Same home state as the college's state: DOMICILE or OPEN.
+    - Different home state: NON DOMICILE or OPEN.
 
-    Never use ILIKE '%DOMICILE%' — it incorrectly matches NON-DOMICILE.
-
+    Never use ILIKE '%DOMICILE%' — it incorrectly matches NON DOMICILE.
     We normalize with TRIM/UPPER and hyphen→space so 'NON-DOMICILE' and 'NON DOMICILE' match.
     """
     same = (home_state or "").strip().lower() == (row_state or "").strip().lower()
@@ -74,7 +72,6 @@ def _state_limits(states: List[str], total_limit: int) -> Dict[str, int]:
 
 
 def _format_score_for_output(raw_score: object) -> str:
-    """Render score without trailing decimals (e.g., 370 instead of 370.00)."""
     if raw_score is None:
         return "-"
     try:
@@ -91,15 +88,26 @@ async def fetch_cutoff_recommendations(
     target_states: List[str],
     category: str,
     sub_category: Optional[str] = None,
-    college_type_patterns: Optional[List[str]] = None,
-    quota_patterns: Optional[List[str]] = None,
+    # Exact match filters — only passed when user explicitly mentions them
+    college_type_filter: Optional[str] = None,
+    course_filter: Optional[str] = None,
+    # Fuzzy ILIKE keyword filters — only passed when user explicitly mentions them
+    quota_keywords: Optional[List[str]] = None,
+    seat_type_keywords: Optional[List[str]] = None,
     total_limit: int = 20,
 ) -> List[Dict]:
     """
     Query cutoff table and return nearest eligible distinct colleges.
-    - score flow: score <= user score
-    - rank flow: air_rank >= user rank
-    Distinctness is applied at institution+state level.
+
+    Filters applied only when explicitly provided (never asked proactively):
+    - college_type_filter: exact match against college_type column
+    - course_filter: exact match against course column
+    - quota_keywords: ILIKE '%keyword%' OR across keywords against quota column
+    - seat_type_keywords: ILIKE '%keyword%' OR across keywords against seat_type column
+
+    Domicile logic:
+    - Same home state as target state → DOMICILE or OPEN rows
+    - Different home state → NON DOMICILE or OPEN rows
     """
     if not target_states:
         _log("[CUTOFF_SQL] No target states found; skipping query.")
@@ -170,11 +178,13 @@ async def fetch_cutoff_recommendations(
             "[CUTOFF_SQL] Starting query run | "
             f"metric_type={metric_type} metric_value={metric_value} "
             f"home_state={home_state} category={category} total_limit={total_limit} "
-            f"target_states={target_states}"
+            f"target_states={target_states} "
+            f"college_type_filter={college_type_filter} course_filter={course_filter} "
+            f"quota_keywords={quota_keywords} seat_type_keywords={seat_type_keywords}"
         )
+
         for state in target_states:
-            params = {
-                "state": state,
+            params: Dict[str, object] = {
                 "state_like": state,
                 "category_exact": category_norm,
                 "state_limit": per_state_limits.get(state, 1),
@@ -182,52 +192,93 @@ async def fetch_cutoff_recommendations(
             domicile_filter = _domicile_sql_filter(home_state=home_state, row_state=state)
             sql_base = score_sql_base if metric_type == "score" else rank_sql_base
             sql_base = sql_base.replace("__DOMICILE_FILTER__", domicile_filter)
-            if college_type_patterns:
+
+            # ── college_type: exact match (user said "government" / "AIIMS" etc.) ──
+            if college_type_filter:
                 sql_base = sql_base.replace(
                     "        ORDER BY",
-                    "          AND college_type ILIKE ANY(:college_type_patterns)\n        ORDER BY",
+                    "          AND TRIM(college_type) = :college_type_filter\n        ORDER BY",
                 )
-                params["college_type_patterns"] = college_type_patterns
-            if quota_patterns:
+                params["college_type_filter"] = college_type_filter.strip()
+
+            # ── course: exact match (user said "MBBS" / "BDS" / "B.Sc. Nursing") ──
+            if course_filter:
                 sql_base = sql_base.replace(
                     "        ORDER BY",
-                    "          AND quota ILIKE ANY(:quota_patterns)\n        ORDER BY",
+                    "          AND TRIM(UPPER(COALESCE(course, ''))) = :course_filter\n        ORDER BY",
                 )
-                params["quota_patterns"] = quota_patterns
+                params["course_filter"] = course_filter.strip().upper()
+
+            # ── quota: ILIKE fuzzy OR across keywords (DB values are inconsistent) ──
+            if quota_keywords:
+                quota_clauses = " OR ".join(
+                    f"quota ILIKE :quota_kw_{i}"
+                    for i in range(len(quota_keywords))
+                )
+                sql_base = sql_base.replace(
+                    "        ORDER BY",
+                    f"          AND ({quota_clauses})\n        ORDER BY",
+                )
+                for i, kw in enumerate(quota_keywords):
+                    params[f"quota_kw_{i}"] = f"%{kw}%"
+
+            # ── seat_type: ILIKE fuzzy OR across keywords ──
+            if seat_type_keywords:
+                seat_clauses = " OR ".join(
+                    f"seat_type ILIKE :seat_kw_{i}"
+                    for i in range(len(seat_type_keywords))
+                )
+                sql_base = sql_base.replace(
+                    "        ORDER BY",
+                    f"          AND ({seat_clauses})\n        ORDER BY",
+                )
+                for i, kw in enumerate(seat_type_keywords):
+                    params[f"seat_kw_{i}"] = f"%{kw}%"
+
+            # ── sub_category: exact match (optional, from user profile) ──
             if sub_category:
                 sql_base = sql_base.replace(
                     "        ORDER BY",
                     "          AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_category_exact\n        ORDER BY",
                 )
                 params["sub_category_exact"] = str(sub_category).strip().upper()
+
             sql_text_compact = _compact_sql(sql_base)
 
             if metric_type == "score":
                 params["user_score"] = metric_value
                 _log(f"[CUTOFF_SQL] Query text (score): {sql_text_compact}")
-                _log(f"[CUTOFF_SQL] Query text (score, rendered): {_render_sql_for_debug(sql_text_compact, params)}")
-                _log(f"[CUTOFF_SQL] Executing score query | state={state} params={params}")
-                score_sql = text(sql_base)
-                result = await db.execute(score_sql, params)
+                _log(f"[CUTOFF_SQL] Rendered: {_render_sql_for_debug(sql_text_compact, params)}")
+                result = await db.execute(text(sql_base), params)
             else:
                 params["user_rank"] = metric_value
                 _log(f"[CUTOFF_SQL] Query text (rank): {sql_text_compact}")
-                _log(f"[CUTOFF_SQL] Query text (rank, rendered): {_render_sql_for_debug(sql_text_compact, params)}")
-                _log(f"[CUTOFF_SQL] Executing rank query | state={state} params={params}")
-                rank_sql = text(sql_base)
-                result = await db.execute(rank_sql, params)
+                _log(f"[CUTOFF_SQL] Rendered: {_render_sql_for_debug(sql_text_compact, params)}")
+                result = await db.execute(text(sql_base), params)
 
             rows = [dict(row) for row in result.mappings().all()]
             _log(f"[CUTOFF_SQL] Rows fetched | state={state} count={len(rows)}")
             all_rows.extend(rows)
 
+    # Sort by closest to user's metric value
     if metric_type == "score":
-        all_rows.sort(key=lambda r: (abs(metric_value - float(r.get("score") or 0)), -(float(r.get("score") or 0))))
+        all_rows.sort(
+            key=lambda r: (
+                abs(metric_value - float(r.get("score") or 0)),
+                -(float(r.get("score") or 0)),
+            )
+        )
     else:
-        all_rows.sort(key=lambda r: (abs(int(r.get("air_rank") or 0) - metric_value), int(r.get("air_rank") or 10**9)))
+        all_rows.sort(
+            key=lambda r: (
+                abs(int(r.get("air_rank") or 0) - metric_value),
+                int(r.get("air_rank") or 10**9),
+            )
+        )
 
+    # Deduplicate by state + institution
     deduped: List[Dict] = []
-    seen = set()
+    seen: set = set()
     for row in all_rows:
         key = (row.get("state"), row.get("institution_name") or row.get("college_name"))
         if key in seen:
@@ -238,8 +289,8 @@ async def fetch_cutoff_recommendations(
             break
 
     _log(
-        "[CUTOFF_SQL] Completed query run | "
-        f"raw_rows={len(all_rows)} deduped_rows={len(deduped)} returned={min(len(deduped), total_limit)}"
+        "[CUTOFF_SQL] Completed | "
+        f"raw_rows={len(all_rows)} deduped={len(deduped)} returned={min(len(deduped), total_limit)}"
     )
     return deduped
 
@@ -282,7 +333,8 @@ def format_cutoff_markdown(
         profile_block = "\n".join(profile_lines)
 
         return (
-            "I checked the 2025 cutoff records carefully, but I could not find a direct match for your current preference set.\n\n"
+            "I checked the 2025 cutoff records carefully, but I could not find a direct match "
+            "for your current preference set.\n\n"
             f"{profile_block}\n\n"
             "### What This Means\n\n"
             "This usually happens when the selected combination is too strict for the available rows "
@@ -335,8 +387,7 @@ def format_cutoff_markdown(
             "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
             "Please verify final options on official MCC/state counselling portals.*",
             "",
-            "Would you like me to refine this further by quota, college type, or a specific state?",
+            "Would you like me to refine this further by college type, course, quota, or a specific state?",
         ]
     )
     return "\n".join(lines)
-
