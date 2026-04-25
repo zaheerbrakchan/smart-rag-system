@@ -349,13 +349,20 @@ export default function Home() {
     [messages, chatReferencesEnabledGlobal]
   );
 
+  const normalizeGuidedText = (text: string): string =>
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ');
+
   const resolveGuidedIntent = (reply: string): GuidedIntent | null => {
-    const val = reply.trim();
+    const val = normalizeGuidedText(reply);
     const langs: LanguageCode[] = ['en', 'hi', 'mr'];
     for (const lang of langs) {
       const entries = Object.entries(TRANSLATIONS[lang].starter) as Array<[GuidedIntent, string]>;
       for (const [intent, label] of entries) {
-        if (val === label) return intent;
+        if (val === normalizeGuidedText(label)) return intent;
       }
     }
     return null;
