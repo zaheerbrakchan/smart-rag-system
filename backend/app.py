@@ -4104,6 +4104,7 @@ async def _v2_run_rag_pipeline(
     med_ctx: Dict[str, object],
     preferred_language: str,
     localize_output,
+    request_started_at: float,
     round_stats: List[Dict[str, object]],
     state: Dict[str, object],
 ) -> AsyncGenerator[str, None]:
@@ -4129,6 +4130,7 @@ async def _v2_run_rag_pipeline(
     source_origin_emitted = False
     final_ttft_ms = 0.0
     final_stream_ms = 0.0
+    user_visible_ttft_ms = 0.0
 
     for round_idx in range(max_tool_rounds):
         log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -4146,6 +4148,8 @@ async def _v2_run_rag_pipeline(
                 streamed_raw += delta
                 if _first_out:
                     final_ttft_ms = _elapsed_ms(t_llm)
+                    if user_visible_ttft_ms <= 0:
+                        user_visible_ttft_ms = _elapsed_ms(request_started_at)
                     _first_out = False
                 yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
 
@@ -4155,6 +4159,8 @@ async def _v2_run_rag_pipeline(
                 tail = full_response[len(streamed_raw):]
                 if tail:
                     for token in sse_tokens_preserving_formatting(tail):
+                        if user_visible_ttft_ms <= 0:
+                            user_visible_ttft_ms = _elapsed_ms(request_started_at)
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         if V2_STREAM_TOKEN_DELAY_SEC > 0:
                             await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
@@ -4279,6 +4285,8 @@ async def _v2_run_rag_pipeline(
         for token in sse_tokens_preserving_formatting(full_response):
             if _first_out:
                 final_ttft_ms = _elapsed_ms(t_out)
+                if user_visible_ttft_ms <= 0:
+                    user_visible_ttft_ms = _elapsed_ms(request_started_at)
                 _first_out = False
             yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
             if V2_STREAM_TOKEN_DELAY_SEC > 0:
@@ -4293,6 +4301,8 @@ async def _v2_run_rag_pipeline(
                 streamed_raw += delta
                 if _first_out:
                     final_ttft_ms = _elapsed_ms(t_out)
+                    if user_visible_ttft_ms <= 0:
+                        user_visible_ttft_ms = _elapsed_ms(request_started_at)
                     _first_out = False
                 yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
             full_response = _apply_response_policy(streamed_raw, request.question, allow_factual_addons=has_retrieval_evidence)
@@ -4300,6 +4310,8 @@ async def _v2_run_rag_pipeline(
                 tail = full_response[len(streamed_raw):]
                 if tail:
                     for token in sse_tokens_preserving_formatting(tail):
+                        if user_visible_ttft_ms <= 0:
+                            user_visible_ttft_ms = _elapsed_ms(request_started_at)
                         yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                         if V2_STREAM_TOKEN_DELAY_SEC > 0:
                             await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
@@ -4313,6 +4325,8 @@ async def _v2_run_rag_pipeline(
             for token in sse_tokens_preserving_formatting(full_response):
                 if _first_out:
                     final_ttft_ms = _elapsed_ms(t_out)
+                    if user_visible_ttft_ms <= 0:
+                        user_visible_ttft_ms = _elapsed_ms(request_started_at)
                     _first_out = False
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                 if V2_STREAM_TOKEN_DELAY_SEC > 0:
@@ -4324,6 +4338,7 @@ async def _v2_run_rag_pipeline(
     state["full_response"] = full_response
     state["final_ttft_ms"] = final_ttft_ms
     state["final_stream_ms"] = final_stream_ms
+    state["user_visible_ttft_ms"] = user_visible_ttft_ms
 
 
 async def _v2_try_fast_path_response(
@@ -5271,6 +5286,7 @@ async def chat_v2_stream(request: ChatRequest):
                 med_ctx=med_ctx,
                 preferred_language=preferred_language,
                 localize_output=localize_output,
+                request_started_at=t_wall,
                 round_stats=round_stats,
                 state=rag_state,
             ):
@@ -5281,6 +5297,7 @@ async def chat_v2_stream(request: ChatRequest):
             full_response = str(rag_state.get("full_response") or "")
             final_ttft_ms = float(rag_state.get("final_ttft_ms") or 0.0)
             final_stream_ms = float(rag_state.get("final_stream_ms") or 0.0)
+            user_visible_ttft_ms = float(rag_state.get("user_visible_ttft_ms") or 0.0)
 
             if used_web_fallback:
                 yield f"data: {json.dumps({'type': 'meta', 'web_fallback_used': True, 'source_origin': 'web'})}\n\n"
@@ -5331,6 +5348,7 @@ async def chat_v2_stream(request: ChatRequest):
                         f"|suff={r['suff']:.0f}"
                     )
                 parts.append(f"answer_ttft={final_ttft_ms:.0f}ms")
+                parts.append(f"first_token_to_user={user_visible_ttft_ms:.0f}ms")
                 parts.append(f"answer_stream_total={final_stream_ms:.0f}ms")
                 parts.append("save_db=deferred(background)")
                 log(

@@ -23,6 +23,7 @@ DATABASE_URL = async_url_for_neon(_raw_db_url)
 
 def _asyncpg_connect_args() -> dict:
     args: dict = {"timeout": 30, "command_timeout": 30}
+    args["server_settings"] = {"hnsw.ef_search": "40"}
     # Remote hosts require TLS; use asyncpg SSL mode instead of forcing cert verification.
     # `ssl=True` creates a verifying context and may fail on managed/self-signed chains.
     if not is_local_postgres_host(_raw_db_url):
@@ -43,8 +44,8 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=os.getenv("DEBUG", "false").lower() == "true",  # SQL logging in debug mode
     poolclass=AsyncAdaptedQueuePool,  # Connection pool for better performance
-    pool_size=5,  # Number of connections to keep open
-    max_overflow=10,  # Additional connections when pool is exhausted
+    pool_size=10,  # Number of connections to keep open
+    max_overflow=20,  # Additional connections when pool is exhausted
     pool_timeout=30,  # Wait time for available connection
     pool_recycle=300,  # Recycle connections after 5 minutes
     pool_pre_ping=True,  # Verify connection before using
