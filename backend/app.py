@@ -804,36 +804,6 @@ def _looks_like_neet_factual_query(question: str) -> bool:
     )
 
 
-def _requires_strict_grounding_guard(question: str) -> bool:
-    """
-    High-risk factual asks where numeric/entity hallucinations are costly.
-    """
-    q = _normalize_text(question)
-    high_risk_terms = [
-        "fee",
-        "fees",
-        "tuition",
-        "hostel fee",
-        "security fee",
-        "registration fee",
-        "cutoff",
-        "cut off",
-        "rank",
-        "score",
-        "marks",
-        "air",
-        "seat matrix",
-        "seat",
-        "reservation",
-        "quota",
-        "percentile",
-        "eligibility criteria",
-        "deadline",
-        "last date",
-    ]
-    return any(term in q for term in high_risk_terms)
-
-
 _VAGUE_SCOPE_EXPANSION_PATTERNS: Tuple[str, ...] = (
     "what about other",
     "other colleges",
@@ -2605,75 +2575,6 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
         return False, "Sufficiency check failed"
 
 
-def assess_answer_grounding_with_llm(
-    client,
-    user_question: str,
-    draft_answer: str,
-    retrieval_evidence: str,
-) -> tuple[bool, str, str]:
-    """
-    Verify final draft is grounded in retrieved evidence.
-    Returns: (is_grounded, safe_answer, reason)
-    """
-    evidence = _trim_tool_result_for_model(retrieval_evidence or "", limit=7000)
-    if not evidence.strip():
-        safe = (
-            "I want to make sure I only share verified details.\n\n"
-            "I do not have enough confirmed evidence for this exact query right now.\n\n"
-            "> *Note — Disclaimer: Please verify on official MCC/state counselling websites.*"
-        )
-        return False, safe, "No retrieval evidence available"
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict grounding verifier for a NEET counselling assistant.\n"
-                        "Check whether the DRAFT_ANSWER is fully supported by EVIDENCE.\n"
-                        "Critical numeric guard: every numeric/date/rank/fee/cutoff value in DRAFT_ANSWER must be explicitly present "
-                        "or directly inferable from EVIDENCE.\n"
-                        "If any unsupported claim exists, set is_grounded=false and produce a corrected_answer that uses ONLY supported facts.\n"
-                        "When evidence is insufficient, corrected_answer must clearly say specific detail is not confirmed.\n"
-                        "Return JSON only with keys: is_grounded (boolean), reason (string), corrected_answer (string)."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"USER_QUESTION:\n{user_question}\n\n"
-                        f"DRAFT_ANSWER:\n{draft_answer}\n\n"
-                        f"EVIDENCE:\n{evidence}\n\n"
-                        "Return JSON only."
-                    ),
-                },
-            ],
-            temperature=0,
-            max_tokens=450,
-        )
-        raw = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        grounded = bool(parsed.get("is_grounded", False))
-        reason = str(parsed.get("reason", "")).strip() or "No reason provided"
-        corrected = str(parsed.get("corrected_answer", "")).strip()
-        if grounded:
-            return True, draft_answer, reason
-        if corrected:
-            return False, corrected, reason
-        safe = (
-            "I want to make sure I only share verified details.\n\n"
-            "I do not have enough confirmed evidence for this exact query right now.\n\n"
-            "> *Note — Disclaimer: Please verify on official MCC/state counselling websites.*"
-        )
-        return False, safe, reason
-    except Exception as err:
-        log(f"[V2] ⚠️ Grounding verifier failed: {err}")
-        return True, draft_answer, "Verifier failed; passthrough"
-
-
 def _looks_like_contextual_in_domain_followup(
     question: str,
     conversation_context: Optional[Dict[str, object]] = None,
@@ -4286,7 +4187,6 @@ async def chat_v2_stream(request: ChatRequest):
         round_stats: List[Dict] = []
         final_ttft_ms = 0.0
         final_stream_ms = 0.0
-        grounding_ms = 0.0
         
         def localize_output(text: str) -> str:
             if preferred_language == "en":
@@ -5063,7 +4963,6 @@ async def chat_v2_stream(request: ChatRequest):
             last_web_retrieval: Optional[str] = None
             streamed_final_in_loop = False
             source_origin_emitted = False
-            strict_grounding_required = _requires_strict_grounding_guard(request.question)
 
             for round_idx in range(max_tool_rounds):
                 log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -5075,7 +4974,6 @@ async def chat_v2_stream(request: ChatRequest):
                     and kb_attempted
                     and not kb_marked_insufficient
                     and not force_web_search_next_round
-                    and not strict_grounding_required
                 ):
                     t_llm = time.perf_counter()
                     _first_out = True
@@ -5414,9 +5312,8 @@ async def chat_v2_stream(request: ChatRequest):
                 log("[V2] 🤖 Generating final response with context...")
                 final_messages = web_only_messages if (used_web_fallback and web_only_messages) else messages
                 t_out = time.perf_counter()
-                # True end-to-end stream for final generation (English path).
-                # For strict grounding mode, avoid pre-streaming so we can verify before emission.
-                if preferred_language == "en" and not strict_grounding_required:
+                # English: stream final answer to the user.
+                if preferred_language == "en":
                     _first_out = True
                     streamed_raw = ""
                     async for delta in _stream_chat_completion_text(
@@ -5461,7 +5358,7 @@ async def chat_v2_stream(request: ChatRequest):
                             yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': final_replies})}\n\n"
                     final_stream_ms = _elapsed_ms(t_out)
                 else:
-                    # Non-English (and strict-grounding English) use non-stream finalization path.
+                    # Non-English: non-stream finalization, then tokenized emit for a consistent client path.
                     final_response = client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=final_messages,
@@ -5474,24 +5371,6 @@ async def chat_v2_stream(request: ChatRequest):
                         request.question,
                         allow_factual_addons=has_retrieval_evidence,
                     )
-                    if strict_grounding_required:
-                        combined_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
-                        if (combined_evidence or "").strip():
-                            t_ground = time.perf_counter()
-                            is_grounded, guarded_answer, grounded_reason = assess_answer_grounding_with_llm(
-                                client=client,
-                                user_question=request.question,
-                                draft_answer=full_response,
-                                retrieval_evidence=combined_evidence,
-                            )
-                            grounding_ms = _elapsed_ms(t_ground)
-                            if not is_grounded:
-                                log(f"[V2] 🛡️ Grounding guard rewrote answer: {grounded_reason}")
-                            else:
-                                log(f"[V2] 🛡️ Grounding guard passed: {grounded_reason}")
-                            full_response = guarded_answer
-                        else:
-                            log("[V2] 🛡️ Grounding guard skipped: no retrieval evidence")
                     full_response = localize_output(full_response)
                     _first_out = True
                     if has_retrieval_evidence:
@@ -5563,8 +5442,6 @@ async def chat_v2_stream(request: ChatRequest):
                     )
                 parts.append(f"answer_ttft={final_ttft_ms:.0f}ms")
                 parts.append(f"answer_stream_total={final_stream_ms:.0f}ms")
-                if grounding_ms > 0:
-                    parts.append(f"grounding_guard={grounding_ms:.0f}ms")
                 parts.append("save_db=deferred(background)")
                 log(
                     "[V2] ⏱ TIMING SUMMARY (V2_TIMING_LOG=false to hide) → "
