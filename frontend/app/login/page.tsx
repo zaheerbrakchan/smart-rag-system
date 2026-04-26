@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 
 type Step = 'phone' | 'otp';
+const LOGOUT_NOTICE_KEY = 'auth_logout_notice';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -20,6 +21,7 @@ export default function LoginPage() {
   const [step, setStep] = useState<Step>('phone');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [phone, setPhone] = useState('+91 ');
   const [otp, setOtp] = useState('');
   const [devOtp, setDevOtp] = useState('');
@@ -31,6 +33,14 @@ export default function LoginPage() {
       router.push('/');
     }
   }, [authLoading, isAuthenticated, router]);
+
+  useEffect(() => {
+    const msg = localStorage.getItem(LOGOUT_NOTICE_KEY);
+    if (msg) {
+      setNotice(msg);
+      localStorage.removeItem(LOGOUT_NOTICE_KEY);
+    }
+  }, []);
 
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,6 +80,7 @@ export default function LoginPage() {
       if (!verified.success || !verified.verification_token) {
         throw new Error('OTP verification failed');
       }
+      localStorage.removeItem(LOGOUT_NOTICE_KEY);
       await login(phone, verified.verification_token);
       router.push('/');
     } catch (err) {
@@ -149,6 +160,12 @@ export default function LoginPage() {
                     {error}
                   </div>
                 )}
+                {notice && (
+                  <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 text-sm bg-amber-50 dark:bg-amber-500/10 p-3 rounded-lg border border-amber-200 dark:border-amber-500/30">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    {notice}
+                  </div>
+                )}
 
                 <button
                   type="submit"
@@ -187,6 +204,12 @@ export default function LoginPage() {
                 <div className="flex items-center gap-2 text-red-600 dark:text-red-400 text-sm bg-red-50 dark:bg-red-500/10 p-3 rounded-lg">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
                   {error}
+                </div>
+              )}
+              {notice && (
+                <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 text-sm bg-amber-50 dark:bg-amber-500/10 p-3 rounded-lg border border-amber-200 dark:border-amber-500/30">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  {notice}
                 </div>
               )}
 

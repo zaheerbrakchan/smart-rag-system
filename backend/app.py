@@ -46,6 +46,7 @@ def _elapsed_ms(since: float) -> float:
 V2_STREAM_TOKEN_DELAY_SEC = float(os.getenv("V2_STREAM_TOKEN_DELAY_SEC", "0"))
 V2_TOOL_CONTEXT_CHAR_LIMIT = int(os.getenv("V2_TOOL_CONTEXT_CHAR_LIMIT", "12000"))
 V2_FINAL_MAX_TOKENS = int(os.getenv("V2_FINAL_MAX_TOKENS", "900"))
+V2_TOOL_DEBUG_LOG = os.getenv("V2_TOOL_DEBUG_LOG", "true").lower() in ("1", "true", "yes")
 
 
 def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMIT) -> str:
@@ -53,6 +54,56 @@ def _trim_tool_result_for_model(raw: str, limit: int = V2_TOOL_CONTEXT_CHAR_LIMI
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[Tool output truncated for model context]"
+
+
+def _log_v2_tool_debug(msg: str) -> None:
+    if V2_TOOL_DEBUG_LOG:
+        log(msg)
+
+
+def _summarize_messages_for_debug(messages: List[Dict[str, Any]], tail: int = 6) -> str:
+    """
+    Compact, safe debug summary of messages passed to LLM in tool loop.
+    Shows role and truncated content/tool marker only.
+    """
+    out: List[str] = []
+    for m in messages[-tail:]:
+        role = str(m.get("role", "?"))
+        if m.get("tool_calls"):
+            out.append(f"{role}:<tool_calls>")
+            continue
+        content = str(m.get("content") or "").replace("\n", " ").strip()
+        if len(content) > 120:
+            content = content[:120] + "..."
+        out.append(f"{role}:{content}")
+    return " | ".join(out)
+
+
+def _build_sufficiency_context(messages: List[Dict[str, Any]], current_question: str, max_turns: int = 4) -> str:
+    """
+    Build compact conversational context for sufficiency checks so short follow-ups
+    are interpreted with the correct topic from recent turns.
+    """
+    turns: List[str] = []
+    for m in messages:
+        role = str(m.get("role", ""))
+        if role not in {"user", "assistant"}:
+            continue
+        if m.get("tool_calls"):
+            continue
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > 300:
+            content = content[:300] + "..."
+        turns.append(f"{role}: {content}")
+    if max_turns > 0:
+        turns = turns[-max_turns:]
+    return (
+        "Conversation context (recent):\n"
+        + ("\n".join(turns) if turns else "(none)")
+        + f"\n\nCurrent user message:\n{current_question}"
+    )
 
 
 async def _stream_chat_completion_text(
@@ -400,7 +451,7 @@ async def v2_background_update_conversation_context(
 
 
 async def _v2_conversation_needs_title(conversation_id: int) -> bool:
-    """Return True when conversation title is empty and should be generated."""
+    """Return True when title is empty or still a generic fallback (e.g., Chat 147)."""
     from database.connection import async_session_maker
     try:
         async with async_session_maker() as db:
@@ -408,10 +459,42 @@ async def _v2_conversation_needs_title(conversation_id: int) -> bool:
             if not convo:
                 return False
             title = (convo.title or "").strip()
-            return not title
+            if not title:
+                return True
+            # Regenerate if title is still a placeholder from UI fallback naming.
+            return bool(re.fullmatch(r"(?i)\s*chat\s*#?\s*\d+\s*", title))
     except Exception as err:
         log(f"[V2] ⚠️ Could not check title state conv={conversation_id}: {err}")
         return False
+
+
+async def v2_background_generate_conversation_title(
+    conversation_id: int,
+    question: str,
+    *,
+    log_label: str = "default",
+) -> None:
+    """
+    Generate/persist conversation title after stream completion without blocking UX.
+    """
+    try:
+        should_generate_title = (
+            conversation_id
+            and not _is_greeting_only(question)
+            and await _v2_conversation_needs_title(conversation_id)
+        )
+        if not should_generate_title:
+            return
+
+        from database.connection import async_session_maker
+        from services.conversation_memory import generate_conversation_title, update_conversation_title
+
+        generated_title = await generate_conversation_title(question)
+        async with async_session_maker() as title_db:
+            await update_conversation_title(title_db, conversation_id, generated_title)
+        log(f"[V2] 🏷️ Generated title ({log_label}): {generated_title}")
+    except Exception as title_err:
+        log(f"[V2] ⚠️ Title generation error ({log_label}): {title_err}")
 
 
 def sse_tokens_preserving_formatting(text: str):
@@ -506,6 +589,47 @@ def _chip_generation_language_rules(output_language: str) -> str:
         "LANGUAGE: Write every chip in **English**.\n"
         "- Each reply at most 6 words.\n"
     )
+
+
+def _extract_college_hint_for_chips(*texts: str) -> Optional[str]:
+    """Best-effort college name hint for deterministic chip fallback."""
+    pattern = re.compile(r"\b(?:AIIMS|GMC)\s+[A-Za-z&\-\s]{2,40}", re.IGNORECASE)
+    for text in texts:
+        if not text:
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        name = re.sub(r"\s+", " ", match.group(0)).strip(" .,:;")
+        if name:
+            # Normalize presentation while preserving recognizable acronym
+            parts = name.split(" ", 1)
+            if len(parts) == 2:
+                return f"{parts[0].upper()} {parts[1].strip()}"
+            return name.upper()
+    return None
+
+
+def _fallback_contextual_chips(
+    user_question: str,
+    assistant_response: str,
+    output_language: str,
+) -> List[str]:
+    """Deterministic fallback when model/filters produce no chips."""
+    code = _normalize_language_code(output_language)
+    college = _extract_college_hint_for_chips(user_question, assistant_response)
+    if code != "en":
+        # Keep non-English fallback predictable and safe.
+        return _medbuddy_default_replies_for_language(output_language)[:2]
+    if college:
+        return [
+            f"What is total fee at {college}?",
+            f"Compare {college} with another college",
+        ]
+    return [
+        "Want fee breakup details?",
+        "Compare with another college?",
+    ]
 
 
 MEDBUDDY_CAPS = {
@@ -812,6 +936,16 @@ Route **TRUE** for vague asks like "help me find a good college", "which college
 
 Route **FALSE** for general counselling process, exam-only guidance, fee structure, documents, dates, reservation policy
 **without** college prediction, or pure definitions.
+
+College comparison rule (important):
+- If user asks to compare two colleges (fees, facilities, courses, brochure details, documents, eligibility, etc.)
+  and does NOT explicitly ask prediction/chances/cutoff-for-rank, route **FALSE** (RAG path, not SQL cutoff).
+- Do NOT route to SQL cutoff just because two colleges are named.
+- Route **TRUE** for comparisons only when user explicitly asks cutoff/chances/prediction language
+  (for example: "compare cutoffs", "which one can I get at my rank", "chance comparison by rank/score").
+- If the assistant previously asked a comparison clarification like "which college to compare with X?"
+  and user now replies with just a college name (e.g., "AIIMS Delhi"), route **FALSE** and continue comparison in RAG.
+- A bare college-name follow-up after comparison clarification is NOT a cutoff profile input.
 
 Important disambiguation:
 - The phrase "state counselling" alone does **not** mean cutoff prediction.
@@ -1565,14 +1699,39 @@ async def _generate_contextual_suggested_replies(
                     "role": "system",
                     "content": (
                         "Generate concise suggested reply chips for a NEET counselling chat UI.\n"
-                        "Return JSON only: {\"replies\": [\"...\", \"...\", ...]}.\n"
-                        "Rules:\n"
-                        "- Return 0 to 5 replies (prefer fewer when scope is narrow).\n"
+                        "Return JSON only: {\"replies\": [\"...\", \"...\", ...]}.\n\n"
+                        "## CHIP GENERATION STRATEGY\n"
+                        "Generate at most 3 chips, each serving a different purpose:\n\n"
+                        "1. DEPTH chip (always try to include):\n"
+                        "   - Digs deeper into the SAME topic and SAME college/entity the bot just answered about.\n"
+                        "   - Example: Bot answered hostel availability at AIIMS Bhopal -> "
+                        "'Want to know the hostel fee, room type, and mess charges at AIIMS Bhopal?'\n"
+                        "   - Example: Bot answered MBBS fee at GMC Kathua -> "
+                        "'What is the total fee including hostel and mess charges at GMC Kathua?'\n\n"
+                        "2. BREADTH chip (include when relevant):\n"
+                        "   - Explores a RELATED but DIFFERENT topic for the SAME college/entity.\n"
+                        "   - Example: Bot answered hostel at AIIMS Bhopal -> "
+                        "'Should I also show the NEET cutoff rank needed to get into AIIMS Bhopal?'\n"
+                        "   - Example: Bot answered fee at GMC Kathua -> "
+                        "'What documents are needed for admission at GMC Kathua?'\n\n"
+                        "3. COMPARISON chip (include when relevant):\n"
+                        "   - Same topic but DIFFERENT colleges/entities for comparison.\n"
+                        "   - Example: Bot answered hostel at AIIMS Bhopal -> "
+                        "'Want hostel details at other AIIMS campuses like Nagpur, Raipur, or Jodhpur?'\n"
+                        "   - Example: Bot answered fee at GMC Kathua -> "
+                        "'How does GMC Kathua fee compare with other government colleges in J&K?'\n\n"
+                        "## RULES\n"
+                        "- Return 0 to 3 chips only - one per pattern above.\n"
+                        "- Each chip must be a short natural question the user might actually send next.\n"
+                        "- Always ground chips in the EXACT college/entity/topic from the bot's last answer.\n"
+                        "- Never generate generic chips like 'What is the total fee?' without naming the college.\n"
+                        "- Never repeat the same information the bot already answered.\n"
+                        "- If the bot asked the user for input (rank, state, category), return empty list [].\n"
+                        "- If the answer was about cutoff shortlist results, chips should be about refining "
+                        "(state, college type, course) not repeating the same search.\n"
                         + lang_rules
-                        + "- Phrase each chip as a short user question or request the user might send next.\n"
-                        "- Avoid generic fillers like 'Thanks' (or equivalent in the output language).\n"
-                        "- Do not repeat the same meaning.\n"
-                        "- If user should type numeric/profile detail next, return empty list.\n"
+                        + "- Do not include 'Thanks' or acknowledgement chips.\n"
+                        "- Do not repeat the same meaning across chips.\n"
                         + grounding_rules
                     ),
                 },
@@ -1602,12 +1761,109 @@ async def _generate_contextual_suggested_replies(
             seen.add(key)
             if len(cleaned) >= 5:
                 break
-        if evidence_text:
-            cleaned = _filter_chips_not_supported_by_evidence(cleaned, evidence_text)
+        if evidence_text and cleaned:
+            filtered = _filter_chips_not_supported_by_evidence(cleaned, evidence_text)
+            # If strict grounding filter becomes too aggressive and removes all chips,
+            # keep up to 2 model-generated chips as a graceful fallback for UX continuity.
+            cleaned = filtered if filtered else cleaned[:2]
+        if not cleaned:
+            cleaned = _fallback_contextual_chips(question_text, response_text, output_language)
         return cleaned
     except Exception as e:
         log(f"[V2] ⚠️ Suggested replies generation failed: {e}")
         return []
+
+
+async def _llm_explain_cutoff_results(
+    *,
+    user_question: str,
+    metric_type: str,
+    metric_value: int,
+    home_state: str,
+    target_states: List[str],
+    category: str,
+    sub_category: Optional[str],
+    rows: List[Dict[str, object]],
+) -> str:
+    """Generate a short round-2 explanation for cutoff SQL results."""
+    if not rows:
+        return ""
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        sample_rows = []
+        for row in rows[:8]:
+            sample_rows.append(
+                {
+                    "institution": row.get("institution_name") or row.get("college_name"),
+                    "state": row.get("state"),
+                    "course": row.get("course"),
+                    "quota": row.get("quota"),
+                    "domicile": row.get("domicile"),
+                    "air_rank": row.get("air_rank"),
+                    "score": row.get("score"),
+                    "round": row.get("round"),
+                }
+            )
+
+        payload = {
+            "question": user_question,
+            "profile": {
+                "metric_type": metric_type,
+                "metric_value": metric_value,
+                "home_state": home_state,
+                "target_states": target_states,
+                "category": category,
+                "sub_category": sub_category,
+            },
+            "matched_count": len(rows),
+            "sample_rows": sample_rows,
+        }
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You summarize NEET cutoff matches for students.\n"
+                        "Return concise markdown only with heading + bullets.\n"
+                        "Do not use markdown tables.\n"
+                        "Use only provided rows; do not invent facts.\n"
+                        "Include 4-8 bullets with practical pattern insights and one final next-step question.\n"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+            temperature=0.2,
+            max_tokens=320,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        log(f"[V2] ⚠️ Cutoff round-2 explanation skipped: {e}")
+        return ""
+
+
+def _fallback_cutoff_quick_interpretation(
+    *,
+    rows: List[Dict[str, object]],
+    metric_type: str,
+    metric_value: int,
+    target_states: List[str],
+) -> str:
+    """Deterministic backup text when cutoff round-2 LLM is unavailable."""
+    if not rows:
+        return ""
+    top = rows[0]
+    metric_label = "AIR rank" if metric_type == "rank" else "score"
+    top_metric_value = top.get("air_rank") if metric_type == "rank" else top.get("score")
+    top_metric_text = str(top_metric_value) if top_metric_value is not None else "N/A"
+    top_inst = str(top.get("institution_name") or top.get("college_name") or "Top matched college")
+    states_text = ", ".join(target_states) if target_states else "selected states"
+    return (
+        f"- Closest match in **{states_text}** is **{top_inst}** "
+        f"(cutoff {metric_label}: **{top_metric_text}**).\n"
+        f"- Your input {metric_label} is **{metric_value}**; options shown are the nearest available rows.\n"
+        "- You can refine further by course, quota, domicile mode, or adding/removing states."
+    )
 
 
 def _extract_cutoff_refinements(
@@ -1901,6 +2157,9 @@ async def _llm_extract_cutoff_profile_turn(
                         "- States where user wants to explore colleges. May differ from home_state.\n"
                         "- 'home state only' → target_states = [home_state from current_context].\n"
                         "- 'check in X' / 'switch to X' / 'look in X' → target_states = [X].\n"
+                        "- If user gives rank/score + one state in natural text (e.g., 'rank 2300 jharkhand', "
+                        "'AIR 23k in UP', Hindi/Marathi equivalents), treat that state as target_states.\n"
+                        "- Do not ask target state again when the message already contains one clear state for search.\n"
                         "- Compact replies are valid profile input. Example: '23000 Delhi' means "
                         "metric_value=23000 (rank by range) and target_states=['Delhi'].\n"
                         "- If pending_fields includes target_states and user provides one clear state token "
@@ -1989,6 +2248,22 @@ async def _llm_extract_cutoff_profile_turn(
                 "explicit_states_detected": bool(signals.get("explicit_states_detected", False)),
                 "home_state_detected": bool(signals.get("home_state_detected", False)),
             }
+
+        # LLM-assisted recovery: when target_states is pending, metric is detected, and a single
+        # state was extracted into home_state from compact natural text (e.g. "rank 2300, jharkhand"),
+        # treat it as target state to avoid redundant "which state?" follow-up.
+        if (
+            "target_states" in (pending_fields or [])
+            and not out.get("target_states")
+            and isinstance(out.get("home_state"), str)
+        ):
+            sig = dict(out.get("signals") or {})
+            if bool(sig.get("metric_detected")) and (
+                bool(sig.get("explicit_states_detected")) or bool(sig.get("home_state_detected"))
+            ):
+                out["target_states"] = [str(out["home_state"])]
+                sig["explicit_states_detected"] = True
+                out["signals"] = sig
 
         # Category retry for terse single-word replies when we're waiting for category
         if "category" in (pending_fields or []) and not out.get("category"):
@@ -2474,7 +2749,12 @@ async def get_cutoff_result_limit() -> int:
         return 10
 
 
-def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: str) -> tuple[bool, str]:
+def assess_kb_sufficiency_with_llm(
+    client,
+    user_question: str,
+    kb_tool_result: str,
+    conversation_context: Optional[str] = None,
+) -> tuple[bool, str]:
     """
     LLM-based generic sufficiency check.
     Returns (is_sufficient, reason).
@@ -2504,6 +2784,9 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
                         "unambiguously includes the one the user asked about.\n"
                         "Do NOT mark insufficient just because broader background is missing "
                         "(e.g. history when they only asked fee/cutoff).\n"
+                        "Use provided conversation context to interpret short follow-ups. "
+                        "If current message is short (e.g., 'also for GMC Srinagar'), infer topic from recent context, "
+                        "but still require exact entity match for sufficiency.\n"
                         "If retrieved text is for a different college/state than asked, mark is_sufficient=false.\n"
                         "Mark is_sufficient=true when the KB contains the requested data for the correct scope/entity; "
                         "mark false when the requested college/state/round/detail is absent, wrong, or ambiguous."
@@ -2514,6 +2797,7 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
                     "role": "user",
                     "content": (
                         f"USER_QUESTION:\n{user_question}\n\n"
+                        f"CONVERSATION_CONTEXT:\n{conversation_context or '(none)'}\n\n"
                         f"KB_RESULT:\n{kb_compact}\n\n"
                         "Return JSON only."
                     ),
@@ -2523,10 +2807,22 @@ def assess_kb_sufficiency_with_llm(client, user_question: str, kb_tool_result: s
             max_tokens=70,
         )
         raw = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        is_sufficient = bool(parsed.get("is_sufficient", False))
-        reason = str(parsed.get("reason", "")).strip() or "No reason provided"
-        return is_sufficient, reason
+        try:
+            parsed = json.loads(raw)
+            is_sufficient = bool(parsed.get("is_sufficient", False))
+            reason = str(parsed.get("reason", "")).strip() or "No reason provided"
+            return is_sufficient, reason
+        except Exception:
+            lowered = raw.lower()
+            m = re.search(r'"is_sufficient"\s*:\s*(true|false)', lowered)
+            if m:
+                is_sufficient = m.group(1) == "true"
+                reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', raw, re.IGNORECASE)
+                reason = reason_match.group(1).strip() if reason_match else "Parsed from non-JSON sufficiency output"
+                log(f"[V2] ⚠️ KB sufficiency non-JSON output parsed via fallback: {raw[:300]!r}")
+                return is_sufficient, reason
+            log(f"[V2] ⚠️ KB sufficiency output unparseable: {raw[:300]!r}")
+            return False, "Sufficiency output parse failed"
     except Exception as err:
         log(f"[V2] ⚠️ KB sufficiency check failed, defaulting to insufficient: {err}")
         return False, "Sufficiency check failed"
@@ -4124,16 +4420,23 @@ async def _v2_run_rag_pipeline(
     kb_sufficient_for_final = False
     kb_insufficient_and_web_disabled = False
     forced_fallback_response = None
+    loop_final_assistant_content: Optional[str] = None
     last_kb_retrieval: Optional[str] = None
     last_web_retrieval: Optional[str] = None
     streamed_final_in_loop = False
-    source_origin_emitted = False
+    direct_web_fallback_done = False
+    # Track stream-time origin so we can upgrade KB -> WEB if fallback is used.
+    stream_source_origin: Optional[str] = None
     final_ttft_ms = 0.0
     final_stream_ms = 0.0
     user_visible_ttft_ms = 0.0
 
     for round_idx in range(max_tool_rounds):
         log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
+        _log_v2_tool_debug(
+            f"[V2][DBG] round={round_idx + 1} user_question={request.question!r} "
+            f"messages_tail={_summarize_messages_for_debug(messages)}"
+        )
         if preferred_language == "en" and round_idx > 0 and kb_attempted and kb_sufficient_for_final:
             t_llm = time.perf_counter()
             _first_out = True
@@ -4186,7 +4489,16 @@ async def _v2_run_rag_pipeline(
         )
         llm_round_ms = _elapsed_ms(t_llm)
         assistant_message = response.choices[0].message
+        _log_v2_tool_debug(
+            f"[V2][DBG] round={round_idx + 1} assistant_tool_calls_count="
+            f"{len(assistant_message.tool_calls or [])}"
+        )
         if not assistant_message.tool_calls:
+            loop_final_assistant_content = (assistant_message.content or "").strip()
+            _log_v2_tool_debug(
+                f"[V2][DBG] round={round_idx + 1} no tool call; assistant_content_preview="
+                f"{(loop_final_assistant_content[:160] + '...') if len(loop_final_assistant_content) > 160 else loop_final_assistant_content!r}"
+            )
             round_stats.append({"i": round_idx + 1, "llm": llm_round_ms, "tool": None, "tool_exec": 0.0, "suff": 0.0})
             break
 
@@ -4194,25 +4506,37 @@ async def _v2_run_rag_pipeline(
         kb_results_this_round: List[str] = []
         round_tool_names: List[str] = []
         round_tool_exec_ms = 0.0
+        pending_kb_tool_messages: List[Dict[str, Any]] = []
+        pending_other_tool_messages: List[Dict[str, Any]] = []
         for tool_call in tool_calls:
             tool_name = tool_call.function.name
             tool_args = json.loads(tool_call.function.arguments or "{}")
+            _log_v2_tool_debug(
+                f"[V2][DBG] round={round_idx + 1} tool_selected name={tool_name} args={json.dumps(tool_args, ensure_ascii=False)}"
+            )
             round_tool_names.append(tool_name)
             t_tool = time.perf_counter()
             tool_result, success = execute_tool_call(tool_name, tool_args)
             tool_exec_ms = _elapsed_ms(t_tool)
             round_tool_exec_ms += tool_exec_ms
+            _log_v2_tool_debug(
+                f"[V2][DBG] round={round_idx + 1} tool_result name={tool_name} "
+                f"success={success} exec_ms={tool_exec_ms:.0f} preview="
+                f"{((tool_result or '')[:160].replace(chr(10), ' ') + '...') if len(tool_result or '') > 160 else (tool_result or '').replace(chr(10), ' ')!r}"
+            )
             if success:
                 if tool_name == "search_knowledge_base":
                     kb_results_this_round.append(tool_result)
-                    if not source_origin_emitted:
+                    # Emit KB only when no origin is set yet.
+                    if stream_source_origin is None:
                         yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'kb'})}\n\n"
-                        source_origin_emitted = True
+                        stream_source_origin = "kb"
                 elif tool_name == "search_web":
                     last_web_retrieval = tool_result
-                    if not source_origin_emitted:
+                    # If web fallback is used, always upgrade origin to WEB.
+                    if stream_source_origin != "web":
                         yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
-                        source_origin_emitted = True
+                        stream_source_origin = "web"
                     used_web_fallback = True
 
             sources = []
@@ -4240,28 +4564,116 @@ async def _v2_run_rag_pipeline(
             if sources and references_enabled:
                 yield f"data: {json.dumps({'type': 'sources', 'sources': sources[:5]})}\n\n"
 
-            messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": tool_call.id, "type": "function", "function": {"name": tool_name, "arguments": tool_call.function.arguments}}]})
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": _trim_tool_result_for_model(tool_result)})
+            tool_pair = [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": tool_call.function.arguments},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": tool_call.id, "content": _trim_tool_result_for_model(tool_result)},
+            ]
+            if tool_name == "search_knowledge_base":
+                pending_kb_tool_messages.extend(tool_pair)
+            else:
+                pending_other_tool_messages.extend(tool_pair)
 
         suff_ms = 0.0
-        if kb_results_this_round and _should_run_kb_sufficiency_check(request.question):
+        if kb_results_this_round:
             kb_attempted = True
             last_kb_retrieval = "\n\n".join(kb_results_this_round)
             t_suff = time.perf_counter()
-            is_sufficient, _reason = assess_kb_sufficiency_with_llm(client=client, user_question=request.question, kb_tool_result=last_kb_retrieval)
+            is_sufficient, _reason = assess_kb_sufficiency_with_llm(
+                client=client,
+                user_question=request.question,
+                kb_tool_result=last_kb_retrieval,
+                conversation_context=_build_sufficiency_context(messages, request.question),
+            )
             suff_ms = _elapsed_ms(t_suff)
+            _log_v2_tool_debug(
+                f"[V2][DBG] sufficiency round={round_idx + 1} "
+                f"is_sufficient={bool(is_sufficient)} reason={_reason!r}"
+            )
             kb_sufficient_for_final = bool(is_sufficient)
             if not is_sufficient:
                 if web_fallback_enabled:
-                    messages.append({"role": "system", "content": "Knowledge-base retrieval was insufficient for the exact user entity/scope. Call `search_web` next using exact entity keywords from the current question. Do not transfer values from unrelated entities."})
+                    # Latency optimization: avoid an extra planner LLM round.
+                    # Once sufficiency is false, trigger web search directly.
+                    fallback_query = (request.question or "").strip()
+                    t_web = time.perf_counter()
+                    web_result, web_success = execute_tool_call("search_web", {"query": fallback_query})
+                    web_exec_ms = _elapsed_ms(t_web)
+                    round_tool_exec_ms += web_exec_ms
+                    round_tool_names.append("search_web(direct)")
+                    _log_v2_tool_debug(
+                        f"[V2][DBG] direct_web_fallback query={fallback_query!r} "
+                        f"success={web_success} exec_ms={web_exec_ms:.0f} preview="
+                        f"{((web_result or '')[:160].replace(chr(10), ' ') + '...') if len(web_result or '') > 160 else (web_result or '').replace(chr(10), ' ')!r}"
+                    )
+
+                    if web_success:
+                        last_web_retrieval = web_result
+                        used_web_fallback = True
+                        if stream_source_origin != "web":
+                            yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
+                            stream_source_origin = "web"
+
+                        web_sources = []
+                        for line in web_result.split("\n"):
+                            if line.startswith("[") and "Title:" in line:
+                                title = line.split("Title:", 1)[1].strip()
+                                web_sources.append({"file_name": title, "document_type": "web_search"})
+                        if web_sources and references_enabled:
+                            yield f"data: {json.dumps({'type': 'sources', 'sources': web_sources[:5]})}\n\n"
+
+                        direct_tool_id = f"direct_web_{uuid.uuid4().hex[:8]}"
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": direct_tool_id,
+                                "type": "function",
+                                "function": {"name": "search_web", "arguments": json.dumps({"query": fallback_query})}
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": direct_tool_id,
+                            "content": _trim_tool_result_for_model(web_result),
+                        })
+                        direct_web_fallback_done = True
+                    else:
+                        kb_insufficient_and_web_disabled = True
                 else:
                     kb_insufficient_and_web_disabled = True
+            else:
+                # Keep KB retrieval in final context only when sufficiency is true.
+                if pending_kb_tool_messages:
+                    messages.extend(pending_kb_tool_messages)
+                if pending_other_tool_messages:
+                    messages.extend(pending_other_tool_messages)
         elif kb_results_this_round:
             kb_attempted = True
             last_kb_retrieval = "\n\n".join(kb_results_this_round)
             kb_sufficient_for_final = True
+            if pending_kb_tool_messages:
+                messages.extend(pending_kb_tool_messages)
+            if pending_other_tool_messages:
+                messages.extend(pending_other_tool_messages)
+        else:
+            if pending_kb_tool_messages:
+                messages.extend(pending_kb_tool_messages)
+            if pending_other_tool_messages:
+                messages.extend(pending_other_tool_messages)
 
         round_stats.append({"i": round_idx + 1, "llm": llm_round_ms, "tool": ", ".join(round_tool_names) if round_tool_names else None, "tool_exec": round_tool_exec_ms, "suff": suff_ms})
+        if direct_web_fallback_done:
+            break
         if kb_insufficient_and_web_disabled:
             forced_fallback_response = (
                 "I want to make sure you get accurate details.\n\n"
@@ -4270,15 +4682,15 @@ async def _v2_run_rag_pipeline(
             )
             break
 
-    chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
+    # Follow-up chips must align with the evidence used for the final answer.
+    # If we fell back to web (KB insufficient), ground chips in WEB only.
+    if used_web_fallback:
+        chip_evidence = _combine_retrieval_for_suggestion_chips(None, last_web_retrieval)
+    else:
+        chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
     policy_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
     has_retrieval_evidence = bool((policy_evidence or "").strip())
-    if streamed_final_in_loop:
-        if has_retrieval_evidence:
-            replies = await _generate_contextual_suggested_replies(request.question, full_response, med_ctx, retrieval_evidence=chip_evidence, output_language=preferred_language)
-            if replies:
-                yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': replies})}\n\n"
-    elif forced_fallback_response:
+    if forced_fallback_response:
         full_response = localize_output(_apply_response_policy(forced_fallback_response, request.question, allow_factual_addons=has_retrieval_evidence))
         t_out = time.perf_counter()
         _first_out = True
@@ -4292,6 +4704,66 @@ async def _v2_run_rag_pipeline(
             if V2_STREAM_TOKEN_DELAY_SEC > 0:
                 await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
         final_stream_ms = _elapsed_ms(t_out)
+    elif loop_final_assistant_content:
+        # For web-fallback paths, prefer true model streaming so frontend receives
+        # gradual token updates (instead of bursty local re-chunking).
+        if used_web_fallback and preferred_language == "en":
+            t_out = time.perf_counter()
+            _first_out = True
+            streamed_raw = ""
+            async for delta in _stream_chat_completion_text(
+                client,
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=V2_FINAL_MAX_TOKENS,
+            ):
+                streamed_raw += delta
+                if _first_out:
+                    final_ttft_ms = _elapsed_ms(t_out)
+                    if user_visible_ttft_ms <= 0:
+                        user_visible_ttft_ms = _elapsed_ms(request_started_at)
+                    _first_out = False
+                yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+            full_response = _apply_response_policy(
+                streamed_raw,
+                request.question,
+                allow_factual_addons=has_retrieval_evidence,
+            )
+            if full_response.startswith(streamed_raw):
+                tail = full_response[len(streamed_raw):]
+                if tail:
+                    for token in sse_tokens_preserving_formatting(tail):
+                        if user_visible_ttft_ms <= 0:
+                            user_visible_ttft_ms = _elapsed_ms(request_started_at)
+                        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+            else:
+                full_response = streamed_raw
+            final_stream_ms = _elapsed_ms(t_out)
+        else:
+            # Optimization: avoid an extra final LLM call when the tool loop already produced
+            # an assistant answer (no further tool call needed).
+            full_response = localize_output(
+                _apply_response_policy(
+                    loop_final_assistant_content,
+                    request.question,
+                    allow_factual_addons=has_retrieval_evidence,
+                )
+            )
+            t_out = time.perf_counter()
+            _first_out = True
+            for token in sse_tokens_preserving_formatting(full_response):
+                if _first_out:
+                    final_ttft_ms = _elapsed_ms(t_out)
+                    if user_visible_ttft_ms <= 0:
+                        user_visible_ttft_ms = _elapsed_ms(request_started_at)
+                    _first_out = False
+                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+                if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                    await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+            final_stream_ms = _elapsed_ms(t_out)
     else:
         t_out = time.perf_counter()
         if preferred_language == "en":
@@ -4332,6 +4804,17 @@ async def _v2_run_rag_pipeline(
                 if V2_STREAM_TOKEN_DELAY_SEC > 0:
                     await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
             final_stream_ms = _elapsed_ms(t_out)
+
+    if has_retrieval_evidence:
+        replies = await _generate_contextual_suggested_replies(
+            request.question,
+            full_response,
+            med_ctx,
+            retrieval_evidence=chip_evidence,
+            output_language=preferred_language,
+        )
+        if replies:
+            yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': replies})}\n\n"
 
     state["used_web_fallback"] = used_web_fallback
     state["last_kb_retrieval"] = last_kb_retrieval
@@ -4575,13 +5058,19 @@ async def _v2_handle_cutoff_sql_stage(
         state["handled"] = True
         return
 
-    profile_turn = await _llm_extract_cutoff_profile_turn(
-        request.question,
-        cutoff_ctx,
-        cutoff_db_states,
-        pending_fields=missing_before_turn,
-        allowed_sub_categories=sub_category_options,
-    )
+    profile_turn: Dict[str, object] = {}
+    if explicit_shortlist_start and _is_explicit_college_shortlist_trigger(request.question):
+        # Fast path: plain "College Shortlist" starter does not carry extractable profile fields.
+        # Skip extractor LLM call to reduce first-response latency.
+        log("[V2] ⚡ Skipping cutoff extractor LLM for plain shortlist starter")
+    else:
+        profile_turn = await _llm_extract_cutoff_profile_turn(
+            request.question,
+            cutoff_ctx,
+            cutoff_db_states,
+            pending_fields=missing_before_turn,
+            allowed_sub_categories=sub_category_options,
+        )
     # Apply profile_mode from LLM extraction — trust LLM, no keyword detection
     extracted_mode = profile_turn.get("profile_mode")
     prev_mode = str(cutoff_ctx.get("profile_mode") or "self")
@@ -4833,6 +5322,42 @@ async def _v2_handle_cutoff_sql_stage(
             display_limit=cutoff_result_limit,
         )
     )
+    cutoff_explain = await _llm_explain_cutoff_results(
+        user_question=request.question,
+        metric_type=metric_type,
+        metric_value=metric_value,
+        home_state=home_state,
+        target_states=target_states,
+        category=category,
+        sub_category=sub_category,
+        rows=rows,
+    )
+    if cutoff_explain:
+        cutoff_answer = (
+            cutoff_answer
+            + "\n\n### Quick Interpretation\n\n"
+            + localize_output(cutoff_explain)
+        )
+    elif rows:
+        cutoff_answer = (
+            cutoff_answer
+            + "\n\n### Quick Interpretation\n\n"
+            + localize_output(
+                _fallback_cutoff_quick_interpretation(
+                    rows=rows,
+                    metric_type=metric_type,
+                    metric_value=metric_value,
+                    target_states=target_states,
+                )
+            )
+        )
+    cutoff_answer += (
+        "\n\n"
+        + localize_output(
+            "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
+            "Please verify final options on official MCC/state counselling portals.*"
+        )
+    )
     source = {
         "file_name": "neet_ug_2025_cutoffs",
         "document_type": "sql_cutoff_table",
@@ -5023,6 +5548,14 @@ async def chat_v2_stream(request: ChatRequest):
                 ):
                     yield event
                 if cutoff_stage_state.get("handled"):
+                    if request.user_id and conversation_id:
+                        asyncio.create_task(
+                            v2_background_generate_conversation_title(
+                                conversation_id,
+                                request.question,
+                                log_label="cutoff",
+                            )
+                        )
                     return
             
             # ========== FAQ CHECK (FAST PATH) ==========
@@ -5104,25 +5637,14 @@ async def chat_v2_stream(request: ChatRequest):
                             f"conversation_db={conv_ms:.0f} | faq_lookup={faq_ms:.0f}"
                         )
                     
-                    # Generate title AFTER done event (non-blocking for user).
-                    # Also handle conversations that started with greeting-only turns.
-                    should_generate_title = (
-                        request.user_id
-                        and conversation_id
-                        and not _is_greeting_only(request.question)
-                        and await _v2_conversation_needs_title(conversation_id)
-                    )
-                    if should_generate_title:
-                        from services.conversation_memory import generate_conversation_title, update_conversation_title
-                        try:
-                            generated_title = await generate_conversation_title(request.question)
-                            async with async_session_maker() as title_db:
-                                await update_conversation_title(title_db, conversation_id, generated_title)
-                            log(f"[V2] 🏷️ Generated title: {generated_title}")
-                            # Send title as separate event
-                            yield f"data: {json.dumps({'type': 'title', 'title': generated_title, 'conversation_id': conversation_id})}\n\n"
-                        except Exception as title_err:
-                            log(f"[V2] ⚠️ Title generation error: {title_err}")
+                    if request.user_id and conversation_id:
+                        asyncio.create_task(
+                            v2_background_generate_conversation_title(
+                                conversation_id,
+                                request.question,
+                                log_label="faq",
+                            )
+                        )
                     
                     return
                 else:
@@ -5186,6 +5708,19 @@ async def chat_v2_stream(request: ChatRequest):
             
             # Add current question
             messages.append({"role": "user", "content": request.question})
+            # Turn-level tool-scope guard (instruction-only, no backend hard filtering):
+            # prioritize current message scope over older entities unless user explicitly asks comparison/list.
+            messages.append({
+                "role": "system",
+                "content": (
+                    "TURN-SPECIFIC RETRIEVAL POLICY (highest priority for this turn):\n"
+                    "- Scope retrieval to the LATEST user message.\n"
+                    "- If latest message implies a single target entity/college, do not issue retrieval calls for previously discussed entities.\n"
+                    "- Only retrieve multiple entities when the latest message explicitly asks comparison, versus, list, or multi-target output.\n"
+                    "- You may infer missing topic words from immediate context (e.g., fee structure), "
+                    "but must keep entity scope anchored to the latest message."
+                )
+            })
 
             log(f"[V2] 🤖 Calling LLM with {len(messages)} messages...")
 
@@ -5258,21 +5793,14 @@ async def chat_v2_stream(request: ChatRequest):
                         )
                     )
                     asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
-                should_generate_title = (
-                    request.user_id
-                    and conversation_id
-                    and not _is_greeting_only(request.question)
-                    and await _v2_conversation_needs_title(conversation_id)
-                )
-                if should_generate_title:
-                    from services.conversation_memory import generate_conversation_title, update_conversation_title
-                    try:
-                        generated_title = await generate_conversation_title(request.question)
-                        async with async_session_maker() as title_db:
-                            await update_conversation_title(title_db, conversation_id, generated_title)
-                        yield f"data: {json.dumps({'type': 'title', 'title': generated_title, 'conversation_id': conversation_id})}\n\n"
-                    except Exception as title_err:
-                        log(f"[V2] ⚠️ Title generation error (clarification-first): {title_err}")
+                if request.user_id and conversation_id:
+                    asyncio.create_task(
+                        v2_background_generate_conversation_title(
+                            conversation_id,
+                            request.question,
+                            log_label="clarification-first",
+                        )
+                    )
                 return
             
             rag_state: Dict[str, object] = {}
@@ -5357,25 +5885,14 @@ async def chat_v2_stream(request: ChatRequest):
                 )
             log(f"{'='*60}")
             
-            # Generate title AFTER done event (non-blocking for user).
-            # Also handle conversations that started with greeting-only turns.
-            should_generate_title = (
-                request.user_id
-                and conversation_id
-                and not _is_greeting_only(request.question)
-                and await _v2_conversation_needs_title(conversation_id)
-            )
-            if should_generate_title:
-                from services.conversation_memory import generate_conversation_title, update_conversation_title
-                try:
-                    generated_title = await generate_conversation_title(request.question)
-                    async with async_session_maker() as title_db:
-                        await update_conversation_title(title_db, conversation_id, generated_title)
-                    log(f"[V2] 🏷️ Generated title: {generated_title}")
-                    # Send title as separate event
-                    yield f"data: {json.dumps({'type': 'title', 'title': generated_title, 'conversation_id': conversation_id})}\n\n"
-                except Exception as title_err:
-                    log(f"[V2] ⚠️ Title generation error: {title_err}")
+            if request.user_id and conversation_id:
+                asyncio.create_task(
+                    v2_background_generate_conversation_title(
+                        conversation_id,
+                        request.question,
+                        log_label="rag",
+                    )
+                )
             
         except Exception as e:
             import traceback

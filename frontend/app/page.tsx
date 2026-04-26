@@ -532,7 +532,7 @@ export default function Home() {
       const intent = resolveGuidedIntent(quickReply);
       if (intent) {
         if (intent === 'college_shortlist') {
-          // Send directly to backend so cutoff profile form appears immediately.
+          // Let backend decide based on stored cutoff_profile/preferences_set.
           setGuidedIntent(null);
         } else {
         const guideMessage = t.guidedPrompts[intent];
@@ -680,6 +680,12 @@ export default function Home() {
           if (newConversationId && newConversationId !== conversationId) {
             setConversationId(newConversationId);
           }
+          // Always refresh sidebar once immediately and once shortly after done.
+          // This catches async background title updates without blocking typing.
+          setSidebarKey((prev) => prev + 1);
+          window.setTimeout(() => {
+            setSidebarKey((prev) => prev + 1);
+          }, 1200);
           setMessages((prev) => 
             prev.map((msg) => 
               msg.id === assistantMessageId 

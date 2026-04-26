@@ -53,7 +53,8 @@ type ParsedCutoffTable = {
     score: string;
     round: string;
   }>;
-  contentWithoutTable: string;
+  contentBeforeTable: string;
+  contentAfterTable: string;
 };
 
 function parseCutoffTable(content: string): ParsedCutoffTable | null {
@@ -61,6 +62,7 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
   if (start < 0) return null;
 
   let end = content.length;
+  const quickInterpretationIdx = content.indexOf('\n### Quick Interpretation', start);
   const disclaimerIdxFromNote = content.indexOf('\n> *Note', start);
   const disclaimerIdxLegacy = content.indexOf('\n> Disclaimer', start);
   const disclaimerIdx =
@@ -68,6 +70,7 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
       ? Math.min(disclaimerIdxFromNote, disclaimerIdxLegacy)
       : Math.max(disclaimerIdxFromNote, disclaimerIdxLegacy);
   const ctaIdx = content.indexOf('\nWould you like', start);
+  if (quickInterpretationIdx >= 0) end = Math.min(end, quickInterpretationIdx);
   if (disclaimerIdx >= 0) end = Math.min(end, disclaimerIdx);
   if (ctaIdx >= 0) end = Math.min(end, ctaIdx);
 
@@ -103,8 +106,9 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
   }
 
   if (rows.length === 0) return null;
-  const contentWithoutTable = `${content.slice(0, start)}${content.slice(end)}`.trim();
-  return { rows, contentWithoutTable };
+  const contentBeforeTable = content.slice(0, start).trim();
+  const contentAfterTable = content.slice(end).trim();
+  return { rows, contentBeforeTable, contentAfterTable };
 }
 
 function isLikelyRefusalOrNoInfo(content: string): boolean {
@@ -165,8 +169,10 @@ export default function MessageBubble({
       ? `NEET बुलेटिनमधील ${message.sources?.length || 0} संदर्भ पहा`
       : `View ${message.sources?.length || 0} Reference(s) from NEET Bulletin`;
   const parsedCutoffTable = parseCutoffTable(message.content || '');
-  const contentForMarkdown = parsedCutoffTable ? parsedCutoffTable.contentWithoutTable : (message.content || '');
-  const normalizedContent = normalizeMarkdownForRender(contentForMarkdown);
+  const contentBeforeTable = parsedCutoffTable ? parsedCutoffTable.contentBeforeTable : (message.content || '');
+  const contentAfterTable = parsedCutoffTable ? parsedCutoffTable.contentAfterTable : '';
+  const normalizedContent = normalizeMarkdownForRender(contentBeforeTable);
+  const normalizedAfterContent = normalizeMarkdownForRender(contentAfterTable);
   const containsTable = hasMarkdownTable(normalizedContent);
   const isExternalAnswer = message.sourceOrigin === 'web' || hasExternalWebSource(message.sources);
   const isOfficialAnswer = message.sourceOrigin === 'kb' || ((message.sources?.length || 0) > 0 && !isExternalAnswer);
@@ -179,6 +185,22 @@ export default function MessageBubble({
     !isLikelyRefusalOrNoInfo(message.content) &&
     (isExternalAnswer || isOfficialAnswer);
   const hasCutoffProfileForm = !isUser && !!message.cutoffProfileForm;
+  const groupedCutoffRows = parsedCutoffTable
+    ? parsedCutoffTable.rows.reduce<Record<string, ParsedCutoffTable['rows']>>((acc, row) => {
+        const key = row.state || 'Unknown';
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(row);
+        return acc;
+      }, {})
+    : {};
+  const cutoffStates = Object.keys(groupedCutoffRows);
+  const isMultiStateCutoffTable = cutoffStates.length > 1;
+  const tableHeadersWithoutState =
+    language === 'hi'
+      ? ['संस्थान', 'श्रेणी', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
+      : language === 'mr'
+      ? ['संस्था', 'प्रवर्ग', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
+      : ['Institution Name', 'Category', 'Quota', 'Domicile', 'AIR', 'Score', 'Round'];
   const stateOptions = (message.cutoffProfileForm?.states || []).filter(
     (st) => String(st).toUpperCase() !== 'MCC'
   );
@@ -328,7 +350,7 @@ export default function MessageBubble({
                 {normalizedContent}
               </ReactMarkdown>
 
-              {parsedCutoffTable && (
+              {parsedCutoffTable && !isMultiStateCutoffTable && (
                 <div className="my-4 overflow-x-auto rounded-xl border border-slate-600 bg-slate-900/80">
                   <table className="min-w-full border-collapse text-sm">
                     <thead className="bg-slate-800">
@@ -356,6 +378,63 @@ export default function MessageBubble({
                     </tbody>
                   </table>
                 </div>
+              )}
+
+              {parsedCutoffTable && isMultiStateCutoffTable && (
+                <div className="my-4 space-y-4">
+                  {cutoffStates.map((stateName) => {
+                    const stateRows = groupedCutoffRows[stateName] || [];
+                    return (
+                      <div key={stateName} className="rounded-xl border border-slate-600 bg-slate-900/80 overflow-x-auto">
+                        <div className="px-3 py-2 bg-slate-800/90 border-b border-slate-600">
+                          <span className="inline-flex items-center rounded-full bg-blue-600/20 text-blue-300 border border-blue-500/40 px-2.5 py-1 text-xs font-semibold">
+                            {stateName}
+                          </span>
+                        </div>
+                        <table className="min-w-full border-collapse text-sm">
+                          <thead className="bg-slate-800">
+                            <tr className="border-b border-slate-600">
+                              {tableHeadersWithoutState.map((h) => (
+                                <th key={`${stateName}-${h}`} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {stateRows.map((row) => (
+                              <tr key={`${stateName}-${row.idx}-${row.institution}`} className="border-b border-slate-700">
+                                <td className="px-3 py-2 text-slate-100 font-medium">{row.institution}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.category}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.quota}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.domicile}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.air}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.score}</td>
+                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.round}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {parsedCutoffTable && normalizedAfterContent && (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkBreaks]}
+                  urlTransform={(url) => url}
+                  components={{
+                    blockquote: ({ children }) => (
+                      <blockquote className="border-l-4 border-slate-300 dark:border-slate-600 pl-4 my-3 italic text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
+                        {children}
+                      </blockquote>
+                    ),
+                  }}
+                >
+                  {normalizedAfterContent}
+                </ReactMarkdown>
               )}
             </div>
           )}

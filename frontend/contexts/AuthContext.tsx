@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { User, AuthResponse } from '@/types';
 import * as authApi from '@/services/authApi';
 
@@ -11,7 +11,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: (phone: string, verificationToken: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
-  logout: () => void;
+  logout: (reason?: 'manual' | 'inactive') => void;
   sendOtp: (phone: string, purpose?: 'registration' | 'login' | 'password_reset') => Promise<{ success: boolean; message: string; otp?: string }>;
   verifyOtp: (phone: string, otp: string, purpose?: 'registration' | 'login' | 'password_reset') => Promise<{ success: boolean; message: string; verification_token?: string }>;
 }
@@ -29,11 +29,14 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const TOKEN_KEY = 'auth_tokens';
 const USER_KEY = 'auth_user';
+const LOGOUT_NOTICE_KEY = 'auth_logout_notice';
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load user from localStorage on mount
   useEffect(() => {
@@ -114,7 +117,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(response.access_token);
   };
 
-  const logout = () => {
+  const logout = (reason: 'manual' | 'inactive' = 'manual') => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = null;
+    }
     // Call logout API (optional, since JWT is stateless)
     const tokens = localStorage.getItem(TOKEN_KEY);
     if (tokens) {
@@ -125,9 +132,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear storage
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    if (reason === 'inactive') {
+      localStorage.setItem(LOGOUT_NOTICE_KEY, 'You were logged out due to 10 minutes of inactivity.');
+    } else {
+      localStorage.removeItem(LOGOUT_NOTICE_KEY);
+    }
     setUser(null);
     setToken(null);
   };
+
+  useEffect(() => {
+    if (isLoading || !user || !token) {
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+        inactivityTimerRef.current = null;
+      }
+      return;
+    }
+
+    const resetInactivityTimer = () => {
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+      }
+      inactivityTimerRef.current = setTimeout(() => {
+        logout('inactive');
+      }, INACTIVITY_TIMEOUT_MS);
+    };
+
+    // Start timer immediately after auth is active.
+    resetInactivityTimer();
+
+    const events: Array<keyof WindowEventMap> = [
+      'mousedown',
+      'keydown',
+      'scroll',
+      'touchstart',
+      'click',
+    ];
+    for (const eventName of events) {
+      window.addEventListener(eventName, resetInactivityTimer, { passive: true });
+    }
+
+    return () => {
+      for (const eventName of events) {
+        window.removeEventListener(eventName, resetInactivityTimer);
+      }
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+        inactivityTimerRef.current = null;
+      }
+    };
+  }, [isLoading, user, token]);
 
   const sendOtp = async (phone: string, purpose: 'registration' | 'login' | 'password_reset' = 'registration') => {
     return await authApi.sendOtp(phone, purpose);

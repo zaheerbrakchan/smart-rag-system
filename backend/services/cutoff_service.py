@@ -370,7 +370,10 @@ def format_cutoff_markdown(
         lines.append(
             "| {idx} | {inst} | {state} | {cat} | {quota} | {dom} | {air} | {score} | {round_} |".format(
                 idx=idx,
-                inst=(row.get("institution_name") or row.get("college_name") or "-").replace("|", " "),
+                inst=(
+                    f"{(row.get('institution_name') or row.get('college_name') or '-').replace('|', ' ')} "
+                    f"({str(row.get('course') or '-').replace('|', ' ')})"
+                ),
                 state=row.get("state") or "-",
                 cat=row.get("category") or "-",
                 quota=row.get("quota") or "-",
@@ -381,13 +384,4 @@ def format_cutoff_markdown(
             )
         )
 
-    lines.extend(
-        [
-            "",
-            "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
-            "Please verify final options on official MCC/state counselling portals.*",
-            "",
-            "Would you like me to refine this further by college type, course, quota, or a specific state?",
-        ]
-    )
     return "\n".join(lines)

@@ -31,13 +31,19 @@ export default function ChatSidebar({
   onToggleCollapse,
   language,
 }: ChatSidebarProps) {
+  const PAGE_SIZE = 20;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [totalConversations, setTotalConversations] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const listContainerRef = useRef<HTMLDivElement>(null);
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -56,19 +62,52 @@ export default function ChatSidebar({
   // Fetch conversations on mount and when token changes
   useEffect(() => {
     if (token) {
-      fetchConversations();
+      fetchConversations(1, false);
     }
   }, [token]);
 
-  const fetchConversations = async () => {
+  const fetchConversations = async (page: number, append: boolean) => {
     try {
-      setIsLoading(true);
-      const response = await getConversations(token, 1, 50);
-      setConversations(response.conversations);
+      if (append) {
+        setIsLoadingMore(true);
+      } else {
+        setIsLoading(true);
+      }
+      const response = await getConversations(token, page, PAGE_SIZE);
+      setTotalConversations(response.total || 0);
+      setCurrentPage(response.page || page);
+      setHasMore((response.page || page) * (response.page_size || PAGE_SIZE) < (response.total || 0));
+      setConversations((prev) => {
+        if (!append) return response.conversations;
+        const seen = new Set(prev.map((c) => c.id));
+        const merged = [...prev];
+        for (const conv of response.conversations) {
+          if (!seen.has(conv.id)) merged.push(conv);
+        }
+        return merged;
+      });
     } catch (error) {
       console.error('Failed to fetch conversations:', error);
     } finally {
-      setIsLoading(false);
+      if (append) {
+        setIsLoadingMore(false);
+      } else {
+        setIsLoading(false);
+      }
+    }
+  };
+
+  const handleLoadMore = async () => {
+    if (isLoadingMore || isLoading || !hasMore) return;
+    await fetchConversations(currentPage + 1, true);
+  };
+
+  const handleListScroll = () => {
+    const node = listContainerRef.current;
+    if (!node || isLoadingMore || isLoading || !hasMore) return;
+    const nearBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 120;
+    if (nearBottom) {
+      void handleLoadMore();
     }
   };
 
@@ -181,10 +220,10 @@ export default function ChatSidebar({
   // Collapsed state - just show toggle button
   if (isCollapsed) {
     return (
-      <div className="w-14 bg-slate-900 border-r border-slate-700/50 flex flex-col items-center py-4 gap-3">
+      <div className="w-14 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col items-center py-4 gap-3">
         <button
           onClick={onToggleCollapse}
-          className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all"
+          className="p-2.5 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all"
           title={i18n.expandSidebar}
         >
           <ChevronRight size={20} />
@@ -201,9 +240,9 @@ export default function ChatSidebar({
   }
 
   return (
-    <div className="w-72 bg-slate-900 border-r border-slate-700/50 flex flex-col h-full">
+    <div className="w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full">
       {/* Header */}
-      <div className="p-4 border-b border-slate-700/50">
+      <div className="p-4 border-b border-slate-200 dark:border-slate-700/50">
         <div className="flex items-center gap-2">
           <button
             onClick={onNewChat}
@@ -214,7 +253,7 @@ export default function ChatSidebar({
           </button>
           <button
             onClick={onToggleCollapse}
-            className="p-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors"
+            className="p-3 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
             title={i18n.collapseSidebar}
           >
             <ChevronLeft size={18} />
@@ -223,18 +262,22 @@ export default function ChatSidebar({
       </div>
 
       {/* Conversation List */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+      <div
+        ref={listContainerRef}
+        onScroll={handleListScroll}
+        className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
+      >
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
           </div>
         ) : conversations.length === 0 ? (
           <div className="text-center py-12 px-6">
-            <div className="w-16 h-16 bg-slate-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <MessageSquare className="w-8 h-8 text-slate-500" />
+            <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <MessageSquare className="w-8 h-8 text-slate-500 dark:text-slate-500" />
             </div>
-            <p className="text-slate-400 text-sm font-medium">{i18n.noConversations}</p>
-            <p className="text-slate-600 text-xs mt-1">{i18n.clickNewChat}</p>
+            <p className="text-slate-600 dark:text-slate-400 text-sm font-medium">{i18n.noConversations}</p>
+            <p className="text-slate-500 dark:text-slate-600 text-xs mt-1">{i18n.clickNewChat}</p>
           </div>
         ) : (
           <div className="py-2 space-y-1">
@@ -244,7 +287,7 @@ export default function ChatSidebar({
                 className={`group relative mx-2 rounded-lg transition-all ${
                   currentConversationId === conv.id
                     ? 'bg-gradient-to-r from-blue-600/20 to-indigo-600/20 border border-blue-500/30'
-                    : 'hover:bg-slate-800/80'
+                    : 'hover:bg-slate-100 dark:hover:bg-slate-800/80'
                 }`}
               >
                 {editingId === conv.id ? (
@@ -253,7 +296,7 @@ export default function ChatSidebar({
                       type="text"
                       value={editTitle}
                       onChange={(e) => setEditTitle(e.target.value)}
-                      className="flex-1 bg-slate-700 text-white text-sm px-3 py-2 rounded-lg border border-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      className="flex-1 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') handleSaveEdit(conv.id);
@@ -281,20 +324,20 @@ export default function ChatSidebar({
                     <div className={`p-2 rounded-lg ${
                       currentConversationId === conv.id 
                         ? 'bg-blue-600 text-white' 
-                        : 'bg-slate-700 text-slate-400 group-hover:bg-slate-600 group-hover:text-slate-300'
+                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 group-hover:bg-slate-200 dark:group-hover:bg-slate-600 group-hover:text-slate-700 dark:group-hover:text-slate-300'
                     }`}>
                       <MessageSquare size={16} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className={`text-sm font-medium truncate ${
-                        currentConversationId === conv.id ? 'text-white' : 'text-slate-200'
+                        currentConversationId === conv.id ? 'text-white' : 'text-slate-700 dark:text-slate-200'
                       }`}>
                         {getTitle(conv)}
                       </p>
-                      <p className="text-xs text-slate-500 flex items-center gap-1.5 mt-0.5">
+                      <p className="text-xs text-slate-500 dark:text-slate-500 flex items-center gap-1.5 mt-0.5">
                         <Clock size={10} />
                         {formatDate(conv.updated_at)}
-                        <span className="text-slate-600">•</span>
+                        <span className="text-slate-400 dark:text-slate-600">•</span>
                         {conv.message_count} {i18n.msgs}
                       </p>
                     </div>
@@ -311,8 +354,8 @@ export default function ChatSidebar({
                         }}
                         className={`p-1.5 rounded-lg transition-colors ${
                           menuOpenId === conv.id 
-                            ? 'bg-slate-600 text-white' 
-                            : 'text-slate-400 hover:text-white hover:bg-slate-600'
+                            ? 'bg-slate-200 dark:bg-slate-600 text-slate-900 dark:text-white' 
+                            : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-600'
                         }`}
                       >
                         <MoreHorizontal size={16} />
@@ -320,15 +363,15 @@ export default function ChatSidebar({
                       
                       {/* Dropdown Menu */}
                       {menuOpenId === conv.id && (
-                        <div className="absolute right-0 top-full mt-1 bg-slate-800 border border-slate-600 rounded-xl shadow-xl py-1.5 z-50 min-w-[140px] overflow-hidden">
+                        <div className="absolute right-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-xl py-1.5 z-50 min-w-[140px] overflow-hidden">
                           <button
                             onClick={(e) => handleStartEdit(conv, e)}
-                            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-200 hover:bg-slate-700 hover:text-white transition-colors"
+                            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white transition-colors"
                           >
                             <Edit2 size={14} className="text-blue-400" />
                             {i18n.rename}
                           </button>
-                          <div className="h-px bg-slate-700 mx-2 my-1" />
+                          <div className="h-px bg-slate-200 dark:bg-slate-700 mx-2 my-1" />
                           <button
                             onClick={(e) => handleDelete(conv.id, e)}
                             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-400 hover:bg-red-900/30 hover:text-red-300 transition-colors"
@@ -343,15 +386,30 @@ export default function ChatSidebar({
                 )}
               </div>
             ))}
+            {hasMore && (
+              <div className="px-3 pt-2 pb-3">
+                <button
+                  onClick={() => void handleLoadMore()}
+                  disabled={isLoadingMore}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-800/70 text-slate-700 dark:text-slate-200 text-xs py-2 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-60"
+                >
+                  {isLoadingMore ? 'Loading more...' : 'Load more'}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* Footer */}
-      <div className="p-4 border-t border-slate-700/50">
-        <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>{conversations.length} {conversations.length !== 1 ? i18n.chatsPlural : i18n.chats}</span>
-          <span className="text-slate-600">NEET UG 2026</span>
+      <div className="p-4 border-t border-slate-200 dark:border-slate-700/50">
+        <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-500">
+          <span>
+            {conversations.length}
+            {totalConversations > conversations.length ? `/${totalConversations}` : ''}{' '}
+            {totalConversations !== 1 ? i18n.chatsPlural : i18n.chats}
+          </span>
+          <span className="text-slate-500 dark:text-slate-600">NEET UG 2026</span>
         </div>
       </div>
 
@@ -364,23 +422,23 @@ export default function ChatSidebar({
             onClick={cancelDelete}
           />
           {/* Modal */}
-          <div className="relative bg-slate-800 border border-slate-600 rounded-2xl shadow-2xl p-6 max-w-sm mx-4 animate-in fade-in zoom-in-95 duration-200">
+          <div className="relative bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-2xl shadow-2xl p-6 max-w-sm mx-4 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center gap-4 mb-4">
               <div className="p-3 bg-red-500/20 rounded-xl">
                 <Trash2 className="w-6 h-6 text-red-400" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold text-white">{i18n.deleteConversation}</h3>
-                <p className="text-sm text-slate-400">{i18n.cannotUndo}</p>
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">{i18n.deleteConversation}</h3>
+                <p className="text-sm text-slate-600 dark:text-slate-400">{i18n.cannotUndo}</p>
               </div>
             </div>
-            <p className="text-slate-300 text-sm mb-6">
+            <p className="text-slate-700 dark:text-slate-300 text-sm mb-6">
               {i18n.deleteConfirmBody}
             </p>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={cancelDelete}
-                className="px-4 py-2.5 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-xl transition-colors"
+                className="px-4 py-2.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 rounded-xl transition-colors"
               >
                 {i18n.cancel}
               </button>
