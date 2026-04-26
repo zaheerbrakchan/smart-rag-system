@@ -18,6 +18,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.postgres import PGVectorStore
 
 logger = logging.getLogger(__name__)
+TOOL_CHUNK_DEBUG_LOG = os.getenv("TOOL_CHUNK_DEBUG_LOG", "true").lower() in ("1", "true", "yes")
 
 def log(msg: str):
     """Simple logging helper."""
@@ -242,6 +243,19 @@ def _search_knowledge_base_single_state(
                 page_label=metadata.get("page_label"),
             )
         )
+
+    # Optional chunk-level debug visibility for hallucination/root-cause analysis.
+    if TOOL_CHUNK_DEBUG_LOG and results:
+        for i, r in enumerate(results[:5], 1):
+            snippet = (r.text or "").replace("\n", " ").strip()
+            if len(snippet) > 260:
+                snippet = snippet[:260] + "..."
+            log(
+                f"[TOOL][CHUNK] #{i} score={r.score:.3f} "
+                f"state={r.state or 'N/A'} type={r.document_type or 'N/A'} "
+                f"source={r.file_name or 'N/A'} page={r.page_label or 'N/A'}"
+            )
+            log(f"[TOOL][CHUNK] #{i} text={snippet}")
 
     return SearchResponse(
         results=results,
