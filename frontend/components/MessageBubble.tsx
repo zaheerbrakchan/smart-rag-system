@@ -10,7 +10,7 @@ function topicLabel(code: string | null | undefined): string {
   if (!code) return '';
   return code.replace(/_/g, ' ');
 }
-import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, CheckCircle2, BookOpen } from 'lucide-react';
+import { User, GraduationCap, ChevronDown, ChevronUp, FileText, AlertCircle, CheckCircle2, BookOpen, Search } from 'lucide-react';
 import { getCutoffProfileOptions } from '@/services/api';
 
 interface MessageBubbleProps {
@@ -61,8 +61,21 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
   const start = content.indexOf('| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |');
   if (start < 0) return null;
 
-  let end = content.length;
-  const quickInterpretationIdx = content.indexOf('\n### Quick Interpretation', start);
+  // Find true markdown-table boundary first so any in-between loader/progress text
+  // (between table and "Quick Interpretation") is preserved in contentAfterTable.
+  const tail = content.slice(start);
+  const tailLines = tail.split('\n');
+  let tableCharLen = 0;
+  for (const line of tailLines) {
+    const trimmed = line.trim();
+    const isTableLine = trimmed.length > 0 && trimmed.startsWith('|') && trimmed.endsWith('|');
+    if (!isTableLine) break;
+    tableCharLen += line.length + 1; // include newline
+  }
+
+  let end = start + tableCharLen;
+  if (end <= start) end = content.length;
+
   const disclaimerIdxFromNote = content.indexOf('\n> *Note', start);
   const disclaimerIdxLegacy = content.indexOf('\n> Disclaimer', start);
   const disclaimerIdx =
@@ -70,7 +83,8 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
       ? Math.min(disclaimerIdxFromNote, disclaimerIdxLegacy)
       : Math.max(disclaimerIdxFromNote, disclaimerIdxLegacy);
   const ctaIdx = content.indexOf('\nWould you like', start);
-  if (quickInterpretationIdx >= 0) end = Math.min(end, quickInterpretationIdx);
+  // Keep only hard stop guards that should end table parsing if they somehow appear
+  // before computed table end.
   if (disclaimerIdx >= 0) end = Math.min(end, disclaimerIdx);
   if (ctaIdx >= 0) end = Math.min(end, ctaIdx);
 
@@ -418,6 +432,19 @@ export default function MessageBubble({
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {parsedCutoffTable && message.cutoffInterpretationLoading && (
+                <div className="my-3 flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
+                  <Search className="w-4 h-4 text-blue-500 dark:text-blue-400 animate-pulse" />
+                  <span>Generating quick interpretation...</span>
+                  <div className="flex gap-1">
+                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
+                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
+                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
+                  </div>
+                  <span>Thinking...</span>
                 </div>
               )}
 

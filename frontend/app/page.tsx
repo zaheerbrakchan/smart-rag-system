@@ -636,7 +636,7 @@ export default function Home() {
           setMessages((prev) => 
             prev.map((msg) => 
               msg.id === assistantMessageId 
-                ? { ...msg, content: msg.content + token }
+                ? { ...msg, cutoffInterpretationLoading: false, content: msg.content + token }
                 : msg
             )
           );
@@ -660,9 +660,11 @@ export default function Home() {
         (meta) => {
           const refsEnabled = meta?.chat_references_enabled;
           const origin = meta?.source_origin;
+          const cutoffInterpretationLoading = meta?.cutoff_interpretation_loading;
           const hasOrigin = origin === 'web' || origin === 'kb' || origin === 'none';
           const hasRefsFlag = typeof refsEnabled === 'boolean';
-          if (!hasOrigin && !hasRefsFlag) return;
+          const hasCutoffLoadingFlag = typeof cutoffInterpretationLoading === 'boolean';
+          if (!hasOrigin && !hasRefsFlag && !hasCutoffLoadingFlag) return;
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId
@@ -670,6 +672,7 @@ export default function Home() {
                     ...msg,
                     ...(hasOrigin ? { sourceOrigin: origin } : {}),
                     ...(hasRefsFlag ? { referencesEnabled: refsEnabled } : {}),
+                    ...(hasCutoffLoadingFlag ? { cutoffInterpretationLoading } : {}),
                   }
                 : msg
             )
