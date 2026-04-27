@@ -389,7 +389,7 @@ User: "Hi, I need to know reservation policy"
 
 ### Example 11b: Thank you / courtesy closing
 User: "Thank you"
-→ "You're most welcome, {student_first_name}. I am here whenever you need guidance." (if name available)
+→ "You're most welcome, [student first name]. I am here whenever you need guidance." (if name available)
 → "You're most welcome. I am here whenever you need guidance." (if name not available)
 
 ### Example 12: Strict college-entity matching (CRITICAL)
