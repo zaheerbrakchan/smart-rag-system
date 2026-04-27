@@ -962,6 +962,9 @@ Critical continuation rule:
   (state name, category, rank/score value, yes/no, refinement detail), keep routing to SQL cutoff.
 - If current message itself asks counselling process/details (not prediction), route away from SQL cutoff even if previous turn was cutoff.
 - Only continue SQL cutoff when the follow-up is clearly profile/refinement data for prediction.
+- If user asks a different intent like hostel details, infrastructure, fee details, admission documents/process,
+  placements, bonds, stipend, facilities, or comparison not tied to cutoff chances/rank prediction, route FALSE (RAG),
+  even if previous turns were cutoff.
 
 Respond ONLY JSON:
 {{
@@ -1682,6 +1685,19 @@ async def _generate_contextual_suggested_replies(
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         topic = str((med_ctx or {}).get("last_topic") or "")
+        is_cutoff_context = (
+            "cutoff" in _normalize_text(topic)
+            or "best-match colleges" in response_norm
+            or "quick interpretation" in response_norm
+            or "cutoff data" in response_norm
+        )
+        cutoff_chip_rules = (
+            "CUTOFF-CONTEXT RULES (strict):\n"
+            "- This turn is cutoff/shortlist context. Chips MUST stay cutoff-focused only.\n"
+            "- Allowed chip intents: refine state, course, quota, domicile/category/sub-category, round/range comparisons, or nearby cutoff checks.\n"
+            "- Do NOT generate hostel, infrastructure, fee breakdown, documents, admission process, placement, bonds, stipend, or other non-cutoff intents.\n"
+            "- If no strong cutoff refinement chip is possible, return {\"replies\": []}.\n"
+        ) if is_cutoff_context else ""
         user_payload: Dict[str, object] = {
             "current_user_question": question_text,
             "assistant_response": response_text[:2000],
@@ -1722,7 +1738,10 @@ async def _generate_contextual_suggested_replies(
                         "'How does GMC Kathua fee compare with other government colleges in J&K?'\n\n"
                         "## RULES\n"
                         "- Return 0 to 3 chips only - one per pattern above.\n"
-                        "- Each chip must be a short natural question the user might actually send next.\n"
+                        "- Each chip must be a short natural next action the user might click/send next.\n"
+                        "- Prefer imperative/action style over assistant-offer style.\n"
+                        "- Do not start chips with phrases like 'Should I', 'Would you like', 'Want to', or 'Shall I'.\n"
+                        "- Keep chips direct, like: 'Check cutoff for Gonda', 'Show UP government MBBS only', 'Compare with Lucknow colleges'.\n"
                         "- Always ground chips in the EXACT college/entity/topic from the bot's last answer.\n"
                         "- Never generate generic chips like 'What is the total fee?' without naming the college.\n"
                         "- Never repeat the same information the bot already answered.\n"
@@ -1733,6 +1752,7 @@ async def _generate_contextual_suggested_replies(
                         + "- Do not include 'Thanks' or acknowledgement chips.\n"
                         "- Do not repeat the same meaning across chips.\n"
                         + grounding_rules
+                        + cutoff_chip_rules
                     ),
                 },
                 {
@@ -4903,9 +4923,8 @@ async def _v2_route_cutoff_stage(
         explicit_shortlist_start = True
         log("[V2] 🧭 Explicit college shortlist trigger detected; forcing cutoff SQL profile flow")
     elif _should_continue_cutoff_from_context(question, cutoff_ctx_peek):
-        cutoff_triggered = True
         continuing_cutoff_flow = True
-        log("[V2] 🧭 Continuing cutoff refinement flow from conversation context")
+        log("[V2] 🧭 Cutoff context detected; confirming route via LLM classifier")
 
     if cutoff_triggered:
         llm_route_decision = True
@@ -4945,6 +4964,35 @@ async def _v2_handle_cutoff_sql_stage(
     )
 
     state["handled"] = False
+    t_cutoff_total = time.perf_counter()
+    extractor_ms = 0.0
+    refinement_ms = 0.0
+    sql_ms = 0.0
+    explain_ms = 0.0
+    chips_ms = 0.0
+    stream_ms = 0.0
+    first_token_ms = 0.0
+    cutoff_path = "unknown"
+
+    def _mark_first_token() -> None:
+        nonlocal first_token_ms
+        if first_token_ms <= 0:
+            first_token_ms = _elapsed_ms(t_cutoff_total)
+
+    def _log_cutoff_timing(path_label: str) -> None:
+        log(
+            "[V2][CUTOFF_TIMING] "
+            f"path={path_label} "
+            f"extractor={extractor_ms:.0f}ms "
+            f"refinement={refinement_ms:.0f}ms "
+            f"sql={sql_ms:.0f}ms "
+            f"explain={explain_ms:.0f}ms "
+            f"chips={chips_ms:.0f}ms "
+            f"first_token={first_token_ms:.0f}ms "
+            f"stream={stream_ms:.0f}ms "
+            f"total={_elapsed_ms(t_cutoff_total):.0f}ms"
+        )
+
     log("[V2] 🎯 Routing to CUTOFF SQL path")
     cutoff_db_states = await _get_cutoff_db_states_cached()
 
@@ -5012,6 +5060,7 @@ async def _v2_handle_cutoff_sql_stage(
     missing_before_turn = _missing_cutoff_fields(cutoff_ctx)
 
     if cutoff_ctx.get("awaiting_refinement_choice") and _is_affirmative_reply(request.question):
+        cutoff_path = "refinement_prompt"
         # Build dynamic prompt showing active filters
         active_filters = []
         if cutoff_ctx.get("college_type_filter"):
@@ -5040,10 +5089,13 @@ async def _v2_handle_cutoff_sql_stage(
         cutoff_ctx["awaiting_refinement_choice"] = False
         cutoff_ctx["awaiting_refinement_details"] = True
         med_ctx["cutoff"] = cutoff_ctx
+        t_stream = time.perf_counter()
         for token in sse_tokens_preserving_formatting(followup):
+            _mark_first_token()
             yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
             if V2_STREAM_TOKEN_DELAY_SEC > 0:
                 await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+        stream_ms += _elapsed_ms(t_stream)
         yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
         if request.user_id and conversation_id:
             asyncio.create_task(
@@ -5055,6 +5107,7 @@ async def _v2_handle_cutoff_sql_stage(
                 )
             )
             asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+        _log_cutoff_timing(cutoff_path)
         state["handled"] = True
         return
 
@@ -5064,6 +5117,7 @@ async def _v2_handle_cutoff_sql_stage(
         # Skip extractor LLM call to reduce first-response latency.
         log("[V2] ⚡ Skipping cutoff extractor LLM for plain shortlist starter")
     else:
+        t_extract = time.perf_counter()
         profile_turn = await _llm_extract_cutoff_profile_turn(
             request.question,
             cutoff_ctx,
@@ -5071,6 +5125,7 @@ async def _v2_handle_cutoff_sql_stage(
             pending_fields=missing_before_turn,
             allowed_sub_categories=sub_category_options,
         )
+        extractor_ms += _elapsed_ms(t_extract)
     # Apply profile_mode from LLM extraction — trust LLM, no keyword detection
     extracted_mode = profile_turn.get("profile_mode")
     prev_mode = str(cutoff_ctx.get("profile_mode") or "self")
@@ -5153,6 +5208,7 @@ async def _v2_handle_cutoff_sql_stage(
 
     refinement_plan = {"apply": False}
     if should_run_refinement_llm:
+        t_refine = time.perf_counter()
         refinement_plan = await _llm_interpret_cutoff_refinement(
             request.question,
             cutoff_ctx,
@@ -5163,6 +5219,7 @@ async def _v2_handle_cutoff_sql_stage(
                 "category_detected": bool(profile_turn.get("signals", {}).get("category_detected", False)),
             },
         )
+        refinement_ms += _elapsed_ms(t_refine)
 
     if refinement_plan.get("apply"):
         planned_states = list(refinement_plan.get("target_states") or [])
@@ -5214,6 +5271,7 @@ async def _v2_handle_cutoff_sql_stage(
             and ("home_state" in missing or "category" in missing)
         )
         if needs_profile_form:
+            cutoff_path = "profile_form"
             intro = localize_output(
                 "Great - I can help with college shortlist. Please fill the details below so I can suggest the best matches."
             )
@@ -5245,10 +5303,13 @@ async def _v2_handle_cutoff_sql_stage(
                 )
                 + "\n\n"
             )
+            t_stream = time.perf_counter()
             for token in sse_tokens_preserving_formatting(intro):
+                _mark_first_token()
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
                 if V2_STREAM_TOKEN_DELAY_SEC > 0:
                     await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+            stream_ms += _elapsed_ms(t_stream)
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
             if request.user_id and conversation_id:
                 asyncio.create_task(
@@ -5260,9 +5321,11 @@ async def _v2_handle_cutoff_sql_stage(
                     )
                 )
                 asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+            _log_cutoff_timing(cutoff_path)
             state["handled"] = True
             return
 
+        cutoff_path = "missing_fields_followup"
         followup = localize_output(
             _build_cutoff_followup_prompt(
                 missing,
@@ -5271,10 +5334,13 @@ async def _v2_handle_cutoff_sql_stage(
                 sub_category_options=sub_category_options,
             )
         )
+        t_stream = time.perf_counter()
         for token in sse_tokens_preserving_formatting(followup):
+            _mark_first_token()
             yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
             if V2_STREAM_TOKEN_DELAY_SEC > 0:
                 await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+        stream_ms += _elapsed_ms(t_stream)
         yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
         if request.user_id and conversation_id:
             asyncio.create_task(
@@ -5286,9 +5352,11 @@ async def _v2_handle_cutoff_sql_stage(
                 )
             )
             asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+        _log_cutoff_timing(cutoff_path)
         state["handled"] = True
         return
 
+    cutoff_path = "final_cutoff_answer"
     metric_type = str(cutoff_ctx.get("metric_type"))
     metric_value = int(cutoff_ctx.get("metric_value"))
     home_state = str(cutoff_ctx.get("home_state"))
@@ -5296,6 +5364,7 @@ async def _v2_handle_cutoff_sql_stage(
     sub_category = str(cutoff_ctx.get("sub_category")) if cutoff_ctx.get("sub_category") else None
     target_states = [str(s) for s in list(cutoff_ctx.get("target_states") or [])]
     cutoff_result_limit = await get_cutoff_result_limit()
+    t_sql = time.perf_counter()
     rows = await fetch_cutoff_recommendations(
         metric_type=metric_type,
         metric_value=metric_value,
@@ -5309,8 +5378,9 @@ async def _v2_handle_cutoff_sql_stage(
         seat_type_keywords=cutoff_ctx.get("seat_type_keywords") if isinstance(cutoff_ctx.get("seat_type_keywords"), list) else None,
         total_limit=cutoff_result_limit,
     )
+    sql_ms += _elapsed_ms(t_sql)
     cutoff_ctx["last_result_count"] = len(rows)
-    cutoff_answer = localize_output(
+    cutoff_answer_head = localize_output(
         format_cutoff_markdown(
             rows=rows,
             metric_type=metric_type,
@@ -5322,7 +5392,8 @@ async def _v2_handle_cutoff_sql_stage(
             display_limit=cutoff_result_limit,
         )
     )
-    cutoff_explain = await _llm_explain_cutoff_results(
+    t_explain = time.perf_counter()
+    explain_task = asyncio.create_task(_llm_explain_cutoff_results(
         user_question=request.question,
         metric_type=metric_type,
         metric_value=metric_value,
@@ -5331,17 +5402,33 @@ async def _v2_handle_cutoff_sql_stage(
         category=category,
         sub_category=sub_category,
         rows=rows,
-    )
+    ))
+    source = {
+        "file_name": "neet_ug_2025_cutoffs",
+        "document_type": "sql_cutoff_table",
+        "state": ", ".join(target_states),
+        "text_snippet": f"Cutoff rows matched: {len(rows)}",
+    }
+    yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
+
+    # Stream table immediately; do not block first token on explanation/chips LLMs.
+    t_stream = time.perf_counter()
+    for token in sse_tokens_preserving_formatting(cutoff_answer_head):
+        _mark_first_token()
+        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+
+    # Notify frontend to show a dynamic loader while interpretation is being generated.
+    yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': True})}\n\n"
+
+    cutoff_explain = await explain_task
+    explain_ms += _elapsed_ms(t_explain)
     if cutoff_explain:
-        cutoff_answer = (
-            cutoff_answer
-            + "\n\n### Quick Interpretation\n\n"
-            + localize_output(cutoff_explain)
-        )
+        explain_tail = "\n\n### Quick Interpretation\n\n" + localize_output(cutoff_explain)
     elif rows:
-        cutoff_answer = (
-            cutoff_answer
-            + "\n\n### Quick Interpretation\n\n"
+        explain_tail = (
+            "\n\n### Quick Interpretation\n\n"
             + localize_output(
                 _fallback_cutoff_quick_interpretation(
                     rows=rows,
@@ -5351,33 +5438,48 @@ async def _v2_handle_cutoff_sql_stage(
                 )
             )
         )
-    cutoff_answer += (
+    else:
+        explain_tail = ""
+
+    disclaimer_tail = (
         "\n\n"
         + localize_output(
             "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
             "Please verify final options on official MCC/state counselling portals.*"
         )
     )
-    source = {
-        "file_name": "neet_ug_2025_cutoffs",
-        "document_type": "sql_cutoff_table",
-        "state": ", ".join(target_states),
-        "text_snippet": f"Cutoff rows matched: {len(rows)}",
-    }
-    yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
-    cutoff_replies = await _generate_contextual_suggested_replies(
-        request.question,
-        cutoff_answer,
-        med_ctx,
-        retrieval_evidence=cutoff_answer,
-        output_language=preferred_language,
+    cutoff_answer = cutoff_answer_head + explain_tail + disclaimer_tail
+    tail_to_stream = explain_tail + disclaimer_tail
+
+    # Run chips generation concurrently with tail streaming.
+    t_chips = time.perf_counter()
+    chips_task = asyncio.create_task(
+        _generate_contextual_suggested_replies(
+            request.question,
+            cutoff_answer,
+            med_ctx,
+            retrieval_evidence=cutoff_answer,
+            output_language=preferred_language,
+        )
     )
+    yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': False})}\n\n"
+    explain_stream_delay = V2_STREAM_TOKEN_DELAY_SEC if V2_STREAM_TOKEN_DELAY_SEC > 0 else 0.01
+    for token in sse_tokens_preserving_formatting(tail_to_stream):
+        _mark_first_token()
+        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+        if explain_stream_delay > 0:
+            await asyncio.sleep(explain_stream_delay)
+    stream_ms += _elapsed_ms(t_stream)
+
+    cutoff_replies: List[str] = []
+    try:
+        cutoff_replies = await chips_task
+    except Exception as e:
+        log(f"[V2] ⚠️ Cutoff chips generation failed: {e}")
+        cutoff_replies = []
+    chips_ms += _elapsed_ms(t_chips)
     if cutoff_replies:
         yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': cutoff_replies})}\n\n"
-    for token in sse_tokens_preserving_formatting(cutoff_answer):
-        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-        if V2_STREAM_TOKEN_DELAY_SEC > 0:
-            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
     med_ctx["stage"] = "normal_qa"
     med_ctx["last_topic"] = "Cutoff analysis"
     med_ctx["last_state"] = ", ".join(target_states)
@@ -5396,6 +5498,7 @@ async def _v2_handle_cutoff_sql_stage(
             )
         )
         asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+    _log_cutoff_timing(cutoff_path)
     state["handled"] = True
 
 

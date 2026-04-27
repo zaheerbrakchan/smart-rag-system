@@ -27,10 +27,10 @@ export default function ChatWindow({
   const assistantLabel = language === 'hi' ? 'NEET सहायक' : language === 'mr' ? 'NEET सहाय्यक' : 'NEET Assistant';
   const searchingLabel =
     language === 'hi'
-      ? 'NEET UG 2026 बुलेटिन खोज रहा है...'
+      ? 'आपके प्रश्न का विश्लेषण कर रहा है...'
       : language === 'mr'
-      ? 'NEET UG 2026 बुलेटिन शोधत आहे...'
-      : 'Searching NEET UG 2026 Bulletin...';
+      ? 'तुमच्या प्रश्नाचे विश्लेषण करत आहे...'
+      : 'Analyzing your question for accurate guidance...';
   const thinkingLabel = language === 'hi' ? 'सोच रहा है...' : language === 'mr' ? 'विचार करत आहे...' : 'Thinking...';
   // Check if the last assistant message has content (means it's streaming)
   const lastMessage = messages[messages.length - 1];

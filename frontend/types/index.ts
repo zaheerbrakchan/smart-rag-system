@@ -63,6 +63,7 @@ export interface Message {
     selectedCategory?: string;
     selectedSubCategory?: string;
   };
+  cutoffInterpretationLoading?: boolean;
 }
 
 // API response
