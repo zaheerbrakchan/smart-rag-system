@@ -1,6 +1,6 @@
 'use client';
 
-import { RefObject } from 'react';
+import { RefObject, useEffect, useMemo, useState } from 'react';
 import MessageBubble from './MessageBubble';
 import { Message } from '@/types';
 import { GraduationCap, Search } from 'lucide-react';
@@ -25,13 +25,27 @@ export default function ChatWindow({
   referencesEnabledGlobal = true,
 }: ChatWindowProps) {
   const assistantLabel = language === 'hi' ? 'NEET सहायक' : language === 'mr' ? 'NEET सहाय्यक' : 'NEET Assistant';
-  const searchingLabel =
-    language === 'hi'
-      ? 'आपके प्रश्न का विश्लेषण कर रहा है...'
-      : language === 'mr'
-      ? 'तुमच्या प्रश्नाचे विश्लेषण करत आहे...'
-      : 'Analyzing your question for accurate guidance...';
-  const thinkingLabel = language === 'hi' ? 'सोच रहा है...' : language === 'mr' ? 'विचार करत आहे...' : 'Thinking...';
+  const loadingPhases = useMemo(() => {
+    if (language === 'hi') {
+      return [
+        'आपके प्रश्न का विश्लेषण कर रहा है...',
+        'आधिकारिक दस्तावेज़ों और नॉलेज बेस में विवरण खोज रहा है...',
+        'आपके लिए सबसे सटीक उत्तर तैयार कर रहा है...',
+      ];
+    }
+    if (language === 'mr') {
+      return [
+        'तुमच्या प्रश्नाचे विश्लेषण करत आहे...',
+        'अधिकृत कागदपत्रे आणि नॉलेज बेसमध्ये तपशील शोधत आहे...',
+        'तुमच्यासाठी सर्वात अचूक उत्तर तयार करत आहे...',
+      ];
+    }
+    return [
+      'Analyzing your question for accurate guidance...',
+      'Searching official documents and our knowledge base for the right details...',
+      'Preparing the most accurate answer for you...',
+    ];
+  }, [language]);
   // Check if the last assistant message has content (means it's streaming)
   const lastMessage = messages[messages.length - 1];
   const isStreaming = lastMessage?.role === 'assistant' && lastMessage?.content?.length > 0;
@@ -62,7 +76,7 @@ export default function ChatWindow({
             <div className="flex-1">
               <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1.5">{assistantLabel}</p>
               <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl rounded-tl-sm p-4 shadow-md dark:shadow-lg dark:shadow-black/10">
-                <TypingIndicator searchingLabel={searchingLabel} thinkingLabel={thinkingLabel} />
+                <TypingIndicator loadingPhases={loadingPhases} />
               </div>
             </div>
           </div>
@@ -74,17 +88,29 @@ export default function ChatWindow({
   );
 }
 
-function TypingIndicator({ searchingLabel, thinkingLabel }: { searchingLabel: string; thinkingLabel: string }) {
+function TypingIndicator({ loadingPhases }: { loadingPhases: string[] }) {
+  const [phaseIndex, setPhaseIndex] = useState(0);
+  const activeLabel = loadingPhases[Math.min(phaseIndex, loadingPhases.length - 1)] || 'Loading...';
+
+  useEffect(() => {
+    setPhaseIndex(0);
+    const firstTimer = window.setTimeout(() => setPhaseIndex(1), 2000);
+    const secondTimer = window.setTimeout(() => setPhaseIndex(2), 5000);
+    return () => {
+      window.clearTimeout(firstTimer);
+      window.clearTimeout(secondTimer);
+    };
+  }, [loadingPhases]);
+
   return (
     <div className="flex items-center gap-3">
       <Search className="w-4 h-4 text-blue-500 dark:text-blue-400 animate-pulse" />
-      <span className="text-sm text-gray-500 dark:text-gray-400">{searchingLabel}</span>
+      <span className="text-sm text-gray-500 dark:text-gray-400">{activeLabel}</span>
       <div className="flex gap-1">
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
         <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
       </div>
-      <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">{thinkingLabel}</span>
     </div>
   );
 }
