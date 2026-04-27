@@ -818,6 +818,73 @@ def _apply_response_policy(
     return text
 
 
+def _kb_results_count(tool_result: str) -> int:
+    m = re.search(r"Results Found:\s*(\d+)", str(tool_result or ""), flags=re.IGNORECASE)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+def _should_skip_kb_sufficiency_llm(question: str, kb_tool_result: str) -> bool:
+    """
+    Latency fast-path for straightforward date/timeline questions where KB
+    already returned concrete hits.
+    """
+    q = _normalize_text(question)
+    is_date_like = any(
+        k in q
+        for k in [
+            "exam date",
+            "date",
+            "deadline",
+            "last date",
+            "schedule",
+            "timeline",
+            "application date",
+            "result date",
+            "admit card",
+        ]
+    )
+    if not is_date_like:
+        return False
+    return _kb_results_count(kb_tool_result) > 0
+
+
+def _is_compact_factual_query(question: str) -> bool:
+    q = _normalize_text(question)
+    return any(
+        k in q
+        for k in [
+            "exam date",
+            "date",
+            "deadline",
+            "last date",
+            "schedule",
+            "timeline",
+            "application date",
+            "result date",
+            "admit card",
+            "timing",
+            "duration",
+        ]
+    )
+
+
+def _final_answer_temperature(question: str) -> float:
+    # Keep factual/date outputs deterministic to reduce repeated drafts.
+    return 0.1 if _is_compact_factual_query(question) else 0.3
+
+
+def _final_answer_max_tokens(question: str) -> int:
+    # Smaller budget for compact factual answers improves latency and focus.
+    if _is_compact_factual_query(question):
+        return min(V2_FINAL_MAX_TOKENS, 320)
+    return V2_FINAL_MAX_TOKENS
+
+
 def _should_run_kb_sufficiency_check(question: str) -> bool:
     q = _normalize_text(question)
     return any(
@@ -4450,6 +4517,8 @@ async def _v2_run_rag_pipeline(
     final_ttft_ms = 0.0
     final_stream_ms = 0.0
     user_visible_ttft_ms = 0.0
+    final_temperature = _final_answer_temperature(request.question)
+    final_max_tokens = _final_answer_max_tokens(request.question)
 
     for round_idx in range(max_tool_rounds):
         log(f"[V2] 🤖 Tool round {round_idx + 1}/{max_tool_rounds}")
@@ -4465,8 +4534,8 @@ async def _v2_run_rag_pipeline(
                 client,
                 model="gpt-4o-mini",
                 messages=messages,
-                temperature=0.3,
-                max_tokens=V2_FINAL_MAX_TOKENS,
+                temperature=final_temperature,
+                max_tokens=final_max_tokens,
             ):
                 streamed_raw += delta
                 if _first_out:
@@ -4608,13 +4677,18 @@ async def _v2_run_rag_pipeline(
             kb_attempted = True
             last_kb_retrieval = "\n\n".join(kb_results_this_round)
             t_suff = time.perf_counter()
-            is_sufficient, _reason = assess_kb_sufficiency_with_llm(
-                client=client,
-                user_question=request.question,
-                kb_tool_result=last_kb_retrieval,
-                conversation_context=_build_sufficiency_context(messages, request.question),
-            )
-            suff_ms = _elapsed_ms(t_suff)
+            if _should_skip_kb_sufficiency_llm(request.question, last_kb_retrieval):
+                is_sufficient = True
+                _reason = "Skipped sufficiency LLM: date/timeline query with KB hits."
+                suff_ms = _elapsed_ms(t_suff)
+            else:
+                is_sufficient, _reason = assess_kb_sufficiency_with_llm(
+                    client=client,
+                    user_question=request.question,
+                    kb_tool_result=last_kb_retrieval,
+                    conversation_context=_build_sufficiency_context(messages, request.question),
+                )
+                suff_ms = _elapsed_ms(t_suff)
             _log_v2_tool_debug(
                 f"[V2][DBG] sufficiency round={round_idx + 1} "
                 f"is_sufficient={bool(is_sufficient)} reason={_reason!r}"
@@ -4710,7 +4784,11 @@ async def _v2_run_rag_pipeline(
         chip_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, None)
     policy_evidence = _combine_retrieval_for_suggestion_chips(last_kb_retrieval, last_web_retrieval)
     has_retrieval_evidence = bool((policy_evidence or "").strip())
-    if forced_fallback_response:
+    if streamed_final_in_loop:
+        # Final answer already streamed inside the tool-loop fast path.
+        # Do not run another final-generation branch, or content may duplicate.
+        pass
+    elif forced_fallback_response:
         full_response = localize_output(_apply_response_policy(forced_fallback_response, request.question, allow_factual_addons=has_retrieval_evidence))
         t_out = time.perf_counter()
         _first_out = True
@@ -4735,8 +4813,8 @@ async def _v2_run_rag_pipeline(
                 client,
                 model="gpt-4o-mini",
                 messages=messages,
-                temperature=0.3,
-                max_tokens=V2_FINAL_MAX_TOKENS,
+                temperature=final_temperature,
+                max_tokens=final_max_tokens,
             ):
                 streamed_raw += delta
                 if _first_out:
@@ -4789,7 +4867,13 @@ async def _v2_run_rag_pipeline(
         if preferred_language == "en":
             _first_out = True
             streamed_raw = ""
-            async for delta in _stream_chat_completion_text(client, model="gpt-4o-mini", messages=messages, temperature=0.3, max_tokens=V2_FINAL_MAX_TOKENS):
+            async for delta in _stream_chat_completion_text(
+                client,
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=final_temperature,
+                max_tokens=final_max_tokens,
+            ):
                 streamed_raw += delta
                 if _first_out:
                     final_ttft_ms = _elapsed_ms(t_out)
@@ -4811,7 +4895,12 @@ async def _v2_run_rag_pipeline(
                 full_response = streamed_raw
             final_stream_ms = _elapsed_ms(t_out)
         else:
-            final_response = client.chat.completions.create(model="gpt-4o-mini", messages=messages, temperature=0.3, max_tokens=V2_FINAL_MAX_TOKENS)
+            final_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=final_temperature,
+                max_tokens=final_max_tokens,
+            )
             full_response = localize_output(_apply_response_policy(final_response.choices[0].message.content or "", request.question, allow_factual_addons=has_retrieval_evidence))
             _first_out = True
             for token in sse_tokens_preserving_formatting(full_response):
@@ -5822,6 +5911,17 @@ async def chat_v2_stream(request: ChatRequest):
                     "- Only retrieve multiple entities when the latest message explicitly asks comparison, versus, list, or multi-target output.\n"
                     "- You may infer missing topic words from immediate context (e.g., fee structure), "
                     "but must keep entity scope anchored to the latest message."
+                )
+            })
+            messages.append({
+                "role": "system",
+                "content": (
+                    "OUTPUT QUALITY RULES (highest priority for final answer formatting):\n"
+                    "- Do not repeat sections, bullets, or paragraphs.\n"
+                    "- If you restructure the answer, keep each fact only once.\n"
+                    "- Produce only one final draft; never restart the answer with a second Overview/Key section.\n"
+                    "- Keep concise, high-signal formatting (single pass).\n"
+                    "- Include at most one short disclaimer and at most one closing follow-up question."
                 )
             })
 
