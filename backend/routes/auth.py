@@ -170,6 +170,7 @@ async def verify_otp(
         .where(
             OTPVerification.phone == normalized_phone,
             OTPVerification.purpose == request.purpose,
+            OTPVerification.otp == request.otp,
         )
         .order_by(OTPVerification.created_at.desc())
     )
@@ -178,7 +179,7 @@ async def verify_otp(
     if not otp_row:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No OTP found. Please request a new OTP.",
+            detail="Invalid OTP",
         )
 
     now = datetime.now(timezone.utc)
@@ -196,12 +197,6 @@ async def verify_otp(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OTP expired. Please request a new OTP.",
         )
-    if otp_row.otp != request.otp:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid OTP",
-        )
-
     otp_row.is_used = True
     otp_row.used_at = now
 
