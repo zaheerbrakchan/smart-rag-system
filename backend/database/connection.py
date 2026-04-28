@@ -7,7 +7,6 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import AsyncAdaptedQueuePool
-from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 
 from services.db_url import normalize_async_database_url
@@ -79,21 +78,12 @@ async def get_db() -> AsyncSession:
     async with async_session_maker() as session:
         try:
             yield session
-            # Commit only when there are ORM changes in this request.
-            # For read-only requests, avoid commit on teardown (a transiently
-            # closed pooled connection can fail commit and surface as 500).
-            has_changes = bool(session.new or session.dirty or session.deleted)
-            if has_changes:
-                await session.commit()
-            elif session.in_transaction():
-                await session.rollback()
+            # Must commit after yield: flushed INSERT/UPDATE are no longer in
+            # session.new, so a "only if new/dirty" check can skip commit and
+            # roll back writes (e.g. OTP rows never persisted -> "Invalid OTP").
+            await session.commit()
         except Exception:
-            if session.in_transaction():
-                try:
-                    await session.rollback()
-                except SQLAlchemyError:
-                    # Ignore rollback teardown errors on already-closed connections.
-                    pass
+            await session.rollback()
             raise
         finally:
             await session.close()
