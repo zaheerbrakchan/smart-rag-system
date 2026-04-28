@@ -1,5 +1,5 @@
 """
-RAG Chatbot - FastAPI Backend (OpenAI + Neon pgvector)
+RAG Chatbot - FastAPI Backend (OpenAI + PostgreSQL pgvector)
 Production RAG with Admin Document Management & Smart Query Routing
 """
 
@@ -646,10 +646,22 @@ def _contains_any(text: str, phrases: List[str]) -> bool:
     return any(p in text for p in phrases)
 
 
-def _is_greeting_only(question: str) -> bool:
+def _detect_greeting_only(question: str) -> Optional[str]:
     q = _normalize_text(question)
-    greeting_words = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hii"}
-    return q in greeting_words
+    greeting_words = {
+        "hi": "hi",
+        "hello": "hello",
+        "hey": "hey",
+        "hii": "hi",
+        "good morning": "good morning",
+        "good afternoon": "good afternoon",
+        "good evening": "good evening",
+    }
+    return greeting_words.get(q)
+
+
+def _is_greeting_only(question: str) -> bool:
+    return _detect_greeting_only(question) is not None
 
 
 def _is_session_close_intent(question: str) -> bool:
@@ -728,11 +740,15 @@ def _extract_first_name(full_name: Optional[str]) -> Optional[str]:
     return cleaned.split()[0]
 
 
-def _first_visit_welcome_message(first_name: Optional[str] = None) -> str:
+def _first_visit_welcome_message(first_name: Optional[str] = None, greeting_word: Optional[str] = None) -> str:
+    gw = (greeting_word or "hi").strip()
+    if gw not in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}:
+        gw = "hi"
+    opening = gw.title()
     greeting = (
-        f"Hi {first_name}, hope you are doing well.\n\n"
+        f"{opening} {first_name}, hope you are doing well.\n\n"
         if first_name else
-        "Hi, hope you are doing well.\n\n"
+        f"{opening}, hope you are doing well.\n\n"
     )
     return (
         f"{greeting}"
@@ -745,11 +761,15 @@ def _first_visit_welcome_message(first_name: Optional[str] = None) -> str:
     )
 
 
-def _return_visit_welcome_message(first_name: Optional[str] = None) -> str:
+def _return_visit_welcome_message(first_name: Optional[str] = None, greeting_word: Optional[str] = None) -> str:
+    gw = (greeting_word or "hi").strip()
+    if gw not in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}:
+        gw = "hi"
+    opening = gw.title()
     greeting = (
-        f"Hi {first_name}, hope you are doing well.\n\n"
+        f"{opening} {first_name}, hope you are doing well.\n\n"
         if first_name else
-        "Hi, hope you are doing well.\n\n"
+        f"{opening}, hope you are doing well.\n\n"
     )
     return (
         f"{greeting}"
@@ -2407,14 +2427,14 @@ from models import User, Conversation, Message, PendingQA, ActivityLog
 # Smart routing services
 from services.query_router import (
     route_query,
-    build_pinecone_filters,
+    build_vector_filters,
     QueryIntent,
     format_mixed_response_prompt,
     expand_query,
 )
 from services.chunk_classifier import classify_chunk
 from services.vector_store_factory import get_vector_store, count_vectors_sync
-from services.metadata_filter_utils import pinecone_filter_to_metadata_filters
+from services.metadata_filter_utils import vector_filter_to_metadata_filters
 from services.pdf_extraction import extract_text_from_pdf
 from services.document_chunking import (
     prepare_pages_for_indexing,
@@ -3086,7 +3106,7 @@ def get_llm():
 
 
 def get_pg_vector_store():
-    """LlamaIndex PGVectorStore (Neon + pgvector)."""
+    """LlamaIndex PGVectorStore (PostgreSQL + pgvector)."""
     global vector_store
     vector_store = get_vector_store()
     return vector_store
@@ -3230,7 +3250,7 @@ def load_index() -> VectorStoreIndex:
 
     vs = get_pg_vector_store()
     index = VectorStoreIndex.from_vector_store(vs)
-    print("Index loaded from Neon pgvector!")
+    print("Index loaded from PostgreSQL pgvector!")
 
     return index
 
@@ -3260,7 +3280,7 @@ async def health_check():
         return {
             "status": "healthy",
             "index_loaded": index is not None,
-            "pinecone_connected": True,
+            "vector_store_connected": True,
             "total_vectors": n,
             "vector_store": "pgvector",
         }
@@ -3587,9 +3607,9 @@ async def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
             
-            # Build vector metadata filters (same shapes as legacy Pinecone filters)
-            pinecone_filters = build_pinecone_filters(routing, user_state)
-            log(f"[INFO] 🔍 VECTOR FILTERS: {pinecone_filters}")
+            # Build vector metadata filters
+            vector_filters = build_vector_filters(routing, user_state)
+            log(f"[INFO] 🔍 VECTOR FILTERS: {vector_filters}")
 
             # ========== PGVECTOR RAG RETRIEVAL ==========
             try:
@@ -3623,10 +3643,10 @@ async def chat_stream(request: ChatRequest):
                 state_name = routing.detected_state or user_state or "your state"
                 per_filter_chunks: List[List[Tuple[str, Dict]]] = []
 
-                for filter_idx, pc_filter in enumerate(pinecone_filters):
+                for filter_idx, pc_filter in enumerate(vector_filters):
                     log(f"[INFO] 🔎 PGVECTOR QUERY {filter_idx + 1}: filter={pc_filter}")
 
-                    mf = pinecone_filter_to_metadata_filters(pc_filter)
+                    mf = vector_filter_to_metadata_filters(pc_filter)
                     vq = VectorStoreQuery(
                         query_embedding=query_embedding,
                         similarity_top_k=6,
@@ -4964,10 +4984,15 @@ async def _v2_try_fast_path_response(
         state["handled"] = True
         return
 
-    if _is_greeting_only(request.question):
+    greeting_word = _detect_greeting_only(request.question)
+    if greeting_word:
         registered_user_name = await _get_registered_user_name(request.user_id)
         first_name = _extract_first_name(registered_user_name)
-        welcome = _first_visit_welcome_message(first_name) if is_first_visit else _return_visit_welcome_message(first_name)
+        welcome = (
+            _first_visit_welcome_message(first_name, greeting_word)
+            if is_first_visit
+            else _return_visit_welcome_message(first_name, greeting_word)
+        )
         welcome = localize_output(welcome)
         med_ctx["stage"] = "first_visit" if is_first_visit else "returning"
         med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
@@ -6048,7 +6073,7 @@ async def chat_v2_stream(request: ChatRequest):
             is_new_conversation = not request.conversation_id and conversation_id
             response_time = int((datetime.now() - start_time).total_seconds() * 1000)
 
-            # Done before DB persist so the client is not blocked on Neon writes
+            # Done before DB persist so the client is not blocked on DB writes
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
 
             if request.user_id and conversation_id:

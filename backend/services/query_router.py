@@ -1,6 +1,6 @@
 """
 Query Router Service
-Classifies user query intent before hitting Pinecone to apply correct filters
+Classifies user query intent before applying vector-store metadata filters
 """
 
 import os
@@ -778,7 +778,7 @@ def route_query(
     )
 
 
-# ============== PINECONE FILTER BUILDERS ==============
+# ============== VECTOR FILTER BUILDERS ==============
 
 # State-scoped uploads besides the main counselling brochure (admin "Document type")
 STATE_LEVEL_DOCUMENT_TYPES = (
@@ -804,9 +804,9 @@ def _filters_for_state_and_doc_types(state: str) -> List[Dict]:
     return out
 
 
-def build_pinecone_filters(routing: QueryRouting, user_state: Optional[str] = None) -> List[Dict]:
+def build_vector_filters(routing: QueryRouting, user_state: Optional[str] = None) -> List[Dict]:
     """
-    Build Pinecone filter(s) based on routing decision.
+    Build vector metadata filter(s) based on routing decision.
     
     IMPORTANT: We only filter by document_type and state - NOT by category.
     Category metadata is useful for display but not for retrieval filtering.
@@ -821,7 +821,7 @@ def build_pinecone_filters(routing: QueryRouting, user_state: Optional[str] = No
         user_state: User's registered state from profile
     
     Returns:
-        List of Pinecone filter dictionaries
+        List of vector filter dictionaries
     """
     
     filters = []

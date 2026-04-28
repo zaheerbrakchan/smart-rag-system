@@ -11,7 +11,7 @@ def get_database_url() -> str:
     )
 
 
-def async_url_for_neon(url: str) -> str:
+def normalize_async_database_url(url: str) -> str:
     """Ensure asyncpg driver; strip params asyncpg does not accept on connect()."""
     u = url
     if u.startswith("postgresql://") and "+asyncpg" not in u:
@@ -26,15 +26,6 @@ def async_url_for_neon(url: str) -> str:
     new_query = urlencode({k: v[0] for k, v in q.items()}, doseq=True)
     parsed = parsed._replace(query=new_query)
     return urlunparse(parsed)
-
-
-def is_local_postgres_host(database_url: str) -> bool:
-    """True if host looks like local dev (no TLS required)."""
-    u = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    u = u.replace("postgresql+psycopg2://", "postgresql://", 1)
-    parsed = urlparse(u)
-    host = (parsed.hostname or "").lower()
-    return host in ("localhost", "127.0.0.1", "::1")
 
 
 def sync_database_url(url: str | None = None) -> str:

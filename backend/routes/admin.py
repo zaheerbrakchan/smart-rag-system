@@ -37,12 +37,12 @@ _stats_cache = {
     "pg_vectors": {"value": 0, "expires": 0},
     "dashboard_stats": {"value": None, "expires": 0}
 }
-PINECONE_CACHE_TTL = 300  # Cache vector table stats for 5 minutes
+VECTOR_CACHE_TTL = 300  # Cache vector table stats for 5 minutes
 DASHBOARD_CACHE_TTL = 30  # Cache dashboard stats for 30 seconds
 
 
-def get_cached_pinecone_vector_count(use_background_refresh: bool = True):
-    """Cached row count in pgvector table (name kept for minimal dashboard churn)."""
+def get_cached_vector_count(use_background_refresh: bool = True):
+    """Cached row count in pgvector table."""
     global _stats_cache
     now = time.time()
 
@@ -56,7 +56,7 @@ def get_cached_pinecone_vector_count(use_background_refresh: bool = True):
         count = count_vectors_sync()
         _stats_cache["pg_vectors"] = {
             "value": count,
-            "expires": now + PINECONE_CACHE_TTL,
+            "expires": now + VECTOR_CACHE_TTL,
         }
         return count
     except Exception as e:
@@ -219,12 +219,11 @@ async def get_dashboard_overview(
         for row in results[7]:
             role_counts[row[0].value] = row[1]
     
-    # Use DB vector count for fast response, Pinecone count only if already cached
-    # This ensures first load is fast (no waiting for Pinecone API)
+    # Use DB vector count for fast response; override with cached vector-store count.
     total_vectors = int(db_vectors) if db_vectors else 0
-    cached_pinecone_count = get_cached_pinecone_vector_count(use_background_refresh=True)
-    if cached_pinecone_count > 0:
-        total_vectors = cached_pinecone_count
+    cached_vector_count = get_cached_vector_count(use_background_refresh=True)
+    if cached_vector_count > 0:
+        total_vectors = cached_vector_count
     
     stats = DashboardStatsResponse(
         total_users=total_users,
@@ -325,11 +324,11 @@ async def get_dashboard_stats(
         for row in results[7]:
             role_counts[row[0].value] = row[1]
     
-    # Use DB vector count for fast response, Pinecone count only if already cached
+    # Use DB vector count for fast response; override with cached vector-store count.
     total_vectors = int(db_vectors) if db_vectors else 0
-    cached_pinecone_count = get_cached_pinecone_vector_count(use_background_refresh=True)
-    if cached_pinecone_count > 0:
-        total_vectors = cached_pinecone_count
+    cached_vector_count = get_cached_vector_count(use_background_refresh=True)
+    if cached_vector_count > 0:
+        total_vectors = cached_vector_count
     
     response = DashboardStatsResponse(
         total_users=total_users,

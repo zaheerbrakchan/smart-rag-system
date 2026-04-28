@@ -1,12 +1,12 @@
 """
-Singleton PGVectorStore (Neon + pgvector) replacing Pinecone.
+Singleton PGVectorStore (PostgreSQL + pgvector).
 Uses LlamaIndex PGVectorStore; physical table name is data_<PGVECTOR_TABLE_NAME>.
 """
 
 import os
 from typing import Any, Optional
 
-from services.db_url import async_url_for_neon, get_database_url, sync_database_url
+from services.db_url import normalize_async_database_url, get_database_url, sync_database_url
 
 _vector_store: Optional[Any] = None
 
@@ -26,7 +26,7 @@ def get_vector_store():
     if _vector_store is None:
         from llama_index.vector_stores.postgres import PGVectorStore
 
-        async_url = async_url_for_neon(get_database_url())
+        async_url = normalize_async_database_url(get_database_url())
         sync_url = sync_database_url()
 
         # Filterable metadata (keep small). doc_topic = admin "sub-category" at upload; chunk_* = per-chunk AI labels.

@@ -959,7 +959,7 @@ export default function AdminPage() {
       message: `Are you sure you want to delete "${filename}"?`,
       details: [
         'This will permanently remove the document from storage',
-        'All indexed vectors will be deleted from Pinecone',
+        'All indexed vectors will be deleted from the vector store',
         'This action cannot be undone'
       ],
       type: 'danger',
@@ -998,7 +998,7 @@ export default function AdminPage() {
       details: [
         'Download the PDF from storage',
         'Re-classify all chunks with proper categories',
-        'Update vectors in Pinecone with new metadata',
+        'Update vectors in the vector store with new metadata',
         'This may take 1-2 minutes for large documents'
       ],
       type: 'info',

@@ -27,7 +27,7 @@ ddgs>=9.13.0
 # Environment variables
 python-dotenv>=1.0.0
 
-# Database (PostgreSQL + Neon)
+# Database (PostgreSQL)
 sqlalchemy[asyncio]>=2.0.0
 asyncpg>=0.29.0        # Async PostgreSQL driver
 psycopg2-binary>=2.9.0 # Sync driver for Alembic / PGVectorStore
