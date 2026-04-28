@@ -112,7 +112,7 @@ class PendingQA(Base):
     faq_vector_id: Mapped[Optional[str]] = mapped_column(
         String(100),
         nullable=True,
-        comment="Pinecone vector ID if added to FAQ"
+        comment="Vector store ID if added to FAQ"
     )
     
     # Additional metadata

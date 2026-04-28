@@ -1,6 +1,6 @@
 """
 Indexed Document Entity Model
-Tracks documents that have been indexed in Pinecone
+Tracks documents that have been indexed in the vector store
 """
 
 from datetime import datetime

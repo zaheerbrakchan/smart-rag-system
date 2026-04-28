@@ -275,7 +275,7 @@ Rules for importance:
 
 def classify_chunk(text: str, document_type: str, state: str = "All-India") -> Dict[str, any]:
     """
-    Main function to classify a chunk before indexing to Pinecone.
+    Main function to classify a chunk before indexing to the vector store.
     
     Args:
         text: The chunk text to classify
@@ -358,15 +358,15 @@ def estimate_importance(text: str) -> str:
 
 # ============== BATCH RECLASSIFICATION ==============
 
-async def reclassify_existing_chunks(pinecone_index, batch_size: int = 100):
+async def reclassify_existing_chunks(vector_index, batch_size: int = 100):
     """
     Reclassify existing chunks that have category='general'
     This is for migrating old indexed documents
     """
     # This would need to:
-    # 1. Query Pinecone for chunks with category='general'
+    # 1. Query vector store for chunks with category='general'
     # 2. For each chunk, run classify_chunk()
-    # 3. Update the metadata in Pinecone
+    # 3. Update the metadata in vector store
     # 
     # Implementation depends on how you want to batch this
     pass

@@ -1,5 +1,5 @@
 """
-Convert legacy Pinecone-style metadata filters to LlamaIndex MetadataFilters (for PGVectorStore).
+Convert metadata filter dictionaries to LlamaIndex MetadataFilters.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from llama_index.core.vector_stores.types import (
 )
 
 
-def pinecone_filter_to_metadata_filters(pc: Dict[str, Any]) -> MetadataFilters:
+def vector_filter_to_metadata_filters(pc: Dict[str, Any]) -> MetadataFilters:
     """
-    Pinecone examples:
+    Examples:
       {"document_type": {"$eq": "nta_bulletin"}}
       {"$and": [{"document_type": {"$eq": "state_counseling"}}, {"state": {"$eq": "Karnataka"}}]}
     """
@@ -26,7 +26,7 @@ def pinecone_filter_to_metadata_filters(pc: Dict[str, Any]) -> MetadataFilters:
     if "$and" in pc:
         parts: List[MetadataFilters] = []
         for sub in pc["$and"]:
-            parts.append(pinecone_filter_to_metadata_filters(sub))
+            parts.append(vector_filter_to_metadata_filters(sub))
         flat: List[MetadataFilter] = []
         for p in parts:
             flat.extend(p.filters)
@@ -43,6 +43,6 @@ def pinecone_filter_to_metadata_filters(pc: Dict[str, Any]) -> MetadataFilters:
                 )
             )
         else:
-            raise ValueError(f"Unsupported Pinecone filter fragment: {key}={val}")
+            raise ValueError(f"Unsupported filter fragment: {key}={val}")
 
     return MetadataFilters(filters=filters)

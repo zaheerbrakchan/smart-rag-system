@@ -207,7 +207,7 @@ async def create_faq(
     await db.commit()
     await db.refresh(faq)
     
-    # Vectorize and store in Pinecone
+    # Vectorize and store in vector database
     try:
         vector_id = await vectorize_and_store_faq(faq)
         faq.faq_vector_id = vector_id

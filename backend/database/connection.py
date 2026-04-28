@@ -7,9 +7,10 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import AsyncAdaptedQueuePool
+from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 
-from services.db_url import async_url_for_neon, is_local_postgres_host
+from services.db_url import normalize_async_database_url
 
 load_dotenv()
 
@@ -17,23 +18,21 @@ _raw_db_url = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres@localhost:5432/neet_assistant",
 )
-# Database URL — sslmode stripped from query; TLS set via connect_args for asyncpg (Neon, etc.)
-DATABASE_URL = async_url_for_neon(_raw_db_url)
+# Database URL — normalize to asyncpg and remove unsupported query args.
+DATABASE_URL = normalize_async_database_url(_raw_db_url)
 
 
 def _asyncpg_connect_args() -> dict:
     args: dict = {"timeout": 30, "command_timeout": 30}
     args["server_settings"] = {"hnsw.ef_search": "40"}
-    # Remote hosts require TLS; use asyncpg SSL mode instead of forcing cert verification.
-    # `ssl=True` creates a verifying context and may fail on managed/self-signed chains.
-    if not is_local_postgres_host(_raw_db_url):
-        ssl_mode = os.getenv("DB_SSL_MODE", "require").strip().lower()
-        if ssl_mode in {"disable", "false", "0", "off"}:
-            pass
-        elif ssl_mode in {"prefer", "allow", "require", "verify-ca", "verify-full"}:
-            args["ssl"] = ssl_mode
-        else:
-            args["ssl"] = "require"
+    # Keep SSL mode explicit via env; for VPS installs this is often "disable".
+    ssl_mode = os.getenv("DB_SSL_MODE", "disable").strip().lower()
+    if ssl_mode in {"disable", "false", "0", "off"}:
+        pass
+    elif ssl_mode in {"prefer", "allow", "require", "verify-ca", "verify-full"}:
+        args["ssl"] = ssl_mode
+    else:
+        args["ssl"] = "disable"
     return args
 
 # For Alembic (sync operations)
@@ -80,9 +79,21 @@ async def get_db() -> AsyncSession:
     async with async_session_maker() as session:
         try:
             yield session
-            await session.commit()
+            # Commit only when there are ORM changes in this request.
+            # For read-only requests, avoid commit on teardown (a transiently
+            # closed pooled connection can fail commit and surface as 500).
+            has_changes = bool(session.new or session.dirty or session.deleted)
+            if has_changes:
+                await session.commit()
+            elif session.in_transaction():
+                await session.rollback()
         except Exception:
-            await session.rollback()
+            if session.in_transaction():
+                try:
+                    await session.rollback()
+                except SQLAlchemyError:
+                    # Ignore rollback teardown errors on already-closed connections.
+                    pass
             raise
         finally:
             await session.close()

@@ -44,7 +44,7 @@ class FAQ(Base):
     state: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     
     # Embedding vector (stored as array of floats)
-    # Note: For production, consider storing embeddings in Pinecone
+    # Note: For production scale, use pgvector-backed retrieval.
     embedding: Mapped[Optional[List[float]]] = mapped_column(
         ARRAY(Float),
         nullable=True,
