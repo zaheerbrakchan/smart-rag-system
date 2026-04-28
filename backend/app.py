@@ -1370,6 +1370,27 @@ def _canonicalize_state_name(raw: Optional[str]) -> Optional[str]:
     return str(raw).strip() or None
 
 
+def _question_mentions_category_filters(question: str) -> bool:
+    """Detect explicit category/sub-category refinement in current user turn."""
+    q = _normalize_text(question or "")
+    if not q:
+        return False
+    keywords = [
+        "category",
+        "sub category",
+        "subcategory",
+        "general",
+        "obc",
+        "sc",
+        "st",
+        "ews",
+        "pwd",
+        "pwbd",
+        "ur",
+    ]
+    return any(k in q for k in keywords)
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CUTOFF MODULE — CLEAN REDESIGN
@@ -1769,6 +1790,10 @@ Return JSON only."""
 
         # Missing fields and follow-up
         out["missing_fields"] = list(parsed.get("missing_fields") or [])
+        # Guard against inconsistent LLM output:
+        # if target_states is already resolved, never keep "target_states" as missing.
+        if out["target_states"] and "target_states" in out["missing_fields"]:
+            out["missing_fields"] = [m for m in out["missing_fields"] if m != "target_states"]
         out["follow_up_message"] = str(parsed.get("follow_up_message") or "").strip() or None
 
         log(
@@ -1842,9 +1867,7 @@ async def _cutoff_run_sql(
                 order_col = "air_rank ASC"
             params["metric_val"] = metric_value
 
-            # Category filter:
-            # - State scope: always apply when set
-            # - Central scope: apply ONLY when user explicitly requested it (category is set in cutoff_ctx)
+            # Category filter (applied when present in SQL intent).
             cat_cond = ""
             if category:
                 cat_cond = "AND TRIM(UPPER(COALESCE(category, ''))) = :category_val"
@@ -1871,7 +1894,7 @@ async def _cutoff_run_sql(
                 course_cond = "AND TRIM(UPPER(COALESCE(course, ''))) = :course_val"
                 params["course_val"] = course.upper()
 
-            # Sub-category filter — optional across scopes
+            # Sub-category filter (applied when present in SQL intent).
             sub_cond = ""
             if sub_category:
                 sub_cond = "AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_cat_val"
@@ -1950,15 +1973,40 @@ def _cutoff_format_markdown(
     target_states = list(intent.get("target_states") or [])
     states_label = ", ".join(target_states)
     category = str(intent.get("category") or "")
+    sub_category = str(intent.get("sub_category") or "")
     home_state = str(intent.get("home_state") or "")
     college_type = str(intent.get("college_type_filter") or "")
+    course = str(intent.get("course_filter") or "")
+    quota_keywords = [str(k).strip() for k in (intent.get("quota_keywords") or []) if str(k).strip()]
+
+    domicile_note = ""
+    if target_states and home_state:
+        domicile_note = "DOMICILE + OPEN" if home_state.lower() in [s.lower() for s in target_states] else "NON DOMICILE + OPEN"
+
+    applied_filters = [f"- **{metric_label}:** {metric_value}"]
+    applied_filters.append("- **Scope:** All India / MCC" if is_central else "- **Scope:** State")
+    if states_label:
+        applied_filters.append(f"- **Target state(s):** {states_label}")
+    if home_state:
+        applied_filters.append(f"- **Home state:** {home_state}")
+    if domicile_note:
+        applied_filters.append(f"- **Domicile rows shown:** {domicile_note}")
+    if college_type:
+        applied_filters.append(f"- **College type:** {college_type}")
+    if course:
+        applied_filters.append(f"- **Course:** {course}")
+    if category:
+        applied_filters.append(f"- **Category:** {category}")
+    if sub_category:
+        applied_filters.append(f"- **Sub-category:** {sub_category}")
+    if quota_keywords:
+        applied_filters.append(f"- **Quota keywords:** {', '.join(quota_keywords)}")
 
     if not rows:
         return (
             f"I searched the 2025 cutoff data but found no matches for your profile.\n\n"
-            f"**Profile used:** {metric_label} = {metric_value}"
-            + (f", Category = {category}" if category and not is_central else "")
-            + (f", State = {states_label}" if states_label else "")
+            + "### Applied Filters\n\n"
+            + "\n".join(applied_filters)
             + f"\n\nTry relaxing filters — for example, remove college type or try nearby states."
         )
 
@@ -1966,18 +2014,10 @@ def _cutoff_format_markdown(
     lines = [
         "### Best-Match Colleges (2025 Cutoff Data)",
         "",
-        f"- **{metric_label}:** {metric_value}",
+        "### Applied Filters",
+        "",
     ]
-    if is_central:
-        lines.append(f"- **Scope:** All India / MCC")
-        if college_type:
-            lines.append(f"- **College type:** {college_type}")
-    else:
-        lines.append(f"- **Category:** {category}")
-        lines.append(f"- **Home state:** {home_state}")
-        lines.append(f"- **Target state(s):** {states_label}")
-        domicile_note = "DOMICILE + OPEN" if home_state.lower() in [s.lower() for s in target_states] else "NON DOMICILE + OPEN"
-        lines.append(f"- **Domicile rows shown:** {domicile_note}")
+    lines.extend(applied_filters)
 
     lines += [
         f"- **Showing:** {len(shown)} of {len(rows)} matched options",
@@ -2073,9 +2113,25 @@ def _is_cutoff_query(question: str, med_ctx: Dict[str, object]) -> bool:
     ]
     if any(k in q for k in cutoff_keywords):
         return True
-    # Active cutoff conversation — any short reply is a continuation
-    if med_ctx.get("cutoff") and len(question.strip().split()) <= 8:
-        return True
+    # Active cutoff conversation continuation handling:
+    # keep cutoff route for short replies and natural language state-switch asks.
+    cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+    if cutoff_ctx:
+        if len(question.strip().split()) <= 8:
+            return True
+        continuation_phrases = [
+            "what options",
+            "which options",
+            "can i get",
+            "if i look in",
+            "look in ",
+            "in this state",
+            "other state",
+            "different state",
+            "what can i get",
+        ]
+        if any(p in q for p in continuation_phrases):
+            return True
     return False
 
 
@@ -2275,10 +2331,6 @@ async def _v2_handle_cutoff_stage(
     # Merge saved profile into context (only if not already set in context)
     if user_profile.get("home_state") and not cutoff_ctx.get("home_state"):
         cutoff_ctx["home_state"] = user_profile["home_state"]
-    if user_profile.get("category") and not cutoff_ctx.get("category"):
-        cutoff_ctx["category"] = user_profile["category"]
-    if user_profile.get("sub_category") and not cutoff_ctx.get("sub_category"):
-        cutoff_ctx["sub_category"] = user_profile["sub_category"]
 
     # Get conversation history for context
     chat_history = []
@@ -2299,10 +2351,31 @@ async def _v2_handle_cutoff_stage(
     missing = list(intent.get("missing_fields") or [])
     follow_up = str(intent.get("follow_up_message") or "").strip()
 
+    # Deterministic self-home-state override:
+    # If user asks for "my home state" and profile already has it, do not ask again.
+    q_norm = _normalize_text(request.question or "")
+    profile_home_state = _canonicalize_state_name(user_profile.get("home_state"))
+    asks_my_home_state = (
+        "my home state" in q_norm
+        or "home state" in q_norm
+        or "my own state" in q_norm
+        or "in my state" in q_norm
+        or "my hometown" in q_norm
+    )
+    if asks_my_home_state and profile_home_state:
+        intent["scope"] = "state"
+        intent["target_states"] = [profile_home_state]
+        intent["home_state"] = profile_home_state
+        scope = "state"
+        missing = [m for m in missing if m not in {"scope", "target_states"}]
+        if not follow_up:
+            follow_up = ""
+
     # Deterministic override for profile-form submission text (no LLM dependency).
     submitted_profile = _parse_cutoff_profile_submission_text(request.question)
 
     # ── STEP 2: Update cutoff context with resolved values ──
+    category_explicit_this_turn = _question_mentions_category_filters(request.question)
     if intent.get("metric_type"):
         cutoff_ctx["metric_type"] = intent["metric_type"]
     if intent.get("metric_value"):
@@ -2323,14 +2396,18 @@ async def _v2_handle_cutoff_stage(
     # "category" key presence in intent means LLM made a decision about it
     if "category" in intent:
         if intent["category"]:
-            cutoff_ctx["category"] = intent["category"]
+            # Never auto-apply profile-derived category; require explicit category intent in this turn,
+            # or keep/refine an already active conversation filter.
+            if category_explicit_this_turn or cutoff_ctx.get("category"):
+                cutoff_ctx["category"] = intent["category"]
         else:
             # LLM returned null — only clear if it was a deliberate "remove filter" action
             # Keep existing category if this is central scope (LLM returns null by default for central)
-            if scope != "central":
+            if scope != "central" and category_explicit_this_turn:
                 cutoff_ctx.pop("category", None)
     if intent.get("sub_category"):
-        cutoff_ctx["sub_category"] = intent["sub_category"]
+        if category_explicit_this_turn or cutoff_ctx.get("sub_category"):
+            cutoff_ctx["sub_category"] = intent["sub_category"]
     if submitted_profile.get("home_state"):
         cutoff_ctx["home_state"] = submitted_profile["home_state"]
         if "home_state" in missing:
@@ -2352,6 +2429,13 @@ async def _v2_handle_cutoff_stage(
         else:
             cutoff_ctx.pop("quota_keywords", None)
     cutoff_ctx["scope"] = scope
+    # Guard against inconsistent missing_fields from LLM:
+    # when state scope already has resolved target_states, don't ask for state again.
+    if scope == "state" and list(cutoff_ctx.get("target_states") or []):
+        if "target_states" in missing:
+            missing = [m for m in missing if m != "target_states"]
+            if follow_up and "state" in follow_up.lower():
+                follow_up = ""
     cutoff_ctx["last_turn_at"] = datetime.utcnow().isoformat()
 
     # Persist profile immediately once available so first-time form does not reappear
@@ -2457,16 +2541,49 @@ async def _v2_handle_cutoff_stage(
     # Build final SQL intent by merging resolved intent with persisted cutoff_ctx.
     # This ensures refinement filters (category, quota_keywords) from previous turns
     # are preserved even when not mentioned in the current turn.
+    sql_scope = str(cutoff_ctx.get("scope") or scope)
+    is_central_sql_scope = sql_scope == "central" or (
+        len(list(cutoff_ctx.get("target_states") or [])) == 1
+        and str(list(cutoff_ctx.get("target_states") or [""])[0]).upper() == "MCC"
+    )
+
+    # Central-scope guard:
+    # do not auto-carry profile category/sub-category/home-state unless explicitly requested this turn.
+    sql_category = cutoff_ctx.get("category")
+    sql_sub_category = cutoff_ctx.get("sub_category")
+    sql_home_state = cutoff_ctx.get("home_state")
+    if is_central_sql_scope:
+        if not intent.get("category"):
+            sql_category = None
+        if not intent.get("sub_category"):
+            sql_sub_category = None
+        # Domicile/home-state filters should never be auto-applied for generic MCC central queries.
+        sql_home_state = None
+    else:
+        # Non-home-state guard (strict):
+        # apply category/sub-category only for home-state queries.
+        # For other states, never apply these filters.
+        target_states = list(cutoff_ctx.get("target_states") or [])
+        target_state = target_states[0] if target_states else None
+        is_home_state_query = (
+            bool(sql_home_state)
+            and bool(target_state)
+            and str(sql_home_state).strip().lower() == str(target_state).strip().lower()
+        )
+        if not is_home_state_query:
+            sql_category = None
+            sql_sub_category = None
+
     sql_intent = {
-        "scope": cutoff_ctx.get("scope") or scope,
+        "scope": sql_scope,
         "target_states": cutoff_ctx.get("target_states") or [],
         "metric_type": cutoff_ctx.get("metric_type"),
         "metric_value": cutoff_ctx.get("metric_value"),
         "college_type_filter": cutoff_ctx.get("college_type_filter"),
         "course_filter": cutoff_ctx.get("course_filter"),
-        "category": cutoff_ctx.get("category"),
-        "home_state": cutoff_ctx.get("home_state"),
-        "sub_category": cutoff_ctx.get("sub_category"),
+        "category": sql_category,
+        "home_state": sql_home_state,
+        "sub_category": sql_sub_category,
         "quota_keywords": cutoff_ctx.get("quota_keywords"),
     }
     cutoff_result_limit = await get_cutoff_result_limit()
@@ -2488,7 +2605,7 @@ async def _v2_handle_cutoff_stage(
     yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
 
     # ── STEP 5: Format table ──
-    table_md = localize_output(_cutoff_format_markdown(rows, intent, display_limit=cutoff_result_limit))
+    table_md = localize_output(_cutoff_format_markdown(rows, sql_intent, display_limit=cutoff_result_limit))
 
     # Stream table immediately
     for token in sse_tokens_preserving_formatting(table_md):

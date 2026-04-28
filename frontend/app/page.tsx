@@ -683,12 +683,9 @@ export default function Home() {
           if (newConversationId && newConversationId !== conversationId) {
             setConversationId(newConversationId);
           }
-          // Always refresh sidebar once immediately and once shortly after done.
-          // This catches async background title updates without blocking typing.
+          // Refresh sidebar once on completion.
+          // Title updates already trigger a dedicated refresh in onTitle callback.
           setSidebarKey((prev) => prev + 1);
-          window.setTimeout(() => {
-            setSidebarKey((prev) => prev + 1);
-          }, 1200);
           setMessages((prev) => 
             prev.map((msg) => 
               msg.id === assistantMessageId 

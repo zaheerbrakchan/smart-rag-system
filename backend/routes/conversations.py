@@ -3,6 +3,8 @@ Conversation Routes
 Manages user chat history and conversation contexts
 """
 
+import asyncio
+import logging
 from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +18,7 @@ from models.conversation import Conversation, Message, MessageRole
 from dependencies.auth import get_current_user
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
+logger = logging.getLogger(__name__)
 
 
 # ============== SCHEMAS ==============
@@ -107,45 +110,84 @@ async def list_conversations(
     current_user: User = Depends(get_current_user)
 ):
     """List user's conversations"""
-    # Count total
-    count_query = select(func.count(Conversation.id)).where(
-        Conversation.user_id == current_user.id
-    )
-    total = await db.scalar(count_query) or 0
-    
-    # Get conversations with message count
+
+    # Fetch only lightweight columns needed by sidebar (avoid loading heavy JSON fields).
     offset = (page - 1) * page_size
     query = (
-        select(Conversation)
+        select(
+            Conversation.id,
+            Conversation.title,
+            Conversation.summary,
+            Conversation.created_at,
+            Conversation.updated_at,
+        )
         .where(Conversation.user_id == current_user.id)
         .order_by(desc(Conversation.updated_at))
         .offset(offset)
         .limit(page_size)
     )
-    
-    result = await db.execute(query)
-    conversations = result.scalars().all()
-    
-    # Get message counts for each conversation
-    conv_responses = []
-    for conv in conversations:
-        msg_count = await db.scalar(
-            select(func.count(Message.id)).where(Message.conversation_id == conv.id)
+
+    try:
+        # Keep sidebar responsive; fail fast instead of hanging spinner.
+        result = await asyncio.wait_for(db.execute(query), timeout=6.0)
+        rows = result.all()
+    except Exception as exc:
+        logger.warning("list_conversations query timeout/failure user_id=%s: %s", current_user.id, exc)
+        return ConversationListResponse(
+            conversations=[],
+            total=0,
+            page=page,
+            page_size=page_size,
         )
-        conv_responses.append(ConversationResponse(
-            id=conv.id,
-            title=conv.title,
-            summary=conv.summary,
-            message_count=msg_count or 0,
-            created_at=conv.created_at,
-            updated_at=conv.updated_at
-        ))
-    
+
+    conv_ids = [row.id for row in rows]
+    count_map = {}
+    if conv_ids:
+        try:
+            counts_result = await asyncio.wait_for(
+                db.execute(
+                    select(
+                        Message.conversation_id,
+                        func.count(Message.id)
+                    )
+                    .where(Message.conversation_id.in_(conv_ids))
+                    .group_by(Message.conversation_id)
+                ),
+                timeout=4.0,
+            )
+            count_map = {conversation_id: count for conversation_id, count in counts_result.all()}
+        except Exception as exc:
+            logger.warning("list_conversations message_count timeout/failure user_id=%s: %s", current_user.id, exc)
+            count_map = {}
+
+    # Best-effort total count: don't block sidebar on this.
+    total = 0
+    try:
+        total_query = select(func.count(Conversation.id)).where(
+            Conversation.user_id == current_user.id
+        )
+        total = int(await asyncio.wait_for(db.scalar(total_query), timeout=3.0) or 0)
+    except Exception as exc:
+        logger.warning("list_conversations total_count timeout/failure user_id=%s: %s", current_user.id, exc)
+        total = offset + len(rows)
+
+    conv_responses = [
+        ConversationResponse(
+            id=row.id,
+            title=row.title,
+            summary=row.summary,
+            message_count=int(count_map.get(row.id, 0) or 0),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row in rows
+    ]
+
     return ConversationListResponse(
         conversations=conv_responses,
         total=total,
         page=page,
-        page_size=page_size
+        page_size=page_size,
     )
 
 
