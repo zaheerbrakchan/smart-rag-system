@@ -58,8 +58,11 @@ type ParsedCutoffTable = {
 };
 
 function parseCutoffTable(content: string): ParsedCutoffTable | null {
-  const start = content.indexOf('| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |');
-  if (start < 0) return null;
+  const headerMatch = content.match(/\|\s*#\s*\|\s*Institution\s*\|\s*State\s*\|[^\n]*Round\s*\|/i);
+  if (!headerMatch || headerMatch.index === undefined) return null;
+  const headerLine = headerMatch[0];
+  const start = headerMatch.index;
+  const hasTypeColumn = /\|\s*Type\s*\|/i.test(headerLine);
 
   // Find true markdown-table boundary first so any in-between loader/progress text
   // (between table and "Quick Interpretation") is preserved in contentAfterTable.
@@ -104,19 +107,28 @@ function parseCutoffTable(content: string): ParsedCutoffTable | null {
       i += 1;
       continue;
     }
-    if (i + 8 >= tokens.length) break;
+    const rowWidth = hasTypeColumn ? 10 : 9;
+    if (i + rowWidth - 1 >= tokens.length) break;
+
+    const categoryIdx = hasTypeColumn ? i + 4 : i + 3;
+    const quotaIdx = hasTypeColumn ? i + 5 : i + 4;
+    const domicileIdx = hasTypeColumn ? i + 6 : i + 5;
+    const airIdx = hasTypeColumn ? i + 7 : i + 6;
+    const scoreIdx = hasTypeColumn ? i + 8 : i + 7;
+    const roundIdx = hasTypeColumn ? i + 9 : i + 8;
+
     rows.push({
       idx: tokens[i],
       institution: tokens[i + 1],
       state: tokens[i + 2],
-      category: tokens[i + 3],
-      quota: tokens[i + 4],
-      domicile: tokens[i + 5],
-      air: tokens[i + 6],
-      score: tokens[i + 7],
-      round: tokens[i + 8],
+      category: tokens[categoryIdx],
+      quota: tokens[quotaIdx],
+      domicile: tokens[domicileIdx],
+      air: tokens[airIdx],
+      score: tokens[scoreIdx],
+      round: tokens[roundIdx],
     });
-    i += 9;
+    i += rowWidth;
   }
 
   if (rows.length === 0) return null;

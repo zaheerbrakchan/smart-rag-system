@@ -79,6 +79,38 @@ def _summarize_messages_for_debug(messages: List[Dict[str, Any]], tail: int = 6)
     return " | ".join(out)
 
 
+def _log_final_llm_messages_snapshot(messages: List[Dict[str, Any]], *, label: str = "final") -> None:
+    """
+    Verbose snapshot of messages passed to the final answer LLM call.
+    Trim each message to keep logs readable while preserving structure/context.
+    """
+    lines: List[str] = []
+    for i, m in enumerate(messages, 1):
+        role = str(m.get("role", "?"))
+        if m.get("tool_calls"):
+            calls = m.get("tool_calls") or []
+            preview = []
+            for c in calls[:5]:
+                fn = (((c or {}).get("function") or {}).get("name")) or "unknown_tool"
+                args = (((c or {}).get("function") or {}).get("arguments")) or "{}"
+                args = str(args).replace("\n", " ")
+                if len(args) > 220:
+                    args = args[:220] + "..."
+                preview.append(f"{fn}({args})")
+            call_text = "; ".join(preview)
+            lines.append(f"[{i}] role={role} tool_calls={call_text}")
+            continue
+
+        content = str(m.get("content") or "").strip().replace("\n", "\\n")
+        if len(content) > 900:
+            content = content[:900] + "...[truncated]"
+        lines.append(f"[{i}] role={role} content={content}")
+
+    _log_v2_tool_debug(
+        f"[V2][DBG] {label}_llm_messages_start\n" + "\n".join(lines) + f"\n[V2][DBG] {label}_llm_messages_end"
+    )
+
+
 def _build_sufficiency_context(messages: List[Dict[str, Any]], current_question: str, max_turns: int = 4) -> str:
     """
     Build compact conversational context for sufficiency checks so short follow-ups
@@ -104,6 +136,160 @@ def _build_sufficiency_context(messages: List[Dict[str, Any]], current_question:
         + ("\n".join(turns) if turns else "(none)")
         + f"\n\nCurrent user message:\n{current_question}"
     )
+
+
+def build_web_fallback_query_with_llm(
+    client,
+    *,
+    user_question: str,
+    conversation_context: str,
+    kb_tool_result: str,
+) -> str:
+    """
+    Rewrite contextual/vague user text into a web-search-ready query.
+    Keeps logic generic and prompt-driven (no entity hardcoding).
+    """
+    base_query = (user_question or "").strip()
+    if not base_query:
+        return base_query
+    try:
+        kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=2500)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite the user's latest question into ONE concise web search query.\n"
+                        "Rules:\n"
+                        "- Resolve references like above/these/those/same using conversation context.\n"
+                        "- Keep the exact topic and intent from latest user turn.\n"
+                        "- Include explicit entities when inferable from context.\n"
+                        "- Prefer NEET UG India counselling/admission wording and official source intent.\n"
+                        "- Do NOT invent entities not present in context.\n"
+                        "- Return JSON only: {\"query\": \"...\"}."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"LATEST_USER_QUESTION:\n{base_query}\n\n"
+                        f"CONVERSATION_CONTEXT:\n{conversation_context}\n\n"
+                        f"KB_RETRIEVAL_SUMMARY:\n{kb_compact}\n\n"
+                        "Return JSON only."
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        query = str(parsed.get("query", "")).strip()
+        if query:
+            return query
+    except Exception as err:
+        log(f"[V2] ⚠️ Web fallback query rewrite failed; using raw question: {err}")
+    return base_query
+
+
+def plan_targeted_web_gap_fill_with_llm(
+    client,
+    *,
+    user_question: str,
+    conversation_context: str,
+    kb_tool_result: str,
+) -> Dict[str, Any]:
+    """
+    Ask LLM to identify missing entities (if any) and produce targeted web queries.
+    Returns JSON-like dict:
+    {
+      "requested_entities": [...],
+      "covered_entities": [...],
+      "missing_entities": [...],
+      "web_queries": [...]
+    }
+    """
+    try:
+        kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=3500)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You plan retrieval gap-fill for NEET counselling.\n"
+                        "Given user question + conversation context + KB retrieval text:\n"
+                        "1) identify requested entities for this turn,\n"
+                        "2) identify entities sufficiently covered by KB text,\n"
+                        "3) list missing entities,\n"
+                        "4) create focused web queries ONLY for missing entities.\n"
+                        "Rules:\n"
+                        "- Do not invent entities.\n"
+                        "- Keep one query per missing entity when possible.\n"
+                        "- Include topic words from latest turn (fee structure/cutoff/etc.).\n"
+                        "- If nothing is missing, return empty web_queries.\n"
+                        "Return JSON only with keys:\n"
+                        "requested_entities (array), covered_entities (array), missing_entities (array), web_queries (array)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"LATEST_USER_QUESTION:\n{user_question}\n\n"
+                        f"CONVERSATION_CONTEXT:\n{conversation_context}\n\n"
+                        f"KB_RETRIEVAL_TEXT:\n{kb_compact}\n\n"
+                        "Return JSON only."
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=260,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception as err:
+        log(f"[V2] ⚠️ Targeted web gap-fill planning failed: {err}")
+        return {}
+
+
+def _normalize_entity_text(text: str) -> str:
+    s = (text or "").lower()
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _extract_target_entity_from_kb_query(query: str) -> str:
+    q = _normalize_entity_text(query)
+    # Remove common intent words so entity tokens dominate.
+    noise = {
+        "fee", "fees", "structure", "mbbs", "bds", "ug", "neet", "college",
+        "medical", "state", "quota", "admission", "for", "of", "in", "and",
+        "uttar", "pradesh", "general", "obc", "sc", "st", "ews"
+    }
+    tokens = [t for t in q.split() if t not in noise and len(t) > 2]
+    return " ".join(tokens[:6]).strip()
+
+
+def _kb_result_mentions_entity(entity_hint: str, kb_result: str) -> bool:
+    """
+    Conservative entity check:
+    - Require at least 2 meaningful tokens from entity_hint to appear in KB result.
+    - Helps reject nearest-neighbor chunks for different colleges.
+    """
+    hint = _normalize_entity_text(entity_hint)
+    hay = _normalize_entity_text(kb_result)
+    if not hint or not hay:
+        return False
+    tokens = [t for t in hint.split() if len(t) > 2]
+    if not tokens:
+        return False
+    matched = sum(1 for t in set(tokens) if re.search(rf"\b{re.escape(t)}\b", hay))
+    return matched >= min(2, len(set(tokens)))
 
 
 async def _stream_chat_completion_text(
@@ -632,6 +818,169 @@ def _fallback_contextual_chips(
     ]
 
 
+
+def _combine_retrieval_for_suggestion_chips(
+    kb_text: Optional[str],
+    web_text: Optional[str],
+) -> Optional[str]:
+    """Merge KB + web tool outputs for chip grounding (truncated for context limits)."""
+    kb_text = (kb_text or "").strip()
+    web_text = (web_text or "").strip()
+    if not kb_text and not web_text:
+        return None
+    parts: List[str] = []
+    if kb_text:
+        parts.append("=== KNOWLEDGE BASE (retrieved) ===\n" + kb_text[:8000])
+    if web_text:
+        parts.append("=== WEB SEARCH (retrieved) ===\n" + web_text[:6000])
+    return "\n\n".join(parts)[:14000]
+
+
+def _filter_chips_not_supported_by_evidence(replies: List[str], evidence: Optional[str]) -> List[str]:
+    """Drop follow-up chips whose topic is not substantively present in retrieval text."""
+    if not evidence or not replies:
+        return replies
+    ev = _normalize_text(evidence)
+    out: List[str] = []
+    for r in replies:
+        q = _normalize_text(r)
+        skip = False
+        if any(phrase in q for phrase in (
+            "other colleges", "other college", "another college", "another state",
+            "different college", "different colleges", "more colleges", "more college",
+        )):
+            skip = True
+        if not skip and "placement" in q and "placement" not in ev:
+            skip = True
+        if not skip and "internship" in q and "internship" not in ev:
+            skip = True
+        asks_payment_modality = (
+            ("payment" in q and ("option" in q or "method" in q or "mode" in q))
+            or "how to pay" in q or "pay online" in q or "pay fees" in q
+        )
+        if asks_payment_modality:
+            if not any(k in ev for k in (
+                "demand draft", "neft", "rtgs", "upi", "online payment", "bank",
+                "cheque", "cash payment", "installment", "emi", "mode of payment",
+                "payment mode", "payable at", "pay through",
+            )):
+                skip = True
+        if not skip and any(k in q for k in ("scholarship", "fee waiver", "financial aid")):
+            if not any(k in ev for k in ("scholarship", "waiver", "freeship", "fee concession")):
+                skip = True
+        if not skip and "refund" in q:
+            if "refund" not in ev and "forfeit" not in ev:
+                skip = True
+        if not skip:
+            out.append(r)
+    return out
+
+async def _generate_contextual_suggested_replies(
+    user_question: str,
+    assistant_response: str,
+    med_ctx: Optional[Dict[str, object]] = None,
+    retrieval_evidence: Optional[str] = None,
+    output_language: str = "en",
+) -> List[str]:
+    """Generate optional quick-reply chips grounded in retrieval evidence."""
+    response_text = str(assistant_response or "")
+    question_text = str(user_question or "")
+    response_norm = _normalize_text(response_text)
+    evidence_text = (retrieval_evidence or "").strip()
+
+    # Skip chips when collecting profile data
+    collection_signals = [
+        "share either your neet score", "share your neet category",
+        "tell me your home state", "please tell me your home state",
+        "please share your neet rank", "neet air rank or",
+        "neet score/marks", "home state (domicile", "which state(s) should i",
+    ]
+    if any(sig in response_norm for sig in collection_signals):
+        return []
+
+    if _is_greeting_only(question_text):
+        return _medbuddy_default_replies_for_language(output_language)
+
+    max_words = 6 if _normalize_language_code(output_language) == "en" else 14
+
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        topic = str((med_ctx or {}).get("last_topic") or "")
+
+        grounding_rules = (
+            "GROUNDING: Chips must be answerable from RETRIEVED_EVIDENCE only. "
+            "Never suggest 'other colleges', 'another state' unless those are in the evidence. "
+            "Stay on the same college/entity as the response."
+            if evidence_text else
+            "Stay in the same topic lane. Prefer 0-3 chips."
+        )
+
+        user_payload: Dict[str, object] = {
+            "current_user_question": question_text,
+            "assistant_response": response_text[:2000],
+            "last_topic": topic,
+            "ui_language": _normalize_language_code(output_language),
+        }
+        if evidence_text:
+            user_payload["RETRIEVED_EVIDENCE"] = evidence_text[:12000]
+
+        lang_rules = _chip_generation_language_rules(output_language)
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate concise suggested reply chips for a NEET counselling chat UI. "
+                        "Return JSON only: {\"replies\": [\"...\", ...]}. "
+                        "At most 3 chips. Each chip is a short natural follow-up the user might click. "
+                        "Direct action style: 'Check cutoff for AIIMS Bhopal', 'Show UP government only'. "
+                        "Never repeat what the bot already answered. "
+                        "If bot asked for input (rank/state/category), return empty list. "
+                        + lang_rules
+                        + grounding_rules
+                    ),
+                },
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+            temperature=0.2,
+            max_tokens=200,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        replies = parsed.get("replies", [])
+        if not isinstance(replies, list):
+            return []
+
+        cleaned: List[str] = []
+        seen: set = set()
+        for r in replies:
+            text = str(r or "").strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            if len(text.split()) > max_words:
+                continue
+            cleaned.append(text)
+            seen.add(key)
+            if len(cleaned) >= 3:
+                break
+
+        if evidence_text and cleaned:
+            filtered = _filter_chips_not_supported_by_evidence(cleaned, evidence_text)
+            cleaned = filtered if filtered else cleaned[:2]
+
+        if not cleaned:
+            cleaned = _fallback_contextual_chips(question_text, response_text, output_language)
+        return cleaned
+    except Exception as e:
+        log(f"[V2] ⚠️ Suggested replies generation failed: {e}")
+        return []
+
+
+
 MEDBUDDY_CAPS = {
     "cutoff": True,
     "mbbs_abroad": os.getenv("MEDBUDDY_ENABLE_MBBS_ABROAD", "false").lower() in ("1", "true", "yes"),
@@ -718,7 +1067,9 @@ def _extract_onboarding_updates(question: str) -> Dict[str, str]:
     elif any(x in q for x in ["no india only", "india only", "no abroad"]):
         updates["abroad_interest"] = "no"
 
-    if _extract_states_from_text(question, cutoff_db_states=None, use_llm_fallback=False):
+    # Simple state detection using CUTOFF_DB_STATES list
+    q_lower = question.lower()
+    if any(s.lower() in q_lower for s in CUTOFF_DB_STATES if s != "MCC"):
         updates["state_scope"] = "provided"
     return updates
 
@@ -1003,298 +1354,788 @@ def _extract_json_object(raw_text: str) -> Optional[Dict[str, object]]:
             return None
 
 
-def _llm_should_route_cutoff_sql(question: str, med_ctx: Dict[str, object]) -> Optional[bool]:
-    """
-    LLM-first routing decision for cutoff SQL path.
-    Returns True/False when model gives a valid decision, otherwise None.
-    """
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        cutoff_ctx = dict(med_ctx.get("cutoff") or {})
-        prompt = f"""You are a routing classifier for a NEET UG assistant.
 
-Decide if this user message should be routed to SQL cutoff prediction table (`neet_ug_2025_cutoffs`) instead of document RAG.
-
-Route **TRUE** to SQL cutoff when the user wants **college finding, shortlist, prediction, cutoffs tied to their chances**,
-or follow-ups that supply rank/score, category, or state — **even if they have not given a full profile yet**
-(the server will ask for missing rank/score, home state, target state(s), and category **before** running the query).
-
-Route **TRUE** for vague asks like "help me find a good college", "which college can I get", "shortlist", "cutoff for my rank".
-
-Route **FALSE** for general counselling process, exam-only guidance, fee structure, documents, dates, reservation policy
-**without** college prediction, or pure definitions.
-
-College comparison rule (important):
-- If user asks to compare two colleges (fees, facilities, courses, brochure details, documents, eligibility, etc.)
-  and does NOT explicitly ask prediction/chances/cutoff-for-rank, route **FALSE** (RAG path, not SQL cutoff).
-- Do NOT route to SQL cutoff just because two colleges are named.
-- Route **TRUE** for comparisons only when user explicitly asks cutoff/chances/prediction language
-  (for example: "compare cutoffs", "which one can I get at my rank", "chance comparison by rank/score").
-- If the assistant previously asked a comparison clarification like "which college to compare with X?"
-  and user now replies with just a college name (e.g., "AIIMS Delhi"), route **FALSE** and continue comparison in RAG.
-- A bare college-name follow-up after comparison clarification is NOT a cutoff profile input.
-
-Important disambiguation:
-- The phrase "state counselling" alone does **not** mean cutoff prediction.
-- Route **FALSE** for asks like "state counselling details", "counselling process", "how counselling works", "registration steps", unless the user clearly asks prediction/chances/shortlist.
-- Route **TRUE** only when intent is explicitly about "which college can I get", "college prediction", "cutoff for my rank/score", "shortlist colleges".
-
-Conversation last topic: {med_ctx.get("last_topic") or "unknown"}
-Cutoff context already present: {bool(cutoff_ctx)}
-Cutoff context keys: {list(cutoff_ctx.keys())}
-User message: "{question}"
-
-Critical continuation rule:
-- If recent conversation is already in cutoff shortlisting flow and current user message is a short follow-up
-  (state name, category, rank/score value, yes/no, refinement detail), keep routing to SQL cutoff.
-- If current message itself asks counselling process/details (not prediction), route away from SQL cutoff even if previous turn was cutoff.
-- Only continue SQL cutoff when the follow-up is clearly profile/refinement data for prediction.
-- If user asks a different intent like hostel details, infrastructure, fee details, admission documents/process,
-  placements, bonds, stipend, facilities, or comparison not tied to cutoff chances/rank prediction, route FALSE (RAG),
-  even if previous turns were cutoff.
-
-Respond ONLY JSON:
-{{
-  "route_to_cutoff_sql": true or false,
-  "reason": "short reason"
-}}
-"""
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=80,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        data = _extract_json_object(text)
-        if not data or "route_to_cutoff_sql" not in data:
-            log(f"[V2] ⚠️ Cutoff route classifier parse failed: {text[:200]}")
-            return None
-        decision = bool(data.get("route_to_cutoff_sql"))
-        log(f"[V2] 🧭 Cutoff route classifier: {decision} | reason={data.get('reason', '')}")
-        return decision
-    except Exception as e:
-        log(f"[V2] ⚠️ Cutoff route classifier error: {e}")
+def _canonicalize_state_name(raw: Optional[str]) -> Optional[str]:
+    """Map a raw state string to the exact DB value from CUTOFF_DB_STATES."""
+    if not raw:
         return None
-
-
-async def _llm_should_route_cutoff_sql_async(question: str, med_ctx: Dict[str, object]) -> Optional[bool]:
-    return await asyncio.to_thread(_llm_should_route_cutoff_sql, question, med_ctx)
-
-
-def _should_continue_cutoff_from_context(question: str, cutoff_ctx: Dict[str, object]) -> bool:
-    if not cutoff_ctx:
-        return False
-    if cutoff_ctx.get("awaiting_refinement_choice") or cutoff_ctx.get("awaiting_refinement_details"):
-        return True
-    if _missing_cutoff_fields(cutoff_ctx):
-        return True
-
-    q = _normalize_text(question)
-    metric_type, metric_value = _extract_metric_from_text(question)
-    short_ack = q in {"yes", "yes please", "yup", "sure", "ok", "okay"}
-    # Very short inputs in an active cutoff thread are usually continuation tokens.
-    if short_ack or (metric_type is not None and metric_value is not None):
-        return True
-    return False
-
-
-def _is_recent_iso_timestamp(ts: Optional[str], within_minutes: int) -> bool:
-    if not ts:
-        return False
-    try:
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        if dt.tzinfo is not None:
-            now_dt = datetime.now(dt.tzinfo)
-        else:
-            now_dt = datetime.utcnow()
-        return (now_dt - dt) <= timedelta(minutes=within_minutes)
-    except Exception:
-        return False
-
-
-def _expire_stale_cutoff_run_state(cutoff_ctx: Dict[str, object], freshness_minutes: int = 30) -> None:
-    """
-    Keep profile preferences (home_state, category, sub_category, preferences_set),
-    but expire run-specific fields after inactivity.
-    """
-    last_turn_at = str(cutoff_ctx.get("last_turn_at") or "")
-    if _is_recent_iso_timestamp(last_turn_at, freshness_minutes):
-        return
-    for key in [
-        "metric_type",
-        "metric_value",
-        "target_states",
-        "target_states_confirmed",
-        "awaiting_refinement_choice",
-        "awaiting_refinement_details",
-        "college_type_filter",
-        "course_filter",
-        "quota_keywords",
-        "seat_type_keywords",
-        "last_result_count",
-    ]:
-        cutoff_ctx.pop(key, None)
-
-
-def _looks_like_cutoff_profile_payload(question: str) -> bool:
-    q = _normalize_text(question)
-    metric_type, metric_value = _extract_metric_from_text(question)
-    has_metric = metric_type is not None and metric_value is not None
-    has_state_hint = any(k in q for k in ["preferred state", "preffered state", "home state", "domicile"])
-    has_state = len(_extract_states_from_text(question)) > 0 or has_state_hint
-    return has_metric and has_state
-
-
-def _extract_metric_from_text(question: str) -> Tuple[Optional[str], Optional[int]]:
-    q = _normalize_text(question)
-    num_match = re.search(r"\b(\d{2,7})\b", q)
-    if not num_match:
-        return None, None
-    value = int(num_match.group(1))
-
-    if any(k in q for k in ["score", "marks", "mark"]):
-        return "score", value
-    if any(k in q for k in ["air", "rank", "all india rank"]):
-        return "rank", value
-
-    # Fallback inference by range
-    if value <= 720:
-        return "score", value
-    return "rank", value
-
-
-def _normalize_state_key(raw: str) -> str:
-    s = _normalize_text(raw)
-    s = s.replace("&", " and ")
-    s = re.sub(r"[^a-z0-9]+", "", s)
-    return s
-
-
-def _map_canonical_to_cutoff_db_state(
-    canonical_state: str,
-    cutoff_db_states: Optional[List[str]] = None,
-) -> str:
-    if not cutoff_db_states:
-        return canonical_state
-    target_key = _normalize_state_key(canonical_state)
-    for db_state in cutoff_db_states:
-        if _normalize_state_key(db_state) == target_key:
+    s = str(raw).strip().lower()
+    for db_state in CUTOFF_DB_STATES:
+        if db_state.lower() == s:
             return db_state
-    return canonical_state
+    # Partial match fallback
+    for db_state in CUTOFF_DB_STATES:
+        if s in db_state.lower() or db_state.lower() in s:
+            return db_state
+    return str(raw).strip() or None
 
 
-def _llm_map_states_to_db_values(question: str, cutoff_db_states: List[str]) -> List[str]:
-    """
-    LLM fallback for fuzzy state mentions (e.g., 'up' -> 'Uttar Pradesh'),
-    constrained to DB-provided distinct state names.
-    """
-    if not question or not cutoff_db_states:
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CUTOFF MODULE — CLEAN REDESIGN
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ARCHITECTURE:
+#   One LLM call (_cutoff_resolve_intent) does everything:
+#     - Detects scope: central (MCC) or state
+#     - Extracts rank/score, category, states, college_type, course
+#     - Knows what fields are still missing
+#     - Returns a clean structured JSON
+#
+#   One SQL builder (_cutoff_build_and_run_sql) takes that JSON and runs the query.
+#   No hardcoded if-else chains. No multiple LLM calls per turn.
+#
+# SCOPES:
+#   CENTRAL: state='MCC', no category filter, no domicile filter.
+#            Triggered by: AIIMS, Deemed, JIPMER, AMU, BHU, Jamia Milia, MCC, AIQ
+#            Optional: college_type filter (only when user specifically asks)
+#
+#   STATE:   state=<real state>, category filter, domicile filter.
+#            home_state == target_state → DOMICILE or OPEN
+#            home_state != target_state → NON DOMICILE or OPEN
+#            category always applied for state scope
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── DB constants ────────────────────────────────────────────────────────────
+
+CUTOFF_DB_STATES = [
+    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh",
+    "Delhi", "Gujarat", "Haryana", "Himachal Pradesh", "Jammu & Kashmir",
+    "Jharkhand", "Karnataka", "Kerala", "MCC", "Madhya Pradesh", "Maharashtra",
+    "Manipur", "Nagaland", "Odisha", "Puducherry", "Punjab", "Rajasthan",
+    "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand",
+    "West Bengal",
+]
+
+CUTOFF_CENTRAL_COLLEGE_TYPES = {"AIIMS", "Deemed", "JIPMER", "AMU", "BHU", "Jamia Milia"}
+CUTOFF_ALL_COLLEGE_TYPES = {"AIIMS", "Deemed", "JIPMER", "AMU", "BHU", "Jamia Milia", "Government", "Private"}
+CUTOFF_COURSES = {"MBBS", "BDS", "B.Sc. Nursing"}
+CUTOFF_CATEGORIES = {"GENERAL", "OBC", "SC", "ST", "EWS", "PWD"}
+
+
+# ── Profile helpers ─────────────────────────────────────────────────────────
+
+def _normalize_cutoff_category(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    raw = str(value).strip().upper().replace("-", "").replace(" ", "")
+    mapping = {
+        "GENERAL": "GENERAL", "GEN": "GENERAL", "UR": "GENERAL",
+        "OBC": "OBC", "SC": "SC", "ST": "ST", "EWS": "EWS",
+        "PWD": "PWD", "PWBD": "PWD",
+    }
+    return mapping.get(raw) or str(value).strip().upper()
+
+
+async def _load_user_cutoff_profile(user_id: Optional[int]) -> Dict[str, object]:
+    if not user_id:
+        return {}
+    try:
+        from database.connection import async_session_maker
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return {}
+            profile_data = dict(getattr(user, "profile_data", {}) or {})
+            cp = dict(profile_data.get("cutoff_profile") or {})
+            home_state = _canonicalize_state_name(cp.get("home_state"))
+            category = _normalize_cutoff_category(cp.get("category"))
+            sub_cat = str(cp.get("sub_category") or "").strip().upper() or None
+            return {
+                "home_state": home_state,
+                "category": category,
+                "sub_category": sub_cat,
+                "preferences_set": bool(home_state and category),
+            }
+    except Exception as e:
+        log(f"[CUTOFF] ⚠️ Could not load user cutoff profile: {e}")
+        return {}
+
+
+async def _save_user_cutoff_profile(user_id: Optional[int], home_state: str, category: str, sub_category: Optional[str]) -> None:
+    if not user_id or not home_state or not category:
+        return
+    try:
+        from database.connection import async_session_maker
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return
+            profile_data = dict(getattr(user, "profile_data", {}) or {})
+            cp = dict(profile_data.get("cutoff_profile") or {})
+            cp["home_state"] = home_state
+            cp["category"] = category
+            if sub_category:
+                cp["sub_category"] = sub_category
+            cp["preferences_set"] = True
+            cp["updated_at"] = datetime.utcnow().isoformat()
+            profile_data["cutoff_profile"] = cp
+            user.profile_data = profile_data
+            await db.commit()
+    except Exception as e:
+        log(f"[CUTOFF] ⚠️ Could not save user cutoff profile: {e}")
+
+
+async def _get_cutoff_category_options(state: Optional[str]) -> List[str]:
+    if not state:
         return []
     try:
+        from database.connection import async_session_maker
+        from sqlalchemy import text
+        async with async_session_maker() as db:
+            result = await db.execute(
+                text("""
+                    SELECT DISTINCT TRIM(UPPER(category))
+                    FROM neet_ug_2025_cutoffs
+                    WHERE state ILIKE :state AND category IS NOT NULL AND TRIM(category) <> ''
+                    ORDER BY 1
+                """),
+                {"state": state},
+            )
+            return [str(r[0]) for r in result.fetchall() if r[0]]
+    except Exception as e:
+        log(f"[CUTOFF] ⚠️ category options failed: {e}")
+        return []
+
+
+async def _get_cutoff_subcategory_options(state: Optional[str], category: Optional[str]) -> List[str]:
+    if not state or not category:
+        return []
+    try:
+        from database.connection import async_session_maker
+        from sqlalchemy import text
+        async with async_session_maker() as db:
+            result = await db.execute(
+                text("""
+                    SELECT DISTINCT TRIM(UPPER(sub_category))
+                    FROM neet_ug_2025_cutoffs
+                    WHERE state ILIKE :state AND category ILIKE :cat
+                      AND sub_category IS NOT NULL AND TRIM(sub_category) <> ''
+                    ORDER BY 1
+                """),
+                {"state": state, "cat": f"%{category}%"},
+            )
+            return [str(r[0]) for r in result.fetchall() if r[0]]
+    except Exception as e:
+        log(f"[CUTOFF] ⚠️ sub_category options failed: {e}")
+        return []
+
+
+# ── Intent resolver (THE single LLM call per turn) ─────────────────────────
+
+_CUTOFF_INTENT_SYSTEM_PROMPT = """You are a NEET UG counselling assistant that resolves college cutoff search intent.
+
+Given the conversation history and the latest user message, return a JSON object that fully describes what SQL query to run.
+
+## DATABASE FACTS (use exact values)
+States in DB: Andhra Pradesh, Arunachal Pradesh, Assam, Bihar, Chhattisgarh, Delhi, Gujarat,
+  Haryana, Himachal Pradesh, Jammu & Kashmir, Jharkhand, Karnataka, Kerala, MCC,
+  Madhya Pradesh, Maharashtra, Manipur, Nagaland, Odisha, Puducherry, Punjab, Rajasthan,
+  Tamil Nadu, Telangana, Tripura, Uttar Pradesh, Uttarakhand, West Bengal
+
+College types: AIIMS, Deemed, JIPMER, AMU, BHU, Jamia Milia, Government, Private
+
+Central college types (MCC only): AIIMS, Deemed, JIPMER, AMU, BHU, Jamia Milia
+
+Courses: MBBS, BDS, B.Sc. Nursing
+
+Categories: GENERAL, OBC, SC, ST, EWS, PWD
+
+## TWO SCOPES — NEVER MIX
+
+### CENTRAL scope (state = 'MCC')
+Use when user asks about: MCC, AIQ, all india quota, central counselling,
+  AIIMS, JIPMER, Deemed universities, AMU, BHU, Jamia Millia
+Rules:
+- target_states = ["MCC"]
+- Do not assume filters by scope. Any filter is optional and should be applied only when user explicitly asks.
+- Only need: rank or score
+- Set college_type ONLY if user specifically named a type (AIIMS → "AIIMS", deemed → "Deemed")
+- "MCC colleges" or "central" without specific type → college_type = null
+- Carry forward college_type from previous turn if user hasn't changed it
+- Optional refinement filters (set when user explicitly asks):
+  - category: GENERAL | OBC | SC | ST | EWS | PWD
+  - quota: user says "NRI quota", "management quota", "open quota" etc. → set quota_keywords
+  - course: MBBS | BDS | B.Sc. Nursing
+  - domicile, sub_category, seat_type are also optional if user explicitly requests
+
+### STATE scope (state = real Indian state)
+Use when user explicitly names a state or says "my state", "home state", "in [state name]".
+Rules:
+- target_states = [exactly what the user named — never assume]
+- Do not auto-apply extra filters by default. Apply filter columns only when user explicitly asks or already active in context.
+- Need: rank/score + home_state + category + target_states
+
+## CRITICAL RULE — NEVER ASSUME target_states
+target_states must ONLY be set when the user has EXPLICITLY named a state or said "my state"/"home state".
+NEVER default target_states to the user's home_state from their profile.
+If the user has not told you where to search → target_states = [] → ask them.
+
+Example:
+- User says "college shortlist" → scope=need_more_info, ask: "Are you looking for colleges in a specific state, or MCC/All India colleges?"
+- User says "colleges in Bihar" → scope=state, target_states=["Bihar"]
+- User says "AIIMS colleges" → scope=central, target_states=["MCC"]
+- User says "my rank is 2300" (no location) → ask where they want to search
+
+## CONTEXT RULES
+- Carry forward rank/score from previous turns — never ask again
+- Carry forward home_state/category from profile or previous turns — never ask again
+- Carry forward target_states from previous turns — never ask again once set
+- If user switches to central scope → set target_states=["MCC"], drop state scope fields
+- If user switches to a new state → update target_states to new state
+
+## WHAT TO RETURN
+
+Return ONLY this JSON (no extra text):
+{
+  "scope": "central" | "state" | "need_more_info",
+  "target_states": ["MCC"] or ["Bihar", "Uttar Pradesh"] or [],
+  "college_type": null or "AIIMS" | "Deemed" | "JIPMER" | "AMU" | "BHU" | "Jamia Milia" | "Government" | "Private",
+  "course": null or "MBBS" | "BDS" | "B.Sc. Nursing",
+  "metric_type": "rank" | "score" | null,
+  "metric_value": integer or null,
+  "home_state": null or exact state name from DB list,
+  "category": null or "GENERAL" | "OBC" | "SC" | "ST" | "EWS" | "PWD",
+  "sub_category": null or string,
+  "quota_keywords": null or ["NRI", "Management", "Open"] (short keywords for SQL ILIKE filter),
+  "missing_fields": [],
+  "follow_up_message": null or "natural conversational question"
+}
+
+## REFINEMENT RULES (follow-up filters — apply on top of existing results)
+When user sends a follow-up that adds a filter, carry all previous fields forward and ADD the new filter:
+- "show ST category" / "only for OBC" → set category=ST/OBC (works for both central and state scope)
+- "only MBBS" / "BDS only" → set course=MBBS/BDS
+- "NRI quota" / "management quota" → set quota_keywords=["NRI"] or ["Management"]
+- "government colleges only" / "private only" → set college_type=Government/Private
+- "only AIIMS" / "show AIIMS" → set college_type=AIIMS
+- "sub-category XYZ only" / "remove sub-category" → set/clear sub_category
+- "seat type management/open/state quota" → set seat_type_keywords
+- "remove category filter" / "all categories" → set category=null
+
+## MISSING FIELDS LOGIC
+
+### CENTRAL scope:
+- metric missing → missing_fields=["metric"], ask for rank/score
+- category is OPTIONAL for central — only set when user explicitly asks, never required
+- everything else ready → missing_fields=[], run query
+
+### STATE scope — ask in this order (one group at a time):
+1. If scope/location unknown (user hasn't said where to search):
+   → scope=need_more_info, missing_fields=["scope"]
+   → follow_up_message: "Are you looking for colleges in a specific state, or MCC/All India colleges like AIIMS, Deemed universities?"
+
+2. If target_states is empty (user hasn't named a state yet):
+   → missing_fields=["target_states"]
+   → follow_up_message: "Which state(s) would you like me to search in?"
+   → If user_profile has home_state, hint: "Would you like to search in [home_state], or a different state?"
+
+3. If metric missing:
+   → missing_fields=["metric"], ask for rank/score
+
+4. All present → run query
+
+## METRIC DISAMBIGUATION
+- Numbers ≤ 720 → score; Numbers > 720 → rank
+- "rank"/"AIR" → rank; "score"/"marks" → score
+
+## PROFILE DATA
+user_profile contains saved home_state and category — use directly, never ask again.
+But NEVER use home_state as target_states unless user explicitly says "my state" or "home state".
+"""
+
+
+async def _cutoff_resolve_intent(
+    question: str,
+    conversation_history: List[Dict],
+    cutoff_ctx: Dict[str, object],
+    user_profile: Dict[str, object],
+) -> Dict[str, object]:
+    """
+    Single LLM call that resolves everything needed to build the SQL query.
+    Returns a clean dict with scope, filters, missing_fields, follow_up_message.
+    """
+    try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
+
+        # Build a compact conversation context (last 6 messages)
+        history_lines = []
+        for msg in conversation_history[-6:]:
+            role = str(getattr(msg, "role", "")).lower()
+            content = str(getattr(msg, "content", "") or "").strip()
+            if not content:
+                continue
+            if "user" in role:
+                history_lines.append(f"User: {content[:300]}")
+            elif "assistant" in role:
+                history_lines.append(f"Assistant: {content[:300]}")
+        history_text = "\n".join(history_lines) if history_lines else "(none)"
+
+        # Compact current cutoff context
+        ctx_summary = {
+            "scope": cutoff_ctx.get("scope"),
+            "metric_type": cutoff_ctx.get("metric_type"),
+            "metric_value": cutoff_ctx.get("metric_value"),
+            "target_states": cutoff_ctx.get("target_states"),
+            "college_type": cutoff_ctx.get("college_type_filter"),
+            "course": cutoff_ctx.get("course_filter"),
+            "category": cutoff_ctx.get("category"),
+            "home_state": cutoff_ctx.get("home_state"),
+        }
+
+        user_message = f"""CONVERSATION HISTORY:
+{history_text}
+
+CURRENT CUTOFF CONTEXT (already known from this conversation):
+{json.dumps(ctx_summary, ensure_ascii=False)}
+
+USER PROFILE (saved preferences — use directly, never ask again):
+home_state: {user_profile.get('home_state') or 'not set'}
+category: {user_profile.get('category') or 'not set'}
+sub_category: {user_profile.get('sub_category') or 'not set'}
+
+LATEST USER MESSAGE:
+{question}
+
+Return JSON only."""
+
+        resp = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _CUTOFF_INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0,
+            max_tokens=400,
+        )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+
+        if not isinstance(parsed, dict):
+            return {"scope": "need_more_info", "missing_fields": ["metric"], "follow_up_message": "Please share your NEET rank or score."}
+
+        # Validate and clean the response
+        out: Dict[str, object] = {}
+
+        # Scope
+        scope = str(parsed.get("scope") or "need_more_info").lower()
+        if scope not in {"central", "state", "need_more_info"}:
+            scope = "need_more_info"
+        out["scope"] = scope
+
+        # Target states
+        raw_states = parsed.get("target_states") or []
+        valid_states = set(CUTOFF_DB_STATES)
+        target_states = []
+        for s in (raw_states if isinstance(raw_states, list) else []):
+            s = str(s).strip()
+            if s in valid_states:
+                target_states.append(s)
+        out["target_states"] = target_states
+
+        # College type — only valid DB values
+        ct = str(parsed.get("college_type") or "").strip()
+        out["college_type_filter"] = ct if ct in CUTOFF_ALL_COLLEGE_TYPES else None
+
+        # Course
+        course = str(parsed.get("course") or "").strip()
+        out["course_filter"] = course if course in CUTOFF_COURSES else None
+
+        # Metric
+        mt = str(parsed.get("metric_type") or "").lower()
+        out["metric_type"] = mt if mt in {"rank", "score"} else None
+        mv = parsed.get("metric_value")
+        out["metric_value"] = int(mv) if isinstance(mv, (int, float)) and int(mv) > 0 else None
+
+        # State scope fields
+        hs = str(parsed.get("home_state") or "").strip()
+        out["home_state"] = hs if hs in valid_states else None
+
+        cat = str(parsed.get("category") or "").strip().upper()
+        out["category"] = cat if cat in CUTOFF_CATEGORIES else None
+
+        sub = str(parsed.get("sub_category") or "").strip().upper()
+        out["sub_category"] = sub if sub else None
+
+        # Quota keywords (refinement filter — fuzzy ILIKE)
+        qk = parsed.get("quota_keywords")
+        if isinstance(qk, list) and qk:
+            out["quota_keywords"] = [str(k).strip() for k in qk if str(k).strip()][:5]
+        else:
+            out["quota_keywords"] = None
+
+        # Missing fields and follow-up
+        out["missing_fields"] = list(parsed.get("missing_fields") or [])
+        out["follow_up_message"] = str(parsed.get("follow_up_message") or "").strip() or None
+
+        log(
+            f"[CUTOFF] 🧠 Intent resolved | scope={out['scope']} "
+            f"states={out['target_states']} metric={out['metric_type']}={out['metric_value']} "
+            f"college_type={out['college_type_filter']} course={out['course_filter']} "
+            f"category={out['category']} home_state={out['home_state']} "
+            f"missing={out['missing_fields']}"
+        )
+        return out
+
+    except Exception as e:
+        log(f"[CUTOFF] ⚠️ Intent resolver failed: {e}")
+        return {
+            "scope": "need_more_info",
+            "missing_fields": ["metric"],
+            "follow_up_message": "Please share your NEET rank or score so I can find matching colleges.",
+        }
+
+
+# ── SQL builder + runner ────────────────────────────────────────────────────
+
+async def _cutoff_run_sql(
+    intent: Dict[str, object],
+    total_limit: int = 10,
+) -> List[Dict]:
+    """
+    Pure Python SQL builder. Takes the resolved intent dict, builds query, runs it.
+    No LLM involved here.
+    """
+    from database.connection import async_session_maker
+    from sqlalchemy import text
+
+    scope = str(intent.get("scope") or "")
+    target_states = list(intent.get("target_states") or [])
+    metric_type = str(intent.get("metric_type") or "")
+    metric_value = intent.get("metric_value")
+    college_type = str(intent.get("college_type_filter") or "").strip()
+    course = str(intent.get("course_filter") or "").strip()
+    category = str(intent.get("category") or "").strip().upper()
+    home_state = str(intent.get("home_state") or "").strip()
+    sub_category = str(intent.get("sub_category") or "").strip().upper()
+    quota_keywords = list(intent.get("quota_keywords") or []) or None
+
+    if not target_states or not metric_value or not metric_type:
+        return []
+
+    is_central = (scope == "central") or (len(target_states) == 1 and target_states[0].upper() == "MCC")
+
+    # Distribute limit across states
+    n = len(target_states)
+    base = max(1, total_limit // n)
+    rem = max(0, total_limit - base * n)
+    per_state = {s: base + (1 if i < rem else 0) for i, s in enumerate(target_states)}
+
+    all_rows: List[Dict] = []
+
+    async with async_session_maker() as db:
+        for state in target_states:
+            params: Dict[str, object] = {
+                "state_val": state,
+                "limit_val": per_state.get(state, base),
+            }
+
+            # Metric condition
+            if metric_type == "score":
+                metric_cond = "AND score IS NOT NULL AND score <= :metric_val"
+                order_col = "score DESC"
+            else:
+                metric_cond = "AND air_rank IS NOT NULL AND air_rank >= :metric_val"
+                order_col = "air_rank ASC"
+            params["metric_val"] = metric_value
+
+            # Category filter:
+            # - State scope: always apply when set
+            # - Central scope: apply ONLY when user explicitly requested it (category is set in cutoff_ctx)
+            cat_cond = ""
+            if category:
+                cat_cond = "AND TRIM(UPPER(COALESCE(category, ''))) = :category_val"
+                params["category_val"] = category
+
+            # Domicile filter — optional across scopes (applies when home_state is available)
+            dom_cond = ""
+            if home_state:
+                same = home_state.strip().lower() == state.strip().lower()
+                if same:
+                    dom_cond = "AND REPLACE(TRIM(UPPER(COALESCE(domicile, ''))), '-', ' ') IN ('DOMICILE', 'OPEN')"
+                else:
+                    dom_cond = "AND REPLACE(TRIM(UPPER(COALESCE(domicile, ''))), '-', ' ') IN ('NON DOMICILE', 'OPEN')"
+
+            # College type filter
+            ct_cond = ""
+            if college_type and college_type in CUTOFF_ALL_COLLEGE_TYPES:
+                ct_cond = "AND TRIM(college_type) = :college_type_val"
+                params["college_type_val"] = college_type
+
+            # Course filter
+            course_cond = ""
+            if course and course in CUTOFF_COURSES:
+                course_cond = "AND TRIM(UPPER(COALESCE(course, ''))) = :course_val"
+                params["course_val"] = course.upper()
+
+            # Sub-category filter — optional across scopes
+            sub_cond = ""
+            if sub_category:
+                sub_cond = "AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_cat_val"
+                params["sub_cat_val"] = sub_category
+
+            # Quota filter — fuzzy ILIKE, works for both central and state scope
+            quota_cond = ""
+            if quota_keywords:
+                quota_clauses = " OR ".join(
+                    f"quota ILIKE :quota_kw_{i}"
+                    for i in range(len(quota_keywords))
+                )
+                quota_cond = f"AND ({quota_clauses})"
+                for i, kw in enumerate(quota_keywords):
+                    params[f"quota_kw_{i}"] = f"%{kw}%"
+
+            sql = f"""
+                SELECT DISTINCT ON (COALESCE(institution_name, college_name))
+                  state,
+                  COALESCE(institution_name, college_name) AS institution_name,
+                  college_name, college_type, course, category, sub_category,
+                  seat_type, quota, domicile, eligibility, score, air_rank, round
+                FROM neet_ug_2025_cutoffs
+                WHERE state ILIKE :state_val
+                  {metric_cond}
+                  {cat_cond}
+                  {dom_cond}
+                  {ct_cond}
+                  {course_cond}
+                  {sub_cond}
+                  {quota_cond}
+                ORDER BY COALESCE(institution_name, college_name), {order_col}
+                LIMIT :limit_val
+            """
+
+            log(f"[CUTOFF_SQL] state={state} scope={scope} is_central={is_central}")
+            log(f"[CUTOFF_SQL] params={params}")
+
+            result = await db.execute(text(sql), params)
+            rows = [dict(r) for r in result.mappings().all()]
+            log(f"[CUTOFF_SQL] rows fetched={len(rows)}")
+            all_rows.extend(rows)
+
+    # Sort by closest to metric value
+    if metric_type == "score":
+        all_rows.sort(key=lambda r: abs(metric_value - float(r.get("score") or 0)))
+    else:
+        all_rows.sort(key=lambda r: abs(int(r.get("air_rank") or 0) - metric_value))
+
+    # Deduplicate by institution
+    seen: set = set()
+    deduped = []
+    for row in all_rows:
+        key = (row.get("state"), row.get("institution_name") or row.get("college_name"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(row)
+        if len(deduped) >= total_limit:
+            break
+
+    return deduped
+
+
+# ── Markdown formatter ──────────────────────────────────────────────────────
+
+def _cutoff_format_markdown(
+    rows: List[Dict],
+    intent: Dict[str, object],
+    display_limit: int = 10,
+) -> str:
+    scope = str(intent.get("scope") or "")
+    is_central = scope == "central"
+    metric_type = str(intent.get("metric_type") or "rank")
+    metric_value = intent.get("metric_value") or 0
+    metric_label = "Score" if metric_type == "score" else "AIR Rank"
+    target_states = list(intent.get("target_states") or [])
+    states_label = ", ".join(target_states)
+    category = str(intent.get("category") or "")
+    home_state = str(intent.get("home_state") or "")
+    college_type = str(intent.get("college_type_filter") or "")
+
+    if not rows:
+        return (
+            f"I searched the 2025 cutoff data but found no matches for your profile.\n\n"
+            f"**Profile used:** {metric_label} = {metric_value}"
+            + (f", Category = {category}" if category and not is_central else "")
+            + (f", State = {states_label}" if states_label else "")
+            + f"\n\nTry relaxing filters — for example, remove college type or try nearby states."
+        )
+
+    shown = rows[:display_limit]
+    lines = [
+        "### Best-Match Colleges (2025 Cutoff Data)",
+        "",
+        f"- **{metric_label}:** {metric_value}",
+    ]
+    if is_central:
+        lines.append(f"- **Scope:** All India / MCC")
+        if college_type:
+            lines.append(f"- **College type:** {college_type}")
+    else:
+        lines.append(f"- **Category:** {category}")
+        lines.append(f"- **Home state:** {home_state}")
+        lines.append(f"- **Target state(s):** {states_label}")
+        domicile_note = "DOMICILE + OPEN" if home_state.lower() in [s.lower() for s in target_states] else "NON DOMICILE + OPEN"
+        lines.append(f"- **Domicile rows shown:** {domicile_note}")
+
+    lines += [
+        f"- **Showing:** {len(shown)} of {len(rows)} matched options",
+        "",
+        "| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |",
+        "|---|---|---|---|---|---|---:|---:|---|",
+    ]
+
+    for idx, row in enumerate(shown, 1):
+        inst = (row.get("institution_name") or row.get("college_name") or "-").replace("|", " ")
+        course_str = str(row.get("course") or "-").replace("|", " ")
+        lines.append(
+            f"| {idx} | {inst} ({course_str}) | {row.get('state') or '-'} | "
+            f"{row.get('category') or '-'} | "
+            f"{row.get('quota') or '-'} | {row.get('domicile') or '-'} | "
+            f"{row.get('air_rank') if row.get('air_rank') is not None else '-'} | "
+            f"{int(float(row.get('score'))) if row.get('score') is not None else '-'} | "
+            f"{row.get('round') or '-'} |"
+        )
+
+    return "\n".join(lines)
+
+
+# ── Quick interpretation (LLM summary of results) ──────────────────────────
+
+async def _cutoff_quick_interpretation(
+    rows: List[Dict],
+    intent: Dict[str, object],
+    user_question: str,
+) -> str:
+    if not rows:
+        return ""
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        sample = [
+            {
+                "institution": r.get("institution_name") or r.get("college_name"),
+                "state": r.get("state"),
+                "college_type": r.get("college_type"),
+                "course": r.get("course"),
+                "category": r.get("category"),
+                "quota": r.get("quota"),
+                "domicile": r.get("domicile"),
+                "air_rank": r.get("air_rank"),
+                "score": r.get("score"),
+                "round": r.get("round"),
+            }
+            for r in rows[:8]
+        ]
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You map user-entered Indian state mentions to canonical values from an allowed list.\n"
-                        "Return ONLY JSON with key `states` as an array of exact strings from allowed_states.\n"
-                        "Rules:\n"
-                        "- Use only values that exist in allowed_states.\n"
-                        "- Resolve abbreviations like UP, MP, AP, J&K when clear.\n"
-                        "- Do not invent states.\n"
-                        "- If no state is present, return {\"states\": []}."
+                        "Summarize these NEET cutoff results in 4-6 bullet points.\n"
+                        "Anchor the summary to the user's latest question intent (central/state, college type, category, quota).\n"
+                        "Be practical: highlight best options, patterns, rank/score range, rounds, and directly answer what user asked.\n"
+                        "End with ONE natural follow-up question.\n"
+                        "Use only the data provided. No markdown tables. Bullets only."
                     ),
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "query": question,
-                            "allowed_states": cutoff_db_states,
+                            "latest_user_question": user_question,
+                            "profile": intent,
+                            "results": sample,
                         }
                     ),
                 },
             ],
-            temperature=0,
-            max_tokens=180,
+            temperature=0.2,
+            max_tokens=300,
         )
-        raw = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        states = parsed.get("states", [])
-        if not isinstance(states, list):
-            return []
-        allowed = {s for s in cutoff_db_states}
-        deduped: List[str] = []
-        seen = set()
-        for st in states:
-            if isinstance(st, str) and st in allowed and st not in seen:
-                deduped.append(st)
-                seen.add(st)
-        return deduped
+        return (resp.choices[0].message.content or "").strip()
     except Exception as e:
-        log(f"[V2] ⚠️ LLM state-mapping fallback failed: {e}")
-        return []
+        log(f"[CUTOFF] ⚠️ Quick interpretation failed: {e}")
+        return ""
 
 
-def _extract_states_from_text(
-    question: str,
-    cutoff_db_states: Optional[List[str]] = None,
-    use_llm_fallback: bool = False,
-) -> List[str]:
-    if cutoff_db_states:
-        return _llm_map_states_to_db_values(question, cutoff_db_states)
-    # LLM-first policy: without DB-provided state values, do not run regex extraction.
-    return []
+# ── Routing helper: is this a cutoff query? ─────────────────────────────────
 
-
-def _extract_home_state(question: str) -> Optional[str]:
-    q = _normalize_text(question)
-    patterns = [
-        r"(?:i am from|i'm from|my home state is|my state is|i belong to|from)\s+([a-z\s&]+)",
-        r"([a-z\s&]+)\s+(?:home state|domicile)\b",
+def _is_cutoff_query(question: str, med_ctx: Dict[str, object]) -> bool:
+    """Fast pre-check before calling the router LLM."""
+    q = question.strip().lower()
+    cutoff_keywords = [
+        "college", "shortlist", "rank", "score", "cutoff", "cut off", "mbbs",
+        "bds", "aiims", "jipmer", "deemed", "mcc", "aiq", "amu", "bhu",
+        "admission", "seat", "which college", "can i get", "eligible",
+        "nursing", "government medical", "private medical", "state quota",
     ]
-    for pattern in patterns:
-        m = re.search(pattern, q)
-        if not m:
-            continue
-        phrase = m.group(1).strip()
-        for alias, canonical in STATES.items():
-            if canonical == "All-India":
-                continue
-            if re.search(rf"\b{re.escape(alias)}\b", phrase):
-                return canonical
-    return None
+    if any(k in q for k in cutoff_keywords):
+        return True
+    # Active cutoff conversation — any short reply is a continuation
+    if med_ctx.get("cutoff") and len(question.strip().split()) <= 8:
+        return True
+    return False
 
 
-def _canonicalize_state_name(raw: Optional[str]) -> Optional[str]:
-    if not raw:
+def _should_skip_cutoff_router(question: str, med_ctx: Dict[str, object]) -> bool:
+    """
+    Returns True when we can skip the LLM router entirely and go straight to cutoff handler.
+    Handles pure continuations: number reply, single category word, single state name, short refinement.
+    """
+    cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+    if not cutoff_ctx:
+        return False
+    q = question.strip()
+    # Pure number (rank/score reply like "2300")
+    if re.match(r"^\d{2,7}$", q):
+        return True
+    # Single category word
+    if q.lower() in {"general", "obc", "sc", "st", "ews", "pwd", "pwbd"}:
+        return True
+    # Single state name from DB
+    if q in CUTOFF_DB_STATES:
+        return True
+    # Very short message in active scoped conversation
+    if cutoff_ctx.get("scope") and len(q.split()) <= 4:
+        return True
+    # Longer natural-language continuation in an active cutoff thread
+    # e.g., "if i look in maharastra what options i can get?"
+    ql = q.lower()
+    continuation_phrases = [
+        "what options",
+        "can i get",
+        "if i look in",
+        "look in ",
+        "in this state",
+        "other state",
+        "different state",
+    ]
+    if cutoff_ctx.get("metric_value") and any(p in ql for p in continuation_phrases):
+        return True
+    return False
+
+
+async def _get_registered_user_name(user_id: Optional[int]) -> Optional[str]:
+    """Fetch the logged-in student's name for response personalization."""
+    if not user_id:
         return None
-    s = _normalize_text(str(raw))
-    if s in STATES:
-        val = STATES[s]
-        return None if val == "All-India" else val
-    for canonical in sorted(set(STATES.values()), key=len, reverse=True):
-        if canonical.lower() == s:
-            return None if canonical == "All-India" else canonical
-    # Fallback for cutoff DB exact states (handles values like "Jammu & Kashmir", "Tamilnadu").
-    raw_text = str(raw).strip()
-    if raw_text:
-        raw_key = _normalize_state_key(raw_text)
-        for db_state in CUTOFF_SQL_STATES:
-            if _normalize_state_key(db_state) == raw_key:
-                return db_state
-    return None
-
-
-# _is_friend_or_general_profile_mode removed — profile mode is now detected
-# purely by the LLM inside _llm_extract_cutoff_profile_turn via profile_mode field.
+    try:
+        from database.connection import async_session_maker
+        async with async_session_maker() as db:
+            user = await db.get(User, user_id)
+            if not user:
+                return None
+            full_name = str(getattr(user, "full_name", "") or "").strip()
+            return full_name or None
+    except Exception as e:
+        log(f"[V2] ⚠️ Could not load registered user name: {e}")
+        return None
 
 
 async def _get_registered_home_state(user_id: Optional[int]) -> Optional[str]:
+    """Fetch the user's registered home state."""
     if not user_id:
         return None
     try:
@@ -1315,1096 +2156,422 @@ async def _get_registered_home_state(user_id: Optional[int]) -> Optional[str]:
         return None
 
 
-async def _get_registered_user_name(user_id: Optional[int]) -> Optional[str]:
-    """Fetch the logged-in student's name for response personalization."""
-    if not user_id:
-        return None
-    try:
-        from database.connection import async_session_maker
-        async with async_session_maker() as db:
-            user = await db.get(User, user_id)
-            if not user:
-                return None
-            full_name = str(getattr(user, "full_name", "") or "").strip()
-            return full_name or None
-    except Exception as e:
-        log(f"[V2] ⚠️ Could not load registered user name: {e}")
-        return None
 
-
-def _normalize_cutoff_category(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    raw = str(value).strip().upper().replace("-", "").replace(" ", "")
-    mapping = {
-        "GENERAL": "GENERAL",
-        "GEN": "GENERAL",
-        "UR": "GENERAL",
-        "OBC": "OBC",
-        "SC": "SC",
-        "ST": "ST",
-        "EWS": "EWS",
-        "PWD": "PWD",
-        "PWBD": "PWD",
-    }
-    return mapping.get(raw) or str(value).strip().upper()
-
-
-async def _load_user_cutoff_profile(user_id: Optional[int]) -> Dict[str, object]:
-    if not user_id:
-        return {}
-    try:
-        from database.connection import async_session_maker
-
-        async with async_session_maker() as db:
-            user = await db.get(User, user_id)
-            if not user:
-                return {}
-            profile_data = dict(getattr(user, "profile_data", {}) or {})
-            cutoff_profile = dict(profile_data.get("cutoff_profile") or {})
-            home_state = _canonicalize_state_name(cutoff_profile.get("home_state"))
-            category = _normalize_cutoff_category(cutoff_profile.get("category"))
-            sub_category_raw = str(cutoff_profile.get("sub_category") or "").strip()
-            preferences_set = bool(home_state and category)
-            out: Dict[str, object] = {}
-            if home_state:
-                out["home_state"] = home_state
-            if category:
-                out["category"] = category
-            if sub_category_raw:
-                out["sub_category"] = sub_category_raw.upper()
-            out["preferences_set"] = preferences_set
-            return out
-    except Exception as e:
-        log(f"[V2] ⚠️ Could not load user cutoff profile: {e}")
-        return {}
-
-
-async def _save_user_cutoff_profile(user_id: Optional[int], cutoff_ctx: Dict[str, object]) -> None:
-    if not user_id:
-        return
-    try:
-        from database.connection import async_session_maker
-
-        async with async_session_maker() as db:
-            user = await db.get(User, user_id)
-            if not user:
-                return
-            profile_data = dict(getattr(user, "profile_data", {}) or {})
-            cutoff_profile = dict(profile_data.get("cutoff_profile") or {})
-
-            home_state = _canonicalize_state_name(cutoff_ctx.get("home_state"))
-            category = _normalize_cutoff_category(cutoff_ctx.get("category"))
-            sub_category = str(cutoff_ctx.get("sub_category") or "").strip().upper() or None
-
-            if home_state:
-                cutoff_profile["home_state"] = home_state
-            if category:
-                cutoff_profile["category"] = category
-            if sub_category:
-                cutoff_profile["sub_category"] = sub_category
-            cutoff_profile["preferences_set"] = bool(home_state and category)
-            cutoff_profile["updated_at"] = datetime.utcnow().isoformat()
-
-            profile_data["cutoff_profile"] = cutoff_profile
-            user.profile_data = profile_data
-            await db.commit()
-    except Exception as e:
-        log(f"[V2] ⚠️ Could not save user cutoff profile: {e}")
-
-
-async def _get_cutoff_category_options(state: Optional[str]) -> List[str]:
-    if not state:
-        return []
-    try:
-        from database.connection import async_session_maker
-        from sqlalchemy import text
-
-        async with async_session_maker() as db:
-            result = await db.execute(
-                text(
-                    """
-                    SELECT DISTINCT TRIM(UPPER(category)) AS category
-                    FROM neet_ug_2025_cutoffs
-                    WHERE TRIM(state) ILIKE :state_like
-                      AND category IS NOT NULL
-                      AND TRIM(category) <> ''
-                    ORDER BY 1
-                    """
-                ),
-                {"state_like": state},
-            )
-            return [str(row[0]).strip().upper() for row in result.fetchall() if row[0]]
-    except Exception as e:
-        log(f"[V2] ⚠️ Could not load cutoff category options: {e}")
-        return []
-
-
-async def _get_cutoff_subcategory_options(state: Optional[str], category: Optional[str]) -> List[str]:
-    if not state or not category:
-        return []
-    try:
-        from database.connection import async_session_maker
-        from sqlalchemy import text
-
-        async with async_session_maker() as db:
-            result = await db.execute(
-                text(
-                    """
-                    SELECT DISTINCT TRIM(UPPER(sub_category)) AS sub_category
-                    FROM neet_ug_2025_cutoffs
-                    WHERE TRIM(state) ILIKE :state_like
-                      AND category ILIKE :category_like
-                      AND sub_category IS NOT NULL
-                      AND TRIM(sub_category) <> ''
-                    ORDER BY 1
-                    """
-                ),
-                {"state_like": state, "category_like": f"%{category}%"},
-            )
-            return [str(row[0]).strip().upper() for row in result.fetchall() if row[0]]
-    except Exception as e:
-        log(f"[V2] ⚠️ Could not load cutoff sub-category options: {e}")
-        return []
-
-
-def _missing_cutoff_fields(cutoff_ctx: Dict[str, object]) -> List[str]:
-    """
-    Two-phase field collection — mode-aware, no hardcoded detection:
-
-    Phase 1 — profile fields (home_state + category):
-      - 'self' mode: collected once at first cutoff query, saved to DB as preferences.
-        preferences_set=True means phase 1 is already done; skip it.
-      - 'friend' or 'general' mode: always collected fresh every query,
-        never loaded from saved profile, never saved to profile.
-
-    Phase 2 — per-query fields (metric + target_states):
-      Always required regardless of mode. Nothing else ever asked proactively —
-      course, college_type, seat_type, quota are applied ONLY when user mentions them.
-    """
-    missing: List[str] = []
-    profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
-
-    if profile_mode == "self":
-        # Phase 1 only needed once — skip entirely if preferences already saved
-        if not cutoff_ctx.get("preferences_set"):
-            if not cutoff_ctx.get("home_state"):
-                missing.append("home_state")
-            if not cutoff_ctx.get("category"):
-                missing.append("category")
-            if missing:
-                return missing
-    else:
-        # friend/general: always need these fresh in current context
-        if not cutoff_ctx.get("home_state"):
-            missing.append("home_state")
-        if not cutoff_ctx.get("category"):
-            missing.append("category")
-        if missing:
-            return missing
-
-    # Phase 2: per-query essentials — same for all modes
-    if not cutoff_ctx.get("metric_type") or not cutoff_ctx.get("metric_value"):
-        missing.append("metric")
-    if not cutoff_ctx.get("target_states") or not bool(cutoff_ctx.get("target_states_confirmed")):
-        missing.append("target_states")
-    return missing
-
-
-def _build_cutoff_followup_prompt(
-    missing_fields: List[str],
-    cutoff_ctx: Optional[Dict[str, object]] = None,
-    category_options: Optional[List[str]] = None,
-    sub_category_options: Optional[List[str]] = None,
-) -> str:
-    ctx = dict(cutoff_ctx or {})
-    profile_mode = str(ctx.get("profile_mode") or "self")
-
-    # Subject phrasing driven entirely by profile_mode set by LLM
-    if profile_mode == "friend":
-        subject_home = "your friend's home state (domicile)"
-        subject_category = "your friend's NEET category"
-        subject_metric = "your friend's NEET AIR rank or NEET score"
-        subject_states = "which state(s) your friend wants to explore"
-        already_have_home = f"Friend's home state: **{ctx.get('home_state')}**."
-        one_time_note = ""
-    elif profile_mode == "general":
-        subject_home = "the candidate's home state (domicile)"
-        subject_category = "the candidate's NEET category"
-        subject_metric = "the candidate's NEET AIR rank or NEET score"
-        subject_states = "which state(s) to explore"
-        already_have_home = f"Home state: **{ctx.get('home_state')}**."
-        one_time_note = ""
-    else:
-        subject_home = "your home state (domicile)"
-        subject_category = "your NEET category"
-        subject_metric = "your NEET AIR rank or NEET score"
-        subject_states = "which state(s) you want to explore"
-        already_have_home = f"Home state: **{ctx.get('home_state')}**."
-        one_time_note = "\n\nThis is a one-time setup — I'll remember it for future searches."
-
-    if "metric" in missing_fields and "target_states" in missing_fields:
-        return (
-            f"To find matching colleges, please share:\n"
-            f"1. {subject_metric.capitalize()}\n"
-            f"2. And {subject_states}\n\n"
-            f"Example: *Rank 45000, looking in Bihar and UP*"
-        )
-
-    if "metric" in missing_fields:
-        return (
-            f"Please share {subject_metric} "
-            f"so I can match colleges from last year's cutoff data."
-        )
-
-    if "home_state" in missing_fields:
-        return (
-            f"Please share {subject_home}. "
-            f"I need this to apply domicile vs non-domicile cutoff rows correctly.{one_time_note}"
-        )
-
-    if "target_states" in missing_fields:
-        hs = str(ctx.get("home_state") or "").strip()
-        prefix = f"{already_have_home}\n\n" if hs else ""
-        home_hint = (
-            f"You can pick the home state (**{hs}**) or any other state(s).\n\n"
-            if hs else ""
-        )
-        return (
-            f"{prefix}Which state(s) should I look for colleges in?\n\n"
-            f"{home_hint}"
-            f"You can name one or multiple states."
-        )
-
-    if "category" in missing_fields:
-        prefix = f"{already_have_home}\n\n" if ctx.get("home_state") else ""
-        if category_options:
-            opts = " / ".join(category_options[:10])
-            return (
-                f"{prefix}Which is {subject_category}?\n\n"
-                f"Available options: {opts}"
-            )
-        return (
-            f"{prefix}Which is {subject_category}?\n\n"
-            "Options: General / OBC / SC / ST / EWS / PwD"
-        )
-
-    if "sub_category" in missing_fields:
-        if sub_category_options:
-            opts = " / ".join(sub_category_options[:12])
-            return (
-                f"Does any sub-category apply for **{ctx.get('category') or 'selected category'}**?\n\n"
-                f"Available options in cutoff data: {opts}\n\n"
-                "If none apply, just say **none** or **skip**."
-            )
-        return (
-            "Does any sub-category apply? If not, just say **none** or **skip**."
-        )
-
-    return "Please share a bit more detail so I can run cutoff analysis."
-
-
-def _is_affirmative_reply(question: str) -> bool:
-    q = _normalize_text(question)
-    return q in {"yes", "yes please", "yeah", "yup", "sure", "okay", "ok", "go ahead"}
-
-
-def _combine_retrieval_for_suggestion_chips(
-    kb_text: Optional[str],
-    web_text: Optional[str],
-) -> Optional[str]:
-    """Merge KB + web tool outputs for chip grounding (truncated for context limits)."""
-    kb_text = (kb_text or "").strip()
-    web_text = (web_text or "").strip()
-    if not kb_text and not web_text:
-        return None
-    parts: List[str] = []
-    if kb_text:
-        parts.append("=== KNOWLEDGE BASE (retrieved) ===\n" + kb_text[:8000])
-    if web_text:
-        parts.append("=== WEB SEARCH (retrieved) ===\n" + web_text[:6000])
-    return "\n\n".join(parts)[:14000]
-
-
-def _filter_chips_not_supported_by_evidence(replies: List[str], evidence: Optional[str]) -> List[str]:
-    """
-    Drop follow-up chips whose topic is not substantively present in retrieval text.
-    Fee tables often list amounts only — do not offer payment/scholarship/refund chips unless evidence mentions them.
-    """
-    if not evidence or not replies:
-        return replies
-    ev = _normalize_text(evidence)
-    out: List[str] = []
-    for r in replies:
-        q = _normalize_text(r)
-        skip = False
-        # Chips that broaden to unnamed colleges/states are not grounded in a single retrieval.
-        if any(
-            phrase in q
-            for phrase in (
-                "other colleges",
-                "other college",
-                "another college",
-                "another state",
-                "different college",
-                "different colleges",
-                "more colleges",
-                "more college",
-            )
-        ):
-            skip = True
-        if not skip and "placement" in q and "placement" not in ev:
-            skip = True
-        if not skip and "internship" in q and "internship" not in ev:
-            skip = True
-        # Payment *methods* / how to pay (amounts named "fees" are not enough)
-        asks_payment_modality = (
-            ("payment" in q and ("option" in q or "method" in q or "mode" in q))
-            or "how to pay" in q
-            or "pay online" in q
-            or "pay fees" in q
-        )
-        if asks_payment_modality:
-            if not any(
-                k in ev
-                for k in (
-                    "demand draft",
-                    "neft",
-                    "rtgs",
-                    "upi",
-                    "online payment",
-                    "bank",
-                    "cheque",
-                    "cash payment",
-                    "installment",
-                    "emi",
-                    "mode of payment",
-                    "payment mode",
-                    "payable at",
-                    "pay through",
-                )
-            ):
-                skip = True
-        if not skip and any(k in q for k in ("scholarship", "fee waiver", "financial aid")):
-            if not any(k in ev for k in ("scholarship", "waiver", "freeship", "fee concession", "economic weaker")):
-                skip = True
-        if not skip and "refund" in q:
-            if "refund" not in ev and "forfeit" not in ev:
-                skip = True
-        if not skip and "stipend" in q:
-            if "stipend" not in ev:
-                skip = True
-        if not skip:
-            out.append(r)
-    return out
-
-
-async def _generate_contextual_suggested_replies(
-    user_question: str,
-    assistant_response: str,
-    med_ctx: Optional[Dict[str, object]] = None,
-    retrieval_evidence: Optional[str] = None,
-    output_language: str = "en",
-) -> List[str]:
-    """
-    Generate optional quick-reply chips.
-    Uses deterministic shortcuts for known guided prompts, then LLM fallback.
-    When retrieval_evidence is set, chips must stay on-topic and be answerable from that evidence.
-    """
-    response_text = str(assistant_response or "")
-    question_text = str(user_question or "")
-    response_norm = _normalize_text(response_text)
-    evidence_text = (retrieval_evidence or "").strip()
-
-    # If we are explicitly collecting rank/score/category/home state, avoid chips.
-    collection_signals = [
-        "share either your neet score",
-        "share your neet category",
-        "tell me your home state",
-        "please tell me your home state",
-        "please share your neet rank",
-        "neet air rank or",
-        "neet score/marks",
-        "home state (domicile",
-        "candidate's home state",
-        "state(s) or ut(s) should i pull",
-        "which **neet category**",
-        "which state(s) should i pull",
-    ]
-    if any(sig in response_norm for sig in collection_signals):
-        return []
-
-    # Keep initial starter choices stable.
-    if _is_greeting_only(question_text):
-        return _medbuddy_default_replies_for_language(output_language)
-
-    lang_rules = _chip_generation_language_rules(output_language)
-    max_words_per_chip = 6 if _normalize_language_code(output_language) == "en" else 14
-
-    if evidence_text:
-        grounding_rules = (
-            "CRITICAL — Answerability from evidence only:\n"
-            "- Read RETRIEVED_EVIDENCE carefully. Propose a chip ONLY if a correct answer could be written using "
-            "**only** sentences/facts from RETRIEVED_EVIDENCE (plus trivial math like summing line items already shown).\n"
-            "- NEVER propose chips that broaden to unnamed targets: no 'other colleges', 'another college', "
-            "'another state', 'more colleges', or similar unless RETRIEVED_EVIDENCE already lists those extra colleges "
-            "with comparable facts for the same question.\n"
-            "- NEVER propose placement, internship, or non-admission topics unless they appear in RETRIEVED_EVIDENCE.\n"
-            "- If the evidence is mainly a **fee table** (amounts, components, year-wise totals) and does **not** discuss "
-            "how fees are **paid** (bank, DD, UPI, instalments, portal), do **not** ask about payment methods, "
-            "payment options, or online payment — the user would get 'not in documents'.\n"
-            "- Do **not** ask about scholarships, refund policy, admission steps, hostel **facilities** (beyond a fee line), "
-            "or curriculum unless those topics are **explicitly** covered in RETRIEVED_EVIDENCE.\n"
-            "- Good fee-only chips (examples): ask about a **named component** in the table, year-to-year comparison, "
-            "security deposit, or total — only if that detail appears in the evidence.\n"
-            "- Stay on the same named college(s)/state as in the evidence; do not invent new institutes.\n"
-            "- If nothing sensible remains answerable from the evidence, return {\"replies\": []}.\n"
-        )
-    else:
-        grounding_rules = (
-            "No retrieval blob provided — use only the user question and assistant reply:\n"
-            "- Suggest follow-ups only if the assistant answer actually contains enough detail to support a further answer; "
-            "do not suggest payment methods, scholarships, or refunds unless the assistant explicitly gave information about them.\n"
-            "- Stay in the SAME topic lane (fee → fee-related; cutoff → cutoff-related).\n"
-            "- Prefer 0–3 chips; return empty if the reply was already exhaustive or purely disclaimer.\n"
-        )
-
+async def _should_route_to_cutoff(question: str, med_ctx: Dict[str, object]) -> bool:
+    """LLM router: is this question about college cutoff shortlisting?"""
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        topic = str((med_ctx or {}).get("last_topic") or "")
-        is_cutoff_context = (
-            "cutoff" in _normalize_text(topic)
-            or "best-match colleges" in response_norm
-            or "quick interpretation" in response_norm
-            or "cutoff data" in response_norm
-        )
-        cutoff_chip_rules = (
-            "CUTOFF-CONTEXT RULES (strict):\n"
-            "- This turn is cutoff/shortlist context. Chips MUST stay cutoff-focused only.\n"
-            "- Allowed chip intents: refine state, course, quota, domicile/category/sub-category, round/range comparisons, or nearby cutoff checks.\n"
-            "- Do NOT generate hostel, infrastructure, fee breakdown, documents, admission process, placement, bonds, stipend, or other non-cutoff intents.\n"
-            "- If no strong cutoff refinement chip is possible, return {\"replies\": []}.\n"
-        ) if is_cutoff_context else ""
-        user_payload: Dict[str, object] = {
-            "current_user_question": question_text,
-            "assistant_response": response_text[:2000],
-            "last_topic": topic,
-            "ui_language": _normalize_language_code(output_language),
-        }
-        if evidence_text:
-            user_payload["RETRIEVED_EVIDENCE"] = evidence_text[:14000]
-
-        llm_resp = client.chat.completions.create(
+        cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+        resp = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Generate concise suggested reply chips for a NEET counselling chat UI.\n"
-                        "Return JSON only: {\"replies\": [\"...\", \"...\", ...]}.\n\n"
-                        "## CHIP GENERATION STRATEGY\n"
-                        "Generate at most 3 chips, each serving a different purpose:\n\n"
-                        "1. DEPTH chip (always try to include):\n"
-                        "   - Digs deeper into the SAME topic and SAME college/entity the bot just answered about.\n"
-                        "   - Example: Bot answered hostel availability at AIIMS Bhopal -> "
-                        "'Want to know the hostel fee, room type, and mess charges at AIIMS Bhopal?'\n"
-                        "   - Example: Bot answered MBBS fee at GMC Kathua -> "
-                        "'What is the total fee including hostel and mess charges at GMC Kathua?'\n\n"
-                        "2. BREADTH chip (include when relevant):\n"
-                        "   - Explores a RELATED but DIFFERENT topic for the SAME college/entity.\n"
-                        "   - Example: Bot answered hostel at AIIMS Bhopal -> "
-                        "'Should I also show the NEET cutoff rank needed to get into AIIMS Bhopal?'\n"
-                        "   - Example: Bot answered fee at GMC Kathua -> "
-                        "'What documents are needed for admission at GMC Kathua?'\n\n"
-                        "3. COMPARISON chip (include when relevant):\n"
-                        "   - Same topic but DIFFERENT colleges/entities for comparison.\n"
-                        "   - Example: Bot answered hostel at AIIMS Bhopal -> "
-                        "'Want hostel details at other AIIMS campuses like Nagpur, Raipur, or Jodhpur?'\n"
-                        "   - Example: Bot answered fee at GMC Kathua -> "
-                        "'How does GMC Kathua fee compare with other government colleges in J&K?'\n\n"
-                        "## RULES\n"
-                        "- Return 0 to 3 chips only - one per pattern above.\n"
-                        "- Each chip must be a short natural next action the user might click/send next.\n"
-                        "- Prefer imperative/action style over assistant-offer style.\n"
-                        "- Do not start chips with phrases like 'Should I', 'Would you like', 'Want to', or 'Shall I'.\n"
-                        "- Keep chips direct, like: 'Check cutoff for Gonda', 'Show UP government MBBS only', 'Compare with Lucknow colleges'.\n"
-                        "- Always ground chips in the EXACT college/entity/topic from the bot's last answer.\n"
-                        "- Never generate generic chips like 'What is the total fee?' without naming the college.\n"
-                        "- Never repeat the same information the bot already answered.\n"
-                        "- If the bot asked the user for input (rank, state, category), return empty list [].\n"
-                        "- If the answer was about cutoff shortlist results, chips should be about refining "
-                        "(state, college type, course) not repeating the same search.\n"
-                        + lang_rules
-                        + "- Do not include 'Thanks' or acknowledgement chips.\n"
-                        "- Do not repeat the same meaning across chips.\n"
-                        + grounding_rules
-                        + cutoff_chip_rules
-                    ),
+                    "content": "You are a router. Return JSON only: {\"route\": true/false, \"reason\": \"brief\"}",
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(user_payload),
+                    "content": (
+                        "Is this message asking about college shortlisting, cutoffs, or which colleges "
+                        "a student can get based on their NEET rank/score?\n\n"
+                        "Route TRUE for: college shortlist, which college can I get, AIIMS/Deemed/MCC colleges, "
+                        "colleges in a state, rank/score + college query, short follow-ups in active cutoff conversation "
+                        "(supplying rank, state, category, college type).\n"
+                        "Also route TRUE for state-switch continuation wording such as "
+                        "'if I look in Maharashtra what options can I get', even if state spelling is imperfect.\n"
+                        "Route FALSE for: fee structure, hostel, counselling process steps, documents, "
+                        "eligibility rules, exam dates, 'how does X work' questions.\n\n"
+                        f"Active cutoff conversation: {bool(cutoff_ctx.get('metric_value'))}\n"
+                        f"Last topic: {med_ctx.get('last_topic') or 'none'}\n"
+                        f"User message: \"{question}\"\n\n"
+                        "Return JSON only."
+                    ),
                 },
             ],
-            temperature=0.2,
-            max_tokens=220,
+            temperature=0,
+            max_tokens=60,
         )
-        raw = (llm_resp.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        replies = parsed.get("replies", [])
-        if not isinstance(replies, list):
-            return []
-        cleaned: List[str] = []
-        seen = set()
-        for r in replies:
-            text = str(r or "").strip()
-            key = text.casefold()
-            if not text or key in seen:
-                continue
-            if len(text.split()) > max_words_per_chip:
-                continue
-            cleaned.append(text)
-            seen.add(key)
-            if len(cleaned) >= 5:
-                break
-        if evidence_text and cleaned:
-            filtered = _filter_chips_not_supported_by_evidence(cleaned, evidence_text)
-            # If strict grounding filter becomes too aggressive and removes all chips,
-            # keep up to 2 model-generated chips as a graceful fallback for UX continuity.
-            cleaned = filtered if filtered else cleaned[:2]
-        if not cleaned:
-            cleaned = _fallback_contextual_chips(question_text, response_text, output_language)
-        return cleaned
+        data = json.loads(resp.choices[0].message.content or "{}")
+        result = bool(data.get("route", False))
+        log(f"[CUTOFF] 🧭 Route={result} | {data.get('reason', '')}")
+        return result
     except Exception as e:
-        log(f"[V2] ⚠️ Suggested replies generation failed: {e}")
-        return []
+        log(f"[CUTOFF] ⚠️ Router failed: {e}")
+        return False
 
 
-async def _llm_explain_cutoff_results(
+# ── Profile collection UI ───────────────────────────────────────────────────
+
+async def _cutoff_needs_first_time_profile(user_id: Optional[int]) -> bool:
+    """Returns True if user has never set their cutoff profile (home_state + category)."""
+    profile = await _load_user_cutoff_profile(user_id)
+    return not bool(profile.get("preferences_set"))
+
+
+def _parse_cutoff_profile_submission_text(question: str) -> Dict[str, Optional[str]]:
+    """
+    Parse structured hidden profile form text sent by frontend:
+      Home state: X
+      Category: Y
+      Sub-category: Z
+    """
+    text = str(question or "")
+    out: Dict[str, Optional[str]] = {"home_state": None, "category": None, "sub_category": None}
+    if not text:
+        return out
+
+    m_state = re.search(r"^\s*Home state:\s*(.+)\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+    m_cat = re.search(r"^\s*Category:\s*(.+)\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+    m_sub = re.search(r"^\s*Sub-category:\s*(.+)\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+
+    if m_state:
+        raw = m_state.group(1).strip()
+        if raw and raw.lower() not in {"not sure", "not_sure", "none"}:
+            out["home_state"] = _canonicalize_state_name(raw)
+    if m_cat:
+        raw = m_cat.group(1).strip()
+        if raw and raw.lower() not in {"not sure", "not_sure", "none"}:
+            out["category"] = _normalize_cutoff_category(raw)
+    if m_sub:
+        raw = m_sub.group(1).strip()
+        if raw and raw.lower() not in {"not sure", "not_sure", "none", "skip"}:
+            out["sub_category"] = raw.upper()
+    return out
+
+
+# ── Main stage handler ──────────────────────────────────────────────────────
+
+async def _v2_handle_cutoff_stage(
     *,
-    user_question: str,
-    metric_type: str,
-    metric_value: int,
-    home_state: str,
-    target_states: List[str],
-    category: str,
-    sub_category: Optional[str],
-    rows: List[Dict[str, object]],
-) -> str:
-    """Generate a short round-2 explanation for cutoff SQL results."""
-    if not rows:
-        return ""
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        sample_rows = []
-        for row in rows[:8]:
-            sample_rows.append(
+    request: "ChatRequest",
+    conversation_id: Optional[int],
+    med_ctx: Dict[str, object],
+    conversation_memory,
+    preferred_language: str,
+    localize_output,
+    start_time: "datetime",
+    state: Dict[str, object],
+) -> "AsyncGenerator[str, None]":
+    """
+    Clean cutoff handler. Called when routing decides this is a cutoff query.
+    
+    Flow:
+    1. Load user profile from DB
+    2. Call intent resolver (single LLM)
+    3. If missing fields → ask user naturally
+    4. If all fields present → run SQL → format → stream
+    """
+    from services.cutoff_service import format_cutoff_markdown
+    state["handled"] = False
+    t_start = time.perf_counter()
+
+    # Load saved user profile
+    user_profile = await _load_user_cutoff_profile(request.user_id)
+
+    # Get existing cutoff context from conversation
+    cutoff_ctx = dict(med_ctx.get("cutoff") or {})
+
+    # Merge saved profile into context (only if not already set in context)
+    if user_profile.get("home_state") and not cutoff_ctx.get("home_state"):
+        cutoff_ctx["home_state"] = user_profile["home_state"]
+    if user_profile.get("category") and not cutoff_ctx.get("category"):
+        cutoff_ctx["category"] = user_profile["category"]
+    if user_profile.get("sub_category") and not cutoff_ctx.get("sub_category"):
+        cutoff_ctx["sub_category"] = user_profile["sub_category"]
+
+    # Get conversation history for context
+    chat_history = []
+    if conversation_memory:
+        chat_history = conversation_memory.get_chat_history() or []
+
+    # ── STEP 1: Resolve intent ──
+    t_intent = time.perf_counter()
+    intent = await _cutoff_resolve_intent(
+        question=request.question,
+        conversation_history=chat_history,
+        cutoff_ctx=cutoff_ctx,
+        user_profile=user_profile,
+    )
+    intent_ms = _elapsed_ms(t_intent)
+
+    scope = str(intent.get("scope") or "need_more_info")
+    missing = list(intent.get("missing_fields") or [])
+    follow_up = str(intent.get("follow_up_message") or "").strip()
+
+    # Deterministic override for profile-form submission text (no LLM dependency).
+    submitted_profile = _parse_cutoff_profile_submission_text(request.question)
+
+    # ── STEP 2: Update cutoff context with resolved values ──
+    if intent.get("metric_type"):
+        cutoff_ctx["metric_type"] = intent["metric_type"]
+    if intent.get("metric_value"):
+        cutoff_ctx["metric_value"] = int(intent["metric_value"])
+    if intent.get("target_states"):
+        cutoff_ctx["target_states"] = intent["target_states"]
+    if intent.get("college_type_filter"):
+        cutoff_ctx["college_type_filter"] = intent["college_type_filter"]
+    else:
+        # Only clear stale college_type when scope genuinely changed (not just a refinement turn)
+        if intent.get("scope") in {"central", "state"}:
+            cutoff_ctx.pop("college_type_filter", None)
+    if intent.get("course_filter"):
+        cutoff_ctx["course_filter"] = intent["course_filter"]
+    if intent.get("home_state"):
+        cutoff_ctx["home_state"] = intent["home_state"]
+    # Category: set when explicitly provided; set to None if intent says null (user cleared it)
+    # "category" key presence in intent means LLM made a decision about it
+    if "category" in intent:
+        if intent["category"]:
+            cutoff_ctx["category"] = intent["category"]
+        else:
+            # LLM returned null — only clear if it was a deliberate "remove filter" action
+            # Keep existing category if this is central scope (LLM returns null by default for central)
+            if scope != "central":
+                cutoff_ctx.pop("category", None)
+    if intent.get("sub_category"):
+        cutoff_ctx["sub_category"] = intent["sub_category"]
+    if submitted_profile.get("home_state"):
+        cutoff_ctx["home_state"] = submitted_profile["home_state"]
+        if "home_state" in missing:
+            missing = [m for m in missing if m != "home_state"]
+    if submitted_profile.get("category"):
+        cutoff_ctx["category"] = submitted_profile["category"]
+        if "category" in missing:
+            missing = [m for m in missing if m != "category"]
+    # Explicitly clear sub_category when not provided in submitted form.
+    if "Sub-category:" in str(request.question):
+        if submitted_profile.get("sub_category"):
+            cutoff_ctx["sub_category"] = submitted_profile["sub_category"]
+        else:
+            cutoff_ctx.pop("sub_category", None)
+    # Quota keywords: update when provided by LLM, preserve existing when not mentioned
+    if intent.get("quota_keywords") is not None:
+        if intent["quota_keywords"]:
+            cutoff_ctx["quota_keywords"] = intent["quota_keywords"]
+        else:
+            cutoff_ctx.pop("quota_keywords", None)
+    cutoff_ctx["scope"] = scope
+    cutoff_ctx["last_turn_at"] = datetime.utcnow().isoformat()
+
+    # Persist profile immediately once available so first-time form does not reappear
+    # on the next turn due to async race.
+    if request.user_id and cutoff_ctx.get("home_state") and cutoff_ctx.get("category"):
+        await _save_user_cutoff_profile(
+            request.user_id,
+            str(cutoff_ctx.get("home_state") or ""),
+            str(cutoff_ctx.get("category") or ""),
+            str(cutoff_ctx.get("sub_category") or "") or None,
+        )
+
+    med_ctx["cutoff"] = cutoff_ctx
+
+    # ── STEP 2.5: First-time profile form (restored) ──
+    needs_profile_form = bool(
+        request.user_id
+        and await _cutoff_needs_first_time_profile(request.user_id)
+        and (not cutoff_ctx.get("home_state") or not cutoff_ctx.get("category"))
+    )
+    if needs_profile_form:
+        selected_state = str(cutoff_ctx.get("home_state") or "").strip()
+        selected_category = str(cutoff_ctx.get("category") or "").strip()
+        selected_sub_category = str(cutoff_ctx.get("sub_category") or "").strip()
+
+        category_options = await _get_cutoff_category_options(selected_state or None)
+        sub_category_options: List[str] = []
+        if selected_state and selected_category:
+            sub_category_options = await _get_cutoff_subcategory_options(
+                selected_state,
+                selected_category,
+            )
+
+        form_message = localize_output(
+            "Great - I can shortlist colleges accurately once you confirm your profile details below."
+        )
+
+        yield (
+            "data: "
+            + json.dumps(
                 {
-                    "institution": row.get("institution_name") or row.get("college_name"),
-                    "state": row.get("state"),
-                    "course": row.get("course"),
-                    "quota": row.get("quota"),
-                    "domicile": row.get("domicile"),
-                    "air_rank": row.get("air_rank"),
-                    "score": row.get("score"),
-                    "round": row.get("round"),
+                    "type": "cutoff_profile_form",
+                    "message": form_message,
+                    "state": selected_state,
+                    "category": selected_category,
+                    "sub_category": selected_sub_category,
+                    "states": [s for s in CUTOFF_DB_STATES if str(s).upper() != "MCC"],
+                    "categories": category_options,
+                    "sub_categories": sub_category_options,
                 }
             )
-
-        payload = {
-            "question": user_question,
-            "profile": {
-                "metric_type": metric_type,
-                "metric_value": metric_value,
-                "home_state": home_state,
-                "target_states": target_states,
-                "category": category,
-                "sub_category": sub_category,
-            },
-            "matched_count": len(rows),
-            "sample_rows": sample_rows,
-        }
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You summarize NEET cutoff matches for students.\n"
-                        "Return concise markdown only with heading + bullets.\n"
-                        "Do not use markdown tables.\n"
-                        "Use only provided rows; do not invent facts.\n"
-                        "Include 4-8 bullets with practical pattern insights and one final next-step question.\n"
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            temperature=0.2,
-            max_tokens=320,
+            + "\n\n"
         )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        log(f"[V2] ⚠️ Cutoff round-2 explanation skipped: {e}")
-        return ""
+        for token in sse_tokens_preserving_formatting(form_message):
+            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+            if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+        if request.user_id and conversation_id:
+            asyncio.create_task(v2_background_save_conversation_turn(
+                conversation_id,
+                request.question,
+                form_message,
+                int((datetime.now() - start_time).total_seconds() * 1000),
+            ))
+            asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+        log(f"[CUTOFF] ⏱ total={_elapsed_ms(t_start):.0f}ms intent={intent_ms:.0f}ms path=profile_form")
+        state["handled"] = True
+        return
 
+    # ── STEP 3: If missing fields → ask naturally ──
+    # Hard guard: never run SQL if target_states is empty for state scope
+    target_states_resolved = list(intent.get("target_states") or [])
+    if scope == "state" and not target_states_resolved and "target_states" not in missing:
+        missing = ["target_states"]
+        home_hint = (
+            f" Would you like to search in **{user_profile.get('home_state')}**, or a different state?"
+            if user_profile.get("home_state") else ""
+        )
+        follow_up = f"Which state(s) would you like me to search in?{home_hint}"
 
-def _fallback_cutoff_quick_interpretation(
-    *,
-    rows: List[Dict[str, object]],
-    metric_type: str,
-    metric_value: int,
-    target_states: List[str],
-) -> str:
-    """Deterministic backup text when cutoff round-2 LLM is unavailable."""
-    if not rows:
-        return ""
-    top = rows[0]
-    metric_label = "AIR rank" if metric_type == "rank" else "score"
-    top_metric_value = top.get("air_rank") if metric_type == "rank" else top.get("score")
-    top_metric_text = str(top_metric_value) if top_metric_value is not None else "N/A"
-    top_inst = str(top.get("institution_name") or top.get("college_name") or "Top matched college")
-    states_text = ", ".join(target_states) if target_states else "selected states"
-    return (
-        f"- Closest match in **{states_text}** is **{top_inst}** "
-        f"(cutoff {metric_label}: **{top_metric_text}**).\n"
-        f"- Your input {metric_label} is **{metric_value}**; options shown are the nearest available rows.\n"
-        "- You can refine further by course, quota, domicile mode, or adding/removing states."
+    if missing or scope == "need_more_info":
+        if not follow_up:
+            follow_up = "Could you share a bit more? I need your NEET rank or score to find matching colleges."
+        follow_up = localize_output(follow_up)
+        log(f"[CUTOFF] 📝 Missing fields: {missing} → asking: {follow_up[:80]}")
+        for token in sse_tokens_preserving_formatting(follow_up):
+            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+            if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+        if request.user_id and conversation_id:
+            asyncio.create_task(v2_background_save_conversation_turn(
+                conversation_id, request.question, follow_up,
+                int((datetime.now() - start_time).total_seconds() * 1000),
+            ))
+            asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+        log(f"[CUTOFF] ⏱ total={_elapsed_ms(t_start):.0f}ms intent={intent_ms:.0f}ms path=missing_fields")
+        state["handled"] = True
+        return
+
+    # ── STEP 4: Run SQL ──
+    # Build final SQL intent by merging resolved intent with persisted cutoff_ctx.
+    # This ensures refinement filters (category, quota_keywords) from previous turns
+    # are preserved even when not mentioned in the current turn.
+    sql_intent = {
+        "scope": cutoff_ctx.get("scope") or scope,
+        "target_states": cutoff_ctx.get("target_states") or [],
+        "metric_type": cutoff_ctx.get("metric_type"),
+        "metric_value": cutoff_ctx.get("metric_value"),
+        "college_type_filter": cutoff_ctx.get("college_type_filter"),
+        "course_filter": cutoff_ctx.get("course_filter"),
+        "category": cutoff_ctx.get("category"),
+        "home_state": cutoff_ctx.get("home_state"),
+        "sub_category": cutoff_ctx.get("sub_category"),
+        "quota_keywords": cutoff_ctx.get("quota_keywords"),
+    }
+    cutoff_result_limit = await get_cutoff_result_limit()
+    t_sql = time.perf_counter()
+    rows = await _cutoff_run_sql(sql_intent, total_limit=cutoff_result_limit)
+    sql_ms = _elapsed_ms(t_sql)
+    cutoff_ctx["last_result_count"] = len(rows)
+    med_ctx["cutoff"] = cutoff_ctx
+
+    log(f"[CUTOFF] ✅ SQL done | rows={len(rows)} sql={sql_ms:.0f}ms")
+
+    # Source tag
+    source = {
+        "file_name": "neet_ug_2025_cutoffs",
+        "document_type": "sql_cutoff_table",
+        "state": ", ".join(intent.get("target_states") or []),
+        "text_snippet": f"Matched rows: {len(rows)}",
+    }
+    yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
+
+    # ── STEP 5: Format table ──
+    table_md = localize_output(_cutoff_format_markdown(rows, intent, display_limit=cutoff_result_limit))
+
+    # Stream table immediately
+    for token in sse_tokens_preserving_formatting(table_md):
+        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+        if V2_STREAM_TOKEN_DELAY_SEC > 0:
+            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+
+    # ── STEP 6: Quick interpretation (concurrent) ──
+    yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': True})}\n\n"
+    t_explain = time.perf_counter()
+    explain_task = asyncio.create_task(_cutoff_quick_interpretation(rows, intent, request.question))
+
+    # ── STEP 7: Suggested chips (concurrent) ──
+    chips_task = asyncio.create_task(
+        _generate_contextual_suggested_replies(
+            request.question,
+            table_md,
+            med_ctx,
+            retrieval_evidence=table_md,
+            output_language=preferred_language,
+        )
     )
 
+    explanation = await explain_task
+    explain_ms = _elapsed_ms(t_explain)
 
-def _extract_cutoff_refinements(
-    question: str,
-    cutoff_db_states: Optional[List[str]] = None,
-) -> Dict[str, object]:
-    updates: Dict[str, object] = {}
-    states = _extract_states_from_text(
-        question,
-        cutoff_db_states=cutoff_db_states,
-        use_llm_fallback=True,
+    disclaimer = (
+        "\n\n> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
+        "Always verify on official MCC/state counselling portals.*"
     )
-    if states:
-        updates["target_states"] = states
-    # Keep this helper minimal; quota/type relaxation is interpreted by LLM path.
-    return updates
 
+    full_answer = table_md
+    if explanation:
+        tail = "\n\n### Quick Interpretation\n\n" + localize_output(explanation) + disclaimer
+        full_answer = table_md + tail
+        yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': False})}\n\n"
+        for token in sse_tokens_preserving_formatting(tail):
+            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
+            if V2_STREAM_TOKEN_DELAY_SEC > 0:
+                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
+    else:
+        tail = disclaimer
+        full_answer = table_md + tail
+        yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': False})}\n\n"
+        for token in sse_tokens_preserving_formatting(tail):
+            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-async def _llm_interpret_cutoff_refinement(
-    question: str,
-    cutoff_ctx: Dict[str, object],
-    allowed_states: List[str],
-    current_turn_signals: Optional[Dict[str, object]] = None,
-) -> Dict[str, object]:
-    """
-    LLM interprets follow-up refinement intent after results are shown.
-    Handles: state changes, college_type, course, seat_type, quota.
-    All mapping is done by the LLM — no hardcoded keyword lists.
-    Called only when user sends a follow-up after seeing results.
-    """
-    if not question:
-        return {"apply": False}
+    # Chips
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        payload = {
-            "question": question,
-            "current_context": {
-                "metric_type": cutoff_ctx.get("metric_type"),
-                "metric_value": cutoff_ctx.get("metric_value"),
-                "category": cutoff_ctx.get("category"),
-                "home_state": cutoff_ctx.get("home_state"),
-                "target_states": list(cutoff_ctx.get("target_states") or []),
-                "active_college_type": cutoff_ctx.get("college_type_filter"),
-                "active_course": cutoff_ctx.get("course_filter"),
-                "active_quota_keywords": cutoff_ctx.get("quota_keywords"),
-                "active_seat_type_keywords": cutoff_ctx.get("seat_type_keywords"),
-                "last_result_count": cutoff_ctx.get("last_result_count"),
-            },
-            "current_turn_signals": dict(current_turn_signals or {}),
-            "allowed_states": allowed_states,
-        }
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You interpret NEET UG cutoff search refinement intent from a user follow-up message.\n"
-                        "The user has already seen a college shortlist and is now refining or expanding it.\n"
-                        "Output structured JSON only — no extra text.\n\n"
+        chips = await chips_task
+        if chips:
+            yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': chips})}\n\n"
+    except Exception:
+        pass
 
-                        "## RETURN KEYS\n"
-                        "apply: bool — true if any change should be applied\n"
-                        "target_states: array of exact strings from allowed_states (empty = no change)\n"
-                        "college_type_filter: exact string | null — one of: "
-                        "Government, Private, Deemed, AIIMS, JIPMER, AMU, BHU, Jamia Milia\n"
-                        "clear_college_type: bool — true if user wants to remove college type filter\n"
-                        "course_filter: exact string | null — one of: MBBS, BDS, B.Sc. Nursing\n"
-                        "clear_course: bool — true if user wants all courses again\n"
-                        "quota_keywords: array of short keyword strings for ILIKE search | null\n"
-                        "clear_quota: bool — true if user wants to remove quota filter\n"
-                        "seat_type_keywords: array of short keyword strings for ILIKE search | null\n"
-                        "clear_seat_type: bool — true if user wants to remove seat type filter\n\n"
+    # Update context
+    med_ctx["stage"] = "normal_qa"
+    med_ctx["last_topic"] = "Cutoff analysis"
+    med_ctx["last_state"] = ", ".join(intent.get("target_states") or [])
+    med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
+    med_ctx["cutoff"] = cutoff_ctx
 
-                        "## STATE RULES\n"
-                        "- Only change target_states if user explicitly names a state or says switch/home state only/nearby.\n"
-                        "- If current_turn_signals has explicit_states_count > 0, metric_detected, or category_detected, "
-                        "treat as profile input not refinement — return apply=false.\n"
-                        "- Use only values from allowed_states.\n"
-                        "- 'home state only' → target_states = [home_state from current_context].\n"
-                        "- 'nearby states' / 'expand' → intelligently expand around current target_states.\n\n"
+    yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
 
-                        "## COLLEGE TYPE RULES\n"
-                        "Map user language to exact DB values:\n"
-                        "- government / govt / sarkari / public college → 'Government'\n"
-                        "- private college → 'Private'\n"
-                        "- deemed / deemed university → 'Deemed'\n"
-                        "- aiims → 'AIIMS'\n"
-                        "- jipmer → 'JIPMER'\n"
-                        "- amu / aligarh muslim → 'AMU'\n"
-                        "- bhu / banaras hindu → 'BHU'\n"
-                        "- jamia / jamia millia → 'Jamia Milia'\n"
-                        "- 'show all types' / 'any college type' / 'remove type filter' → clear_college_type=true\n\n"
+    total_ms = _elapsed_ms(t_start)
+    log(
+        f"[CUTOFF] ⏱ total={total_ms:.0f}ms | intent={intent_ms:.0f}ms "
+        f"sql={sql_ms:.0f}ms explain={explain_ms:.0f}ms path=final_answer"
+    )
 
-                        "## COURSE RULES\n"
-                        "Map user language to exact DB values:\n"
-                        "- mbbs / medical / mbbs seat → 'MBBS'\n"
-                        "- bds / dental / dentistry → 'BDS'\n"
-                        "- nursing / bsc nursing / b.sc nursing → 'B.Sc. Nursing'\n"
-                        "- 'all courses' / 'any course' / 'remove course filter' → clear_course=true\n"
-                        "Only set course_filter when user explicitly restricts to a course.\n\n"
+    if request.user_id and conversation_id:
+        asyncio.create_task(v2_background_save_conversation_turn(
+            conversation_id, request.question, full_answer,
+            int((datetime.now() - start_time).total_seconds() * 1000),
+            sources=[source],
+        ))
+        asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
+        asyncio.create_task(v2_background_generate_conversation_title(
+            conversation_id, request.question, log_label="cutoff"
+        ))
 
-                        "## QUOTA RULES (fuzzy ILIKE keywords — DB values are inconsistent)\n"
-                        "Extract short keywords the user intends. Examples:\n"
-                        "- all india quota / aiq → ['AIQ', 'All India']\n"
-                        "- state quota → ['State Quota']\n"
-                        "- management quota / management seats → ['Management']\n"
-                        "- nri quota → ['NRI']\n"
-                        "- open quota → ['Open']\n"
-                        "- defence quota / army quota → ['Defence', 'Defense']\n"
-                        "- 'remove quota filter' → clear_quota=true\n"
-                        "Keep keywords short — they are used in SQL ILIKE '%keyword%'.\n\n"
+    state["handled"] = True
 
-                        "## SEAT TYPE RULES (fuzzy ILIKE keywords)\n"
-                        "Only set if user explicitly mentions seat type. Examples:\n"
-                        "- government seat → ['Government']\n"
-                        "- nri seat → ['NRI']\n"
-                        "- management seat → ['Management', 'MGT']\n"
-                        "- state quota seat → ['State Quota']\n"
-                        "- 'remove seat type filter' → clear_seat_type=true\n\n"
-
-                        "## CRITICAL RULE\n"
-                        "Only set apply=true when there is a clear, actionable refinement in the current message.\n"
-                        "If user is just acknowledging, asking a general question, or continuing — return apply=false.\n"
-                        "Never invent filters the user did not mention."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            temperature=0,
-            max_tokens=300,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            return {"apply": False}
-
-        out: Dict[str, object] = {
-            "apply": bool(parsed.get("apply", False)),
-            "target_states": [],
-            "college_type_filter": None,
-            "clear_college_type": bool(parsed.get("clear_college_type", False)),
-            "course_filter": None,
-            "clear_course": bool(parsed.get("clear_course", False)),
-            "quota_keywords": None,
-            "clear_quota": bool(parsed.get("clear_quota", False)),
-            "seat_type_keywords": None,
-            "clear_seat_type": bool(parsed.get("clear_seat_type", False)),
-        }
-
-        # Validate target states
-        allowed = {s for s in allowed_states}
-        states = parsed.get("target_states", [])
-        if isinstance(states, list):
-            deduped: List[str] = []
-            seen: set = set()
-            for st in states:
-                if isinstance(st, str) and st in allowed and st not in seen:
-                    deduped.append(st)
-                    seen.add(st)
-            out["target_states"] = deduped[:6]
-
-        # Validate college_type_filter
-        valid_college_types = {
-            "Government", "Private", "Deemed", "AIIMS", "JIPMER", "AMU", "BHU", "Jamia Milia"
-        }
-        ct = parsed.get("college_type_filter")
-        if isinstance(ct, str) and ct.strip() in valid_college_types:
-            out["college_type_filter"] = ct.strip()
-
-        # Validate course_filter
-        valid_courses = {"MBBS", "BDS", "B.Sc. Nursing"}
-        cf = parsed.get("course_filter")
-        if isinstance(cf, str) and cf.strip() in valid_courses:
-            out["course_filter"] = cf.strip()
-
-        # Validate quota_keywords (short strings for ILIKE)
-        qk = parsed.get("quota_keywords")
-        if isinstance(qk, list) and qk:
-            out["quota_keywords"] = [str(k).strip() for k in qk if str(k).strip()][:5]
-
-        # Validate seat_type_keywords
-        stk = parsed.get("seat_type_keywords")
-        if isinstance(stk, list) and stk:
-            out["seat_type_keywords"] = [str(k).strip() for k in stk if str(k).strip()][:5]
-
-        # Set apply=true if any change is present
-        if (
-            out["target_states"]
-            or out["college_type_filter"]
-            or out["clear_college_type"]
-            or out["course_filter"]
-            or out["clear_course"]
-            or out["quota_keywords"]
-            or out["clear_quota"]
-            or out["seat_type_keywords"]
-            or out["clear_seat_type"]
-        ):
-            out["apply"] = True
-
-        return out
-    except Exception as e:
-        log(f"[V2] ⚠️ Cutoff refinement interpreter failed: {e}")
-        return {"apply": False}
-
-
-async def _llm_extract_cutoff_profile_turn(
-    question: str,
-    cutoff_ctx: Dict[str, object],
-    allowed_states: List[str],
-    pending_fields: Optional[List[str]] = None,
-    allowed_sub_categories: Optional[List[str]] = None,
-) -> Dict[str, object]:
-    """
-    LLM-only extraction for cutoff profile fields.
-    Determines who the query is for (self/friend/general) and extracts
-    all relevant fields. No hardcoded keyword detection anywhere.
-    """
-    if not question:
-        return {}
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        payload = {
-            "question": question,
-            "current_context": {
-                "profile_mode": cutoff_ctx.get("profile_mode"),
-                "metric_type": cutoff_ctx.get("metric_type"),
-                "metric_value": cutoff_ctx.get("metric_value"),
-                "category": cutoff_ctx.get("category"),
-                "home_state": cutoff_ctx.get("home_state"),
-                "target_states": list(cutoff_ctx.get("target_states") or []),
-            },
-            "allowed_states": allowed_states,
-            "pending_fields": list(pending_fields or []),
-            "allowed_sub_categories": list(allowed_sub_categories or []),
-        }
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract NEET UG cutoff search profile fields from a user message "
-                        "in a counselling chat.\n\n"
-
-                        "## WHO IS THIS QUERY FOR? (profile_mode)\n"
-                        "Determine the subject of the query:\n"
-                        "- 'self': user is asking for themselves (default when no other signal)\n"
-                        "- 'friend': user explicitly mentions asking for a friend, cousin, sibling, "
-                        "relative, child, son, daughter, or any person they refer to as someone else\n"
-                        "- 'general': user is asking hypothetically or about an unnamed/unrelated person "
-                        "('if someone has rank X', 'a student with score Y', 'in general', "
-                        "'suppose a candidate')\n\n"
-                        "If current_context already has profile_mode set, preserve it UNLESS the current "
-                        "message clearly signals a switch (e.g. was 'self', now user says 'for my friend').\n\n"
-
-                        "## RETURN JSON WITH EXACTLY THESE KEYS\n"
-                        "profile_mode: 'self' | 'friend' | 'general'\n"
-                        "metric_type: 'rank' | 'score' | null\n"
-                        "metric_value: integer | null\n"
-                        "home_state: exact string from allowed_states | null\n"
-                        "target_states: array of exact strings from allowed_states\n"
-                        "category: GENERAL | OBC | SC | ST | EWS | PWD | null\n"
-                        "sub_category: exact string from allowed_sub_categories | null\n"
-                        "signals: object with booleans: metric_detected, category_detected, "
-                        "explicit_states_detected, home_state_detected\n\n"
-
-                        "## EXTRACTION RULES\n\n"
-                        "States:\n"
-                        "- Use ONLY values from allowed_states.\n"
-                        "- Resolve common abbreviations: UP→Uttar Pradesh, MP→Madhya Pradesh, "
-                        "J&K→Jammu & Kashmir, AP→Andhra Pradesh, TN→Tamilnadu, HP→Himachal Pradesh, "
-                        "UK→Uttarakhand, MH→Maharashtra, KA/KL→Karnataka/Kerala.\n\n"
-
-                        "Metric (rank vs score):\n"
-                        "- Numbers ≤ 720 are almost certainly NEET scores (max score is 720).\n"
-                        "- Numbers > 720 are AIR ranks.\n"
-                        "- Keywords 'rank'/'AIR'/'all india rank' → metric_type=rank.\n"
-                        "- Keywords 'score'/'marks'/'percentile' → metric_type=score.\n"
-                        "- When ambiguous, infer from range above.\n\n"
-
-                        "Home state:\n"
-                        "- Extract when user says 'from X', 'home state is X', 'domicile X', "
-                        "'belongs to X', 'native of X', or in friend mode 'friend is from X'.\n"
-                        "- If pending_fields includes 'home_state' and user gives a single state name, "
-                        "treat as home_state AND include in target_states if no other target given.\n\n"
-
-                        "Target states:\n"
-                        "- States where user wants to explore colleges. May differ from home_state.\n"
-                        "- 'home state only' → target_states = [home_state from current_context].\n"
-                        "- 'check in X' / 'switch to X' / 'look in X' → target_states = [X].\n"
-                        "- If user gives rank/score + one state in natural text (e.g., 'rank 2300 jharkhand', "
-                        "'AIR 23k in UP', Hindi/Marathi equivalents), treat that state as target_states.\n"
-                        "- Do not ask target state again when the message already contains one clear state for search.\n"
-                        "- Compact replies are valid profile input. Example: '23000 Delhi' means "
-                        "metric_value=23000 (rank by range) and target_states=['Delhi'].\n"
-                        "- If pending_fields includes target_states and user provides one clear state token "
-                        "(e.g., 'Delhi'), set target_states to that state and mark explicit_states_detected=true.\n"
-                        "- For rank/score-only replies, do NOT fabricate target_states.\n\n"
-
-                        "Category:\n"
-                        "- Map: general/UR/open/unreserved → GENERAL, obc → OBC, sc → SC, "
-                        "st → ST, ews → EWS, pwd/pwbd/handicapped/disabled/physically handicapped → PWD.\n"
-                        "- If pending_fields includes 'category' and user reply is a short category word, "
-                        "map it with high confidence.\n\n"
-
-                        "Sub-category:\n"
-                        "- Only extract if allowed_sub_categories is non-empty and user mentions one.\n"
-                        "- If user says 'none' or 'skip', return sub_category=null.\n\n"
-
-                        "General:\n"
-                        "- Do not fabricate values. If not clearly in the message, return null.\n"
-                        "- For friend/general mode: extracted fields belong to the friend/candidate.\n"
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            temperature=0,
-            max_tokens=300,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            return {}
-
-        allowed = {s for s in allowed_states}
-        out: Dict[str, object] = {}
-
-        # Profile mode
-        pm = parsed.get("profile_mode")
-        if pm in {"self", "friend", "general"}:
-            out["profile_mode"] = pm
-
-        # Metric
-        mt = parsed.get("metric_type")
-        if mt in {"rank", "score"}:
-            out["metric_type"] = mt
-        mv = parsed.get("metric_value")
-        if isinstance(mv, (int, float)) and int(mv) > 0:
-            out["metric_value"] = int(mv)
-
-        # Category
-        cat = parsed.get("category")
-        if isinstance(cat, str) and cat.strip():
-            out["category"] = cat.strip().upper()
-
-        # Sub-category
-        sub_cat = str(parsed.get("sub_category") or "").strip().upper()
-        allowed_sub = {
-            str(s).strip().upper()
-            for s in (allowed_sub_categories or [])
-            if str(s).strip()
-        }
-        if sub_cat and (not allowed_sub or sub_cat in allowed_sub):
-            out["sub_category"] = sub_cat
-
-        # Home state
-        hs = parsed.get("home_state")
-        if isinstance(hs, str) and hs in allowed:
-            out["home_state"] = hs
-
-        # Target states
-        ts = parsed.get("target_states", [])
-        if isinstance(ts, list):
-            deduped: List[str] = []
-            seen: set = set()
-            for st in ts:
-                if isinstance(st, str) and st in allowed and st not in seen:
-                    deduped.append(st)
-                    seen.add(st)
-            if deduped:
-                out["target_states"] = deduped[:6]
-
-        # Signals
-        signals = parsed.get("signals")
-        if isinstance(signals, dict):
-            out["signals"] = {
-                "metric_detected": bool(signals.get("metric_detected", False)),
-                "category_detected": bool(signals.get("category_detected", False)),
-                "explicit_states_detected": bool(signals.get("explicit_states_detected", False)),
-                "home_state_detected": bool(signals.get("home_state_detected", False)),
-            }
-
-        # LLM-assisted recovery: when target_states is pending, metric is detected, and a single
-        # state was extracted into home_state from compact natural text (e.g. "rank 2300, jharkhand"),
-        # treat it as target state to avoid redundant "which state?" follow-up.
-        if (
-            "target_states" in (pending_fields or [])
-            and not out.get("target_states")
-            and isinstance(out.get("home_state"), str)
-        ):
-            sig = dict(out.get("signals") or {})
-            if bool(sig.get("metric_detected")) and (
-                bool(sig.get("explicit_states_detected")) or bool(sig.get("home_state_detected"))
-            ):
-                out["target_states"] = [str(out["home_state"])]
-                sig["explicit_states_detected"] = True
-                out["signals"] = sig
-
-        # Category retry for terse single-word replies when we're waiting for category
-        if "category" in (pending_fields or []) and not out.get("category"):
-            retry = client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract NEET category from user text.\n"
-                            "Return JSON only: {\"category\": <GENERAL|OBC|SC|ST|EWS|PWD|null>}.\n"
-                            "Map: general/UR/open/unreserved → GENERAL, obc → OBC, sc → SC, "
-                            "st → ST, ews → EWS, pwd/pwbd/handicapped/disabled → PWD.\n"
-                        ),
-                    },
-                    {"role": "user", "content": json.dumps({"question": question})},
-                ],
-                temperature=0,
-                max_tokens=80,
-            )
-            retry_raw = (retry.choices[0].message.content or "").strip()
-            retry_parsed = json.loads(retry_raw)
-            retry_cat = str(retry_parsed.get("category") or "").strip().upper()
-            if retry_cat in {"GENERAL", "OBC", "SC", "ST", "EWS", "PWD"}:
-                out["category"] = retry_cat
-                signals_obj = dict(out.get("signals") or {})
-                signals_obj["category_detected"] = True
-                out["signals"] = signals_obj
-
-        return out
-    except Exception as e:
-        log(f"[V2] ⚠️ Cutoff profile extractor failed: {e}")
-        return {}
 
 from llama_index.core import (
     VectorStoreIndex,
@@ -2861,10 +3028,10 @@ def assess_kb_sufficiency_with_llm(
     user_question: str,
     kb_tool_result: str,
     conversation_context: Optional[str] = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, List[str]]:
     """
     LLM-based generic sufficiency check.
-    Returns (is_sufficient, reason).
+    Returns (is_sufficient, reason, web_queries).
     """
     try:
         kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=6000)
@@ -2894,10 +3061,23 @@ def assess_kb_sufficiency_with_llm(
                         "Use provided conversation context to interpret short follow-ups. "
                         "If current message is short (e.g., 'also for GMC Srinagar'), infer topic from recent context, "
                         "but still require exact entity match for sufficiency.\n"
+                        "For relative-reference follow-ups (e.g., 'above top 5 colleges', 'these colleges'), "
+                        "first resolve target entities from conversation context. Mark is_sufficient=true only if KB evidence "
+                        "covers the requested topic for the resolved entities (or clearly states a shared rule that applies to them). "
+                        "If KB covers only a subset, mark is_sufficient=false so missing entities can be fetched via web fallback.\n"
+                        "STRICT ENTITY COVERAGE RULE (must enforce):\n"
+                        "- If the request resolves to N specific colleges/entities, sufficiency is true ONLY when all N are explicitly covered.\n"
+                        "- Do not treat another college from the same state/category/prefix (e.g., another ASMC) as a match.\n"
+                        "- If one requested entity is missing exact evidence, mark is_sufficient=false.\n"
+                        "- Treat morphological variants as match only when clearly canonical (punctuation/abbreviation/order), not different place names.\n"
+                        "- Example: 'Autonomous State Medical College, Kaushambi' is NOT covered by chunks for Hardoi/Ghazipur/Fatehpur.\n"
                         "If retrieved text is for a different college/state than asked, mark is_sufficient=false.\n"
                         "Mark is_sufficient=true when the KB contains the requested data for the correct scope/entity; "
-                        "mark false when the requested college/state/round/detail is absent, wrong, or ambiguous."
-                        "\nReturn ONLY valid JSON with keys: is_sufficient (boolean), reason (string)."
+                        "mark false when the requested college/state/round/detail is absent, wrong, or ambiguous.\n"
+                        "If is_sufficient=false, also provide targeted web queries ONLY for missing entities/details "
+                        "(1 query per missing entity where possible). Do not include already covered entities.\n"
+                        "If is_sufficient=true, return empty web_queries.\n"
+                        "Return ONLY valid JSON with keys: is_sufficient (boolean), reason (string), web_queries (array of strings)."
                     ),
                 },
                 {
@@ -2918,7 +3098,12 @@ def assess_kb_sufficiency_with_llm(
             parsed = json.loads(raw)
             is_sufficient = bool(parsed.get("is_sufficient", False))
             reason = str(parsed.get("reason", "")).strip() or "No reason provided"
-            return is_sufficient, reason
+            web_queries = [
+                str(q).strip()
+                for q in (parsed.get("web_queries") or [])
+                if str(q).strip()
+            ]
+            return is_sufficient, reason, web_queries
         except Exception:
             lowered = raw.lower()
             m = re.search(r'"is_sufficient"\s*:\s*(true|false)', lowered)
@@ -2927,12 +3112,12 @@ def assess_kb_sufficiency_with_llm(
                 reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', raw, re.IGNORECASE)
                 reason = reason_match.group(1).strip() if reason_match else "Parsed from non-JSON sufficiency output"
                 log(f"[V2] ⚠️ KB sufficiency non-JSON output parsed via fallback: {raw[:300]!r}")
-                return is_sufficient, reason
+                return is_sufficient, reason, []
             log(f"[V2] ⚠️ KB sufficiency output unparseable: {raw[:300]!r}")
-            return False, "Sufficiency output parse failed"
+            return False, "Sufficiency output parse failed", []
     except Exception as err:
         log(f"[V2] ⚠️ KB sufficiency check failed, defaulting to insufficient: {err}")
-        return False, "Sufficiency check failed"
+        return False, "Sufficiency check failed", []
 
 
 def _looks_like_contextual_in_domain_followup(
@@ -4613,9 +4798,10 @@ async def _v2_run_rag_pipeline(
 
         tool_calls = assistant_message.tool_calls or []
         kb_results_this_round: List[str] = []
+        kb_call_records: List[Dict[str, Any]] = []
         round_tool_names: List[str] = []
         round_tool_exec_ms = 0.0
-        pending_kb_tool_messages: List[Dict[str, Any]] = []
+        pending_kb_tool_groups: List[Dict[str, Any]] = []
         pending_other_tool_messages: List[Dict[str, Any]] = []
         for tool_call in tool_calls:
             tool_name = tool_call.function.name
@@ -4636,6 +4822,13 @@ async def _v2_run_rag_pipeline(
             if success:
                 if tool_name == "search_knowledge_base":
                     kb_results_this_round.append(tool_result)
+                    kb_call_records.append(
+                        {
+                            "query": str(tool_args.get("query", "")),
+                            "state": str(tool_args.get("state", "")),
+                            "result": tool_result,
+                        }
+                    )
                     # Emit KB only when no origin is set yet.
                     if stream_source_origin is None:
                         yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'kb'})}\n\n"
@@ -4688,7 +4881,12 @@ async def _v2_run_rag_pipeline(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": _trim_tool_result_for_model(tool_result)},
             ]
             if tool_name == "search_knowledge_base":
-                pending_kb_tool_messages.extend(tool_pair)
+                pending_kb_tool_groups.append(
+                    {
+                        "query": str(tool_args.get("query", "")),
+                        "tool_pair": tool_pair,
+                    }
+                )
             else:
                 pending_other_tool_messages.extend(tool_pair)
 
@@ -4697,18 +4895,40 @@ async def _v2_run_rag_pipeline(
             kb_attempted = True
             last_kb_retrieval = "\n\n".join(kb_results_this_round)
             t_suff = time.perf_counter()
-            if _should_skip_kb_sufficiency_llm(request.question, last_kb_retrieval):
-                is_sufficient = True
-                _reason = "Skipped sufficiency LLM: date/timeline query with KB hits."
-                suff_ms = _elapsed_ms(t_suff)
-            else:
-                is_sufficient, _reason = assess_kb_sufficiency_with_llm(
+            # Per-tool-call sufficiency (strict): evaluate each KB call independently
+            # using the same query that was sent to that tool call.
+            suff_web_queries: List[str] = []
+            per_call_reasons: List[str] = []
+            per_call_sufficiency_map: Dict[str, bool] = {}
+            all_calls_sufficient = True
+
+            for rec in kb_call_records:
+                kb_query = str(rec.get("query", "")).strip()
+                kb_result = str(rec.get("result", ""))
+                if not kb_query:
+                    continue
+                call_sufficient, call_reason, _call_web_queries = assess_kb_sufficiency_with_llm(
                     client=client,
-                    user_question=request.question,
-                    kb_tool_result=last_kb_retrieval,
-                    conversation_context=_build_sufficiency_context(messages, request.question),
+                    user_question=kb_query,
+                    kb_tool_result=kb_result,
+                    conversation_context=_build_sufficiency_context(messages, kb_query),
                 )
-                suff_ms = _elapsed_ms(t_suff)
+                _log_v2_tool_debug(
+                    f"[V2][DBG] per_call_sufficiency query={kb_query!r} "
+                    f"is_sufficient={bool(call_sufficient)} reason={call_reason!r}"
+                )
+                per_call_sufficiency_map[kb_query] = bool(call_sufficient)
+                if not call_sufficient:
+                    all_calls_sufficient = False
+                    per_call_reasons.append(f"{kb_query}: {call_reason}")
+                    suff_web_queries.append(kb_query)
+
+            is_sufficient = all_calls_sufficient
+            if is_sufficient:
+                _reason = "All per-call KB sufficiency checks passed."
+            else:
+                _reason = "; ".join(per_call_reasons[:3]) or "One or more per-call KB sufficiency checks failed."
+            suff_ms = _elapsed_ms(t_suff)
             _log_v2_tool_debug(
                 f"[V2][DBG] sufficiency round={round_idx + 1} "
                 f"is_sufficient={bool(is_sufficient)} reason={_reason!r}"
@@ -4716,34 +4936,64 @@ async def _v2_run_rag_pipeline(
             kb_sufficient_for_final = bool(is_sufficient)
             if not is_sufficient:
                 if web_fallback_enabled:
-                    # Latency optimization: avoid an extra planner LLM round.
-                    # Once sufficiency is false, trigger web search directly.
-                    fallback_query = (request.question or "").strip()
-                    t_web = time.perf_counter()
-                    web_result, web_success = execute_tool_call("search_web", {"query": fallback_query})
-                    web_exec_ms = _elapsed_ms(t_web)
-                    round_tool_exec_ms += web_exec_ms
-                    round_tool_names.append("search_web(direct)")
+                    # Keep ONLY sufficient KB evidence in final context.
+                    if pending_kb_tool_groups:
+                        kept_kb_groups = 0
+                        dropped_kb_groups = 0
+                        for grp in pending_kb_tool_groups:
+                            q = str(grp.get("query", "")).strip()
+                            keep = per_call_sufficiency_map.get(q, False)
+                            if keep:
+                                messages.extend(grp.get("tool_pair") or [])
+                                kept_kb_groups += 1
+                            else:
+                                dropped_kb_groups += 1
+                        _log_v2_tool_debug(
+                            f"[V2][DBG] kb_groups_kept={kept_kb_groups} kb_groups_dropped={dropped_kb_groups}"
+                        )
+                        pending_kb_tool_groups = []
+
+                    web_queries = [
+                        str(q).strip()
+                        for q in (suff_web_queries or [])
+                        if str(q).strip()
+                    ]
                     _log_v2_tool_debug(
-                        f"[V2][DBG] direct_web_fallback query={fallback_query!r} "
-                        f"success={web_success} exec_ms={web_exec_ms:.0f} preview="
-                        f"{((web_result or '')[:160].replace(chr(10), ' ') + '...') if len(web_result or '') > 160 else (web_result or '').replace(chr(10), ' ')!r}"
+                        f"[V2][DBG] sufficiency_web_queries={web_queries}"
                     )
 
-                    if web_success:
-                        last_web_retrieval = web_result
-                        used_web_fallback = True
-                        if stream_source_origin != "web":
-                            yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
-                            stream_source_origin = "web"
+                    if not web_queries:
+                        kb_insufficient_and_web_disabled = True
+                        web_queries = []
 
-                        web_sources = []
+                    merged_web_payloads: List[str] = []
+                    all_web_sources: List[Dict[str, str]] = []
+                    any_web_success = False
+
+                    for fallback_query in web_queries[:5]:
+                        t_web = time.perf_counter()
+                        web_result, web_success = execute_tool_call("search_web", {"query": fallback_query})
+                        web_exec_ms = _elapsed_ms(t_web)
+                        round_tool_exec_ms += web_exec_ms
+                        round_tool_names.append("search_web(direct)")
+                        _log_v2_tool_debug(
+                            f"[V2][DBG] direct_web_fallback query={fallback_query!r} "
+                            f"success={web_success} exec_ms={web_exec_ms:.0f} preview="
+                            f"{((web_result or '')[:160].replace(chr(10), ' ') + '...') if len(web_result or '') > 160 else (web_result or '').replace(chr(10), ' ')!r}"
+                        )
+                        _log_v2_tool_debug(
+                            "[V2][DBG] direct_web_fallback full_result_start=\n"
+                            + _trim_tool_result_for_model(web_result or "", limit=2500)
+                        )
+                        if not web_success:
+                            continue
+
+                        any_web_success = True
+                        merged_web_payloads.append(web_result)
                         for line in web_result.split("\n"):
                             if line.startswith("[") and "Title:" in line:
                                 title = line.split("Title:", 1)[1].strip()
-                                web_sources.append({"file_name": title, "document_type": "web_search"})
-                        if web_sources and references_enabled:
-                            yield f"data: {json.dumps({'type': 'sources', 'sources': web_sources[:5]})}\n\n"
+                                all_web_sources.append({"file_name": title, "document_type": "web_search"})
 
                         direct_tool_id = f"direct_web_{uuid.uuid4().hex[:8]}"
                         messages.append({
@@ -4760,28 +5010,61 @@ async def _v2_run_rag_pipeline(
                             "tool_call_id": direct_tool_id,
                             "content": _trim_tool_result_for_model(web_result),
                         })
+
+                    if any_web_success:
+                        last_web_retrieval = "\n\n".join(merged_web_payloads)
+                        _log_v2_tool_debug(
+                            "[V2][DBG] merged_web_retrieval_for_final=\n"
+                            + _trim_tool_result_for_model(last_web_retrieval or "", limit=4000)
+                        )
+                        used_web_fallback = True
+                        if stream_source_origin != "web":
+                            yield f"data: {json.dumps({'type': 'meta', 'source_origin': 'web'})}\n\n"
+                            stream_source_origin = "web"
+                        if all_web_sources and references_enabled:
+                            yield f"data: {json.dumps({'type': 'sources', 'sources': all_web_sources[:5]})}\n\n"
+
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "SOURCE MERGE RULES (highest priority):\n"
+                                "- Use KB evidence for entities covered by KB.\n"
+                                "- Use web evidence only for entities missing in KB.\n"
+                                "- Never replace KB-backed values with web estimates.\n"
+                                "- If an entity is missing in both KB and web, provide one polite professional fallback note instead of listing multiple missing fields.\n"
+                                "- Ignore chunks that are about different entities.\n"
+                                "- For a web-only entity, output numeric fee/cutoff values ONLY if that entity's evidence text explicitly contains those numbers.\n"
+                                "- If web evidence for an entity has no explicit numeric figure, do NOT fabricate per-field values; mark that entity as unavailable in the same polite fallback note.\n"
+                                "- Never borrow numbers from similar colleges/states for a missing entity.\n"
+                                "- Preferred fallback wording: 'Sorry, I am not able to provide reliable details for this right now. Please verify directly from the official college website or authorised counselling sources.'\n"
+                                "- Keep the fallback concise, user-friendly, and at most once in the response."
+                            ),
+                        })
                         direct_web_fallback_done = True
                     else:
                         kb_insufficient_and_web_disabled = True
                 else:
                     kb_insufficient_and_web_disabled = True
-            else:
+            if is_sufficient:
                 # Keep KB retrieval in final context only when sufficiency is true.
-                if pending_kb_tool_messages:
-                    messages.extend(pending_kb_tool_messages)
+                if pending_kb_tool_groups:
+                    for grp in pending_kb_tool_groups:
+                        messages.extend(grp.get("tool_pair") or [])
                 if pending_other_tool_messages:
                     messages.extend(pending_other_tool_messages)
         elif kb_results_this_round:
             kb_attempted = True
             last_kb_retrieval = "\n\n".join(kb_results_this_round)
             kb_sufficient_for_final = True
-            if pending_kb_tool_messages:
-                messages.extend(pending_kb_tool_messages)
+            if pending_kb_tool_groups:
+                for grp in pending_kb_tool_groups:
+                    messages.extend(grp.get("tool_pair") or [])
             if pending_other_tool_messages:
                 messages.extend(pending_other_tool_messages)
         else:
-            if pending_kb_tool_messages:
-                messages.extend(pending_kb_tool_messages)
+            if pending_kb_tool_groups:
+                for grp in pending_kb_tool_groups:
+                    messages.extend(grp.get("tool_pair") or [])
             if pending_other_tool_messages:
                 messages.extend(pending_other_tool_messages)
 
@@ -4885,6 +5168,7 @@ async def _v2_run_rag_pipeline(
     else:
         t_out = time.perf_counter()
         if preferred_language == "en":
+            _log_final_llm_messages_snapshot(messages, label="final_answer")
             _first_out = True
             streamed_raw = ""
             async for delta in _stream_chat_completion_text(
@@ -4915,6 +5199,7 @@ async def _v2_run_rag_pipeline(
                 full_response = streamed_raw
             final_stream_ms = _elapsed_ms(t_out)
         else:
+            _log_final_llm_messages_snapshot(messages, label="final_answer")
             final_response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -5014,606 +5299,6 @@ async def _v2_try_fast_path_response(
             asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
         state["handled"] = True
         return
-
-
-async def _v2_route_cutoff_stage(
-    *,
-    question: str,
-    med_ctx: Dict[str, object],
-) -> Tuple[bool, bool, bool]:
-    """
-    Stage function for deciding cutoff SQL routing.
-    Returns: (cutoff_triggered, explicit_shortlist_start, continuing_cutoff_flow)
-    """
-    cutoff_ctx_peek = dict(med_ctx.get("cutoff") or {})
-    cutoff_triggered = False
-    explicit_shortlist_start = False
-    continuing_cutoff_flow = False
-    if not MEDBUDDY_CAPS["cutoff"]:
-        return False, False, False
-
-    if _is_explicit_college_shortlist_trigger(question):
-        cutoff_triggered = True
-        explicit_shortlist_start = True
-        log("[V2] 🧭 Explicit college shortlist trigger detected; forcing cutoff SQL profile flow")
-    elif _should_continue_cutoff_from_context(question, cutoff_ctx_peek):
-        continuing_cutoff_flow = True
-        log("[V2] 🧭 Cutoff context detected; confirming route via LLM classifier")
-
-    if cutoff_triggered:
-        llm_route_decision = True
-    else:
-        if _v2_async_cutoff_router_enabled():
-            route_task = asyncio.create_task(_llm_should_route_cutoff_sql_async(question, med_ctx))
-            llm_route_decision = await route_task
-        else:
-            llm_route_decision = await _llm_should_route_cutoff_sql_async(question, med_ctx)
-    if llm_route_decision is None:
-        cutoff_triggered = False
-        log("[V2] 🧭 Cutoff route fallback decision: False (LLM classifier unavailable)")
-    else:
-        cutoff_triggered = llm_route_decision
-    return cutoff_triggered, explicit_shortlist_start, continuing_cutoff_flow
-
-
-async def _v2_handle_cutoff_sql_stage(
-    *,
-    request: ChatRequest,
-    conversation_id: Optional[int],
-    med_ctx: Dict[str, object],
-    preferred_language: str,
-    localize_output,
-    start_time: datetime,
-    explicit_shortlist_start: bool,
-    continuing_cutoff_flow: bool,
-    state: Dict[str, object],
-) -> AsyncGenerator[str, None]:
-    """
-    Stage function for cutoff SQL flow.
-    Emits events and sets state['handled'] when cutoff stage handles the request.
-    """
-    from services.cutoff_service import (
-        fetch_cutoff_recommendations,
-        format_cutoff_markdown,
-    )
-
-    state["handled"] = False
-    t_cutoff_total = time.perf_counter()
-    extractor_ms = 0.0
-    refinement_ms = 0.0
-    sql_ms = 0.0
-    explain_ms = 0.0
-    chips_ms = 0.0
-    stream_ms = 0.0
-    first_token_ms = 0.0
-    cutoff_path = "unknown"
-
-    def _mark_first_token() -> None:
-        nonlocal first_token_ms
-        if first_token_ms <= 0:
-            first_token_ms = _elapsed_ms(t_cutoff_total)
-
-    def _log_cutoff_timing(path_label: str) -> None:
-        log(
-            "[V2][CUTOFF_TIMING] "
-            f"path={path_label} "
-            f"extractor={extractor_ms:.0f}ms "
-            f"refinement={refinement_ms:.0f}ms "
-            f"sql={sql_ms:.0f}ms "
-            f"explain={explain_ms:.0f}ms "
-            f"chips={chips_ms:.0f}ms "
-            f"first_token={first_token_ms:.0f}ms "
-            f"stream={stream_ms:.0f}ms "
-            f"total={_elapsed_ms(t_cutoff_total):.0f}ms"
-        )
-
-    log("[V2] 🎯 Routing to CUTOFF SQL path")
-    cutoff_db_states = await _get_cutoff_db_states_cached()
-
-    cutoff_ctx = dict(med_ctx.get("cutoff") or {})
-    _expire_stale_cutoff_run_state(cutoff_ctx, freshness_minutes=30)
-
-    # Determine current profile mode before deciding what to clear
-    current_profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
-
-    if explicit_shortlist_start or not continuing_cutoff_flow:
-        keys_to_clear = [
-            "metric_type",
-            "metric_value",
-            "target_states",
-            "target_states_confirmed",
-            "awaiting_refinement_choice",
-            "awaiting_refinement_details",
-            "college_type_filter",
-            "course_filter",
-            "quota_keywords",
-            "seat_type_keywords",
-            "last_result_count",
-        ]
-        # friend/general: also reset profile fields so we collect fresh each time
-        if current_profile_mode in {"friend", "general"}:
-            keys_to_clear += [
-                "home_state", "category", "sub_category",
-                "preferences_set", "profile_bootstrapped",
-            ]
-        for key in keys_to_clear:
-            cutoff_ctx.pop(key, None)
-    profile_mode = str(cutoff_ctx.get("profile_mode") or "self")
-    # profile_mode is set by _llm_extract_cutoff_profile_turn later in this turn.
-    # Bootstrap from saved DB profile ONLY for self mode, ONLY once per conversation.
-    if profile_mode == "self" and request.user_id and not cutoff_ctx.get("profile_bootstrapped"):
-        stored_profile = await _load_user_cutoff_profile(request.user_id)
-        if stored_profile.get("home_state") and not cutoff_ctx.get("home_state"):
-            cutoff_ctx["home_state"] = stored_profile["home_state"]
-        if stored_profile.get("category") and not cutoff_ctx.get("category"):
-            cutoff_ctx["category"] = stored_profile["category"]
-        if stored_profile.get("sub_category") and not cutoff_ctx.get("sub_category"):
-            cutoff_ctx["sub_category"] = stored_profile["sub_category"]
-        cutoff_ctx["preferences_set"] = bool(stored_profile.get("preferences_set", False))
-        cutoff_ctx["profile_bootstrapped"] = True
-        log(
-            f"[V2] 👤 Profile bootstrapped from DB | "
-            f"home_state={cutoff_ctx.get('home_state')} "
-            f"category={cutoff_ctx.get('category')} "
-            f"preferences_set={cutoff_ctx.get('preferences_set')}"
-        )
-
-    category_state_for_options = cutoff_ctx.get("home_state")
-    if not category_state_for_options and cutoff_ctx.get("target_states"):
-        category_state_for_options = list(cutoff_ctx.get("target_states") or [None])[0]
-    category_options = await _get_cutoff_category_options(
-        str(category_state_for_options) if category_state_for_options else None
-    )
-    sub_category_options: List[str] = []
-    if cutoff_ctx.get("category"):
-        sub_category_options = await _get_cutoff_subcategory_options(
-            str(category_state_for_options) if category_state_for_options else None,
-            str(cutoff_ctx.get("category")),
-        )
-    cutoff_ctx["needs_sub_category"] = bool(sub_category_options)
-    missing_before_turn = _missing_cutoff_fields(cutoff_ctx)
-
-    if cutoff_ctx.get("awaiting_refinement_choice") and _is_affirmative_reply(request.question):
-        cutoff_path = "refinement_prompt"
-        # Build dynamic prompt showing active filters
-        active_filters = []
-        if cutoff_ctx.get("college_type_filter"):
-            active_filters.append(f"College type: **{cutoff_ctx['college_type_filter']}**")
-        if cutoff_ctx.get("course_filter"):
-            active_filters.append(f"Course: **{cutoff_ctx['course_filter']}**")
-        if cutoff_ctx.get("quota_keywords"):
-            active_filters.append(f"Quota: **{', '.join(cutoff_ctx['quota_keywords'])}**")
-        if cutoff_ctx.get("seat_type_keywords"):
-            active_filters.append(f"Seat type: **{', '.join(cutoff_ctx['seat_type_keywords'])}**")
-
-        active_str = (
-            f"\n\nCurrently active filters: {', '.join(active_filters)}"
-            if active_filters else ""
-        )
-        followup = (
-            f"Sure — happy to refine.{active_str}\n\n"
-            "What would you like to change?\n\n"
-            "- **College type:** Government / Private / Deemed / AIIMS / JIPMER\n"
-            "- **Course:** MBBS / BDS / B.Sc. Nursing\n"
-            "- **Quota:** AIQ / State Quota / Management Quota / NRI / Open\n"
-            "- **State(s):** Switch or add states\n\n"
-            "Example: `Only government MBBS colleges in Bihar with State quota`"
-        )
-        followup = localize_output(followup)
-        cutoff_ctx["awaiting_refinement_choice"] = False
-        cutoff_ctx["awaiting_refinement_details"] = True
-        med_ctx["cutoff"] = cutoff_ctx
-        t_stream = time.perf_counter()
-        for token in sse_tokens_preserving_formatting(followup):
-            _mark_first_token()
-            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-            if V2_STREAM_TOKEN_DELAY_SEC > 0:
-                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
-        stream_ms += _elapsed_ms(t_stream)
-        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
-        if request.user_id and conversation_id:
-            asyncio.create_task(
-                v2_background_save_conversation_turn(
-                    conversation_id,
-                    request.question,
-                    followup,
-                    int((datetime.now() - start_time).total_seconds() * 1000),
-                )
-            )
-            asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
-        _log_cutoff_timing(cutoff_path)
-        state["handled"] = True
-        return
-
-    profile_turn: Dict[str, object] = {}
-    if explicit_shortlist_start and _is_explicit_college_shortlist_trigger(request.question):
-        # Fast path: plain "College Shortlist" starter does not carry extractable profile fields.
-        # Skip extractor LLM call to reduce first-response latency.
-        log("[V2] ⚡ Skipping cutoff extractor LLM for plain shortlist starter")
-    else:
-        t_extract = time.perf_counter()
-        profile_turn = await _llm_extract_cutoff_profile_turn(
-            request.question,
-            cutoff_ctx,
-            cutoff_db_states,
-            pending_fields=missing_before_turn,
-            allowed_sub_categories=sub_category_options,
-        )
-        extractor_ms += _elapsed_ms(t_extract)
-    # Apply profile_mode from LLM extraction — trust LLM, no keyword detection
-    extracted_mode = profile_turn.get("profile_mode")
-    prev_mode = str(cutoff_ctx.get("profile_mode") or "self")
-    if extracted_mode in {"self", "friend", "general"}:
-        # If switching from self to friend/general, clear stale self-profile data
-        # so it doesn't bleed into the friend/general query
-        if prev_mode == "self" and extracted_mode in {"friend", "general"}:
-            for key in ["home_state", "category", "sub_category",
-                        "preferences_set", "profile_bootstrapped"]:
-                cutoff_ctx.pop(key, None)
-            log(f"[V2] 🔄 Mode switch self→{extracted_mode}, cleared self-profile data")
-        cutoff_ctx["profile_mode"] = extracted_mode
-        profile_mode = extracted_mode
-    else:
-        # LLM didn't return a mode — keep existing
-        profile_mode = prev_mode
-        cutoff_ctx["profile_mode"] = profile_mode
-
-    metric_type = profile_turn.get("metric_type")
-    metric_value = profile_turn.get("metric_value")
-    detected_states = list(profile_turn.get("target_states") or [])
-    category = profile_turn.get("category") or cutoff_ctx.get("category")
-    home_state = profile_turn.get("home_state") or cutoff_ctx.get("home_state")
-
-    explicit_states_in_turn = bool(profile_turn.get("signals", {}).get("explicit_states_detected"))
-    target_state_was_missing = "target_states" in missing_before_turn
-    # Accept detected target state either when extractor marks it explicit,
-    # or when target state is currently missing and user provides a compact reply like "23000 Delhi".
-    accept_detected_states = bool(detected_states) and (explicit_states_in_turn or target_state_was_missing)
-    target_states = detected_states if accept_detected_states else list(cutoff_ctx.get("target_states") or [])
-
-    if metric_type and metric_value:
-        cutoff_ctx["metric_type"] = metric_type
-        cutoff_ctx["metric_value"] = int(metric_value)
-    if category:
-        cutoff_ctx["category"] = str(category).upper()
-    if home_state:
-        cutoff_ctx["home_state"] = str(home_state)
-    if profile_turn.get("sub_category"):
-        cutoff_ctx["sub_category"] = str(profile_turn.get("sub_category"))
-    if target_states:
-        cutoff_ctx["target_states"] = target_states
-        if explicit_states_in_turn or target_state_was_missing:
-            cutoff_ctx["target_states_confirmed"] = True
-
-    category_state_for_options = cutoff_ctx.get("home_state")
-    if not category_state_for_options and cutoff_ctx.get("target_states"):
-        category_state_for_options = list(cutoff_ctx.get("target_states") or [None])[0]
-    sub_category_options = []
-    if cutoff_ctx.get("category"):
-        sub_category_options = await _get_cutoff_subcategory_options(
-            str(category_state_for_options) if category_state_for_options else None,
-            str(cutoff_ctx.get("category")),
-        )
-    cutoff_ctx["needs_sub_category"] = bool(sub_category_options)
-    if not cutoff_ctx.get("needs_sub_category"):
-        cutoff_ctx.pop("sub_category", None)
-    # Save to DB profile ONLY for self mode — never for friend/general
-    if profile_mode == "self" and request.user_id:
-        await _save_user_cutoff_profile(request.user_id, cutoff_ctx)
-        cutoff_ctx["preferences_set"] = bool(
-            cutoff_ctx.get("home_state") and cutoff_ctx.get("category")
-        )
-    # friend/general: never save, never set preferences_set
-
-    # Refinement: run LLM interpreter when user has already seen results
-    # or when awaiting refinement details. No hardcoded extraction.
-    should_run_refinement_llm = bool(
-        cutoff_ctx.get("awaiting_refinement_details")
-        or cutoff_ctx.get("awaiting_refinement_choice")
-        or (
-            cutoff_ctx.get("last_result_count") is not None
-            and not missing_before_turn
-            and not profile_turn.get("signals", {}).get("metric_detected")
-            and not profile_turn.get("signals", {}).get("home_state_detected")
-        )
-    )
-    if cutoff_ctx.get("awaiting_refinement_details"):
-        cutoff_ctx["awaiting_refinement_details"] = False
-
-    refinement_plan = {"apply": False}
-    if should_run_refinement_llm:
-        t_refine = time.perf_counter()
-        refinement_plan = await _llm_interpret_cutoff_refinement(
-            request.question,
-            cutoff_ctx,
-            cutoff_db_states,
-            current_turn_signals={
-                "explicit_states_count": len(detected_states) if profile_turn.get("signals", {}).get("explicit_states_detected") else 0,
-                "metric_detected": bool(profile_turn.get("signals", {}).get("metric_detected", False)),
-                "category_detected": bool(profile_turn.get("signals", {}).get("category_detected", False)),
-            },
-        )
-        refinement_ms += _elapsed_ms(t_refine)
-
-    if refinement_plan.get("apply"):
-        planned_states = list(refinement_plan.get("target_states") or [])
-        if planned_states:
-            cutoff_ctx["target_states"] = planned_states
-            cutoff_ctx["target_states_confirmed"] = True
-
-        # College type — exact match (clear or set)
-        if refinement_plan.get("clear_college_type"):
-            cutoff_ctx.pop("college_type_filter", None)
-        elif refinement_plan.get("college_type_filter"):
-            cutoff_ctx["college_type_filter"] = refinement_plan["college_type_filter"]
-
-        # Course — exact match (clear or set)
-        if refinement_plan.get("clear_course"):
-            cutoff_ctx.pop("course_filter", None)
-        elif refinement_plan.get("course_filter"):
-            cutoff_ctx["course_filter"] = refinement_plan["course_filter"]
-
-        # Quota — fuzzy keywords (clear or set)
-        if refinement_plan.get("clear_quota"):
-            cutoff_ctx.pop("quota_keywords", None)
-        elif refinement_plan.get("quota_keywords"):
-            cutoff_ctx["quota_keywords"] = list(refinement_plan["quota_keywords"])
-
-        # Seat type — fuzzy keywords (clear or set)
-        if refinement_plan.get("clear_seat_type"):
-            cutoff_ctx.pop("seat_type_keywords", None)
-        elif refinement_plan.get("seat_type_keywords"):
-            cutoff_ctx["seat_type_keywords"] = list(refinement_plan["seat_type_keywords"])
-
-        log(
-            f"[V2] 🧩 Refinement applied | "
-            f"states={cutoff_ctx.get('target_states')} "
-            f"college_type={cutoff_ctx.get('college_type_filter')} "
-            f"course={cutoff_ctx.get('course_filter')} "
-            f"quota_kw={cutoff_ctx.get('quota_keywords')} "
-            f"seat_kw={cutoff_ctx.get('seat_type_keywords')}"
-        )
-
-    cutoff_ctx["last_turn_at"] = datetime.utcnow().isoformat()
-    med_ctx["cutoff"] = cutoff_ctx
-    missing = _missing_cutoff_fields(cutoff_ctx)
-    if missing:
-        # Profile form (frontend UI) only for self mode on first-time setup
-        needs_profile_form = (
-            profile_mode == "self"
-            and not bool(cutoff_ctx.get("preferences_set"))
-            and ("home_state" in missing or "category" in missing)
-        )
-        if needs_profile_form:
-            cutoff_path = "profile_form"
-            intro = localize_output(
-                "Great - I can help with college shortlist. Please fill the details below so I can suggest the best matches."
-            )
-            category_state = cutoff_ctx.get("home_state")
-            if not category_state and cutoff_ctx.get("target_states"):
-                category_state = list(cutoff_ctx.get("target_states") or [None])[0]
-            profile_categories = await _get_cutoff_category_options(
-                str(category_state) if category_state else None
-            )
-            profile_sub_categories = []
-            if category_state and cutoff_ctx.get("category"):
-                profile_sub_categories = await _get_cutoff_subcategory_options(
-                    str(category_state),
-                    str(cutoff_ctx.get("category")),
-                )
-            yield (
-                "data: "
-                + json.dumps(
-                    {
-                        "type": "cutoff_profile_form",
-                        "message": intro,
-                        "state": cutoff_ctx.get("home_state"),
-                        "category": cutoff_ctx.get("category"),
-                        "sub_category": cutoff_ctx.get("sub_category"),
-                        "states": cutoff_db_states,
-                        "categories": profile_categories,
-                        "sub_categories": profile_sub_categories,
-                    }
-                )
-                + "\n\n"
-            )
-            t_stream = time.perf_counter()
-            for token in sse_tokens_preserving_formatting(intro):
-                _mark_first_token()
-                yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-                if V2_STREAM_TOKEN_DELAY_SEC > 0:
-                    await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
-            stream_ms += _elapsed_ms(t_stream)
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
-            if request.user_id and conversation_id:
-                asyncio.create_task(
-                    v2_background_save_conversation_turn(
-                        conversation_id,
-                        request.question,
-                        intro,
-                        int((datetime.now() - start_time).total_seconds() * 1000),
-                    )
-                )
-                asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
-            _log_cutoff_timing(cutoff_path)
-            state["handled"] = True
-            return
-
-        cutoff_path = "missing_fields_followup"
-        followup = localize_output(
-            _build_cutoff_followup_prompt(
-                missing,
-                cutoff_ctx,
-                category_options=category_options,
-                sub_category_options=sub_category_options,
-            )
-        )
-        t_stream = time.perf_counter()
-        for token in sse_tokens_preserving_formatting(followup):
-            _mark_first_token()
-            yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-            if V2_STREAM_TOKEN_DELAY_SEC > 0:
-                await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
-        stream_ms += _elapsed_ms(t_stream)
-        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
-        if request.user_id and conversation_id:
-            asyncio.create_task(
-                v2_background_save_conversation_turn(
-                    conversation_id,
-                    request.question,
-                    followup,
-                    int((datetime.now() - start_time).total_seconds() * 1000),
-                )
-            )
-            asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
-        _log_cutoff_timing(cutoff_path)
-        state["handled"] = True
-        return
-
-    cutoff_path = "final_cutoff_answer"
-    metric_type = str(cutoff_ctx.get("metric_type"))
-    metric_value = int(cutoff_ctx.get("metric_value"))
-    home_state = str(cutoff_ctx.get("home_state"))
-    category = str(cutoff_ctx.get("category"))
-    sub_category = str(cutoff_ctx.get("sub_category")) if cutoff_ctx.get("sub_category") else None
-    target_states = [str(s) for s in list(cutoff_ctx.get("target_states") or [])]
-    cutoff_result_limit = await get_cutoff_result_limit()
-    t_sql = time.perf_counter()
-    rows = await fetch_cutoff_recommendations(
-        metric_type=metric_type,
-        metric_value=metric_value,
-        home_state=home_state,
-        target_states=target_states,
-        category=category,
-        sub_category=sub_category,
-        college_type_filter=cutoff_ctx.get("college_type_filter") or None,
-        course_filter=cutoff_ctx.get("course_filter") or None,
-        quota_keywords=cutoff_ctx.get("quota_keywords") if isinstance(cutoff_ctx.get("quota_keywords"), list) else None,
-        seat_type_keywords=cutoff_ctx.get("seat_type_keywords") if isinstance(cutoff_ctx.get("seat_type_keywords"), list) else None,
-        total_limit=cutoff_result_limit,
-    )
-    sql_ms += _elapsed_ms(t_sql)
-    cutoff_ctx["last_result_count"] = len(rows)
-    cutoff_answer_head = localize_output(
-        format_cutoff_markdown(
-            rows=rows,
-            metric_type=metric_type,
-            metric_value=metric_value,
-            category=category,
-            sub_category=sub_category,
-            home_state=home_state,
-            target_states=target_states,
-            display_limit=cutoff_result_limit,
-        )
-    )
-    t_explain = time.perf_counter()
-    explain_task = asyncio.create_task(_llm_explain_cutoff_results(
-        user_question=request.question,
-        metric_type=metric_type,
-        metric_value=metric_value,
-        home_state=home_state,
-        target_states=target_states,
-        category=category,
-        sub_category=sub_category,
-        rows=rows,
-    ))
-    source = {
-        "file_name": "neet_ug_2025_cutoffs",
-        "document_type": "sql_cutoff_table",
-        "state": ", ".join(target_states),
-        "text_snippet": f"Cutoff rows matched: {len(rows)}",
-    }
-    yield f"data: {json.dumps({'type': 'sources', 'sources': [source]})}\n\n"
-
-    # Stream table immediately; do not block first token on explanation/chips LLMs.
-    t_stream = time.perf_counter()
-    for token in sse_tokens_preserving_formatting(cutoff_answer_head):
-        _mark_first_token()
-        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-        if V2_STREAM_TOKEN_DELAY_SEC > 0:
-            await asyncio.sleep(V2_STREAM_TOKEN_DELAY_SEC)
-
-    # Notify frontend to show a dynamic loader while interpretation is being generated.
-    yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': True})}\n\n"
-
-    cutoff_explain = await explain_task
-    explain_ms += _elapsed_ms(t_explain)
-    if cutoff_explain:
-        explain_tail = "\n\n### Quick Interpretation\n\n" + localize_output(cutoff_explain)
-    elif rows:
-        explain_tail = (
-            "\n\n### Quick Interpretation\n\n"
-            + localize_output(
-                _fallback_cutoff_quick_interpretation(
-                    rows=rows,
-                    metric_type=metric_type,
-                    metric_value=metric_value,
-                    target_states=target_states,
-                )
-            )
-        )
-    else:
-        explain_tail = ""
-
-    disclaimer_tail = (
-        "\n\n"
-        + localize_output(
-            "> *Note — Disclaimer: Cutoffs vary year to year and by round/quota/sub-category. "
-            "Please verify final options on official MCC/state counselling portals.*"
-        )
-    )
-    cutoff_answer = cutoff_answer_head + explain_tail + disclaimer_tail
-    tail_to_stream = explain_tail + disclaimer_tail
-
-    # Run chips generation concurrently with tail streaming.
-    t_chips = time.perf_counter()
-    chips_task = asyncio.create_task(
-        _generate_contextual_suggested_replies(
-            request.question,
-            cutoff_answer,
-            med_ctx,
-            retrieval_evidence=cutoff_answer,
-            output_language=preferred_language,
-        )
-    )
-    yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': False})}\n\n"
-    explain_stream_delay = V2_STREAM_TOKEN_DELAY_SEC if V2_STREAM_TOKEN_DELAY_SEC > 0 else 0.01
-    for token in sse_tokens_preserving_formatting(tail_to_stream):
-        _mark_first_token()
-        yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
-        if explain_stream_delay > 0:
-            await asyncio.sleep(explain_stream_delay)
-    stream_ms += _elapsed_ms(t_stream)
-
-    cutoff_replies: List[str] = []
-    try:
-        cutoff_replies = await chips_task
-    except Exception as e:
-        log(f"[V2] ⚠️ Cutoff chips generation failed: {e}")
-        cutoff_replies = []
-    chips_ms += _elapsed_ms(t_chips)
-    if cutoff_replies:
-        yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': cutoff_replies})}\n\n"
-    med_ctx["stage"] = "normal_qa"
-    med_ctx["last_topic"] = "Cutoff analysis"
-    med_ctx["last_state"] = ", ".join(target_states)
-    med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
-    cutoff_ctx["awaiting_refinement_choice"] = True
-    med_ctx["cutoff"] = cutoff_ctx
-    yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
-    if request.user_id and conversation_id:
-        asyncio.create_task(
-            v2_background_save_conversation_turn(
-                conversation_id,
-                request.question,
-                cutoff_answer,
-                int((datetime.now() - start_time).total_seconds() * 1000),
-                sources=[source],
-            )
-        )
-        asyncio.create_task(v2_background_update_conversation_context(conversation_id, med_ctx))
-    _log_cutoff_timing(cutoff_path)
-    state["handled"] = True
 
 
 @app.post("/chat/v2/stream")
@@ -5745,35 +5430,30 @@ async def chat_v2_stream(request: ChatRequest):
             med_ctx["onboarding"] = onboarding
             med_ctx["last_activity_at"] = datetime.utcnow().isoformat()
 
-            # ========== CUTOFF SQL PATH (TABLE-BASED, NO VECTOR SEARCH) ==========
-            cutoff_triggered, explicit_shortlist_start, continuing_cutoff_flow = await _v2_route_cutoff_stage(
-                question=request.question,
-                med_ctx=med_ctx,
-            )
-            if cutoff_triggered:
-                cutoff_stage_state: Dict[str, object] = {}
-                async for event in _v2_handle_cutoff_sql_stage(
-                    request=request,
-                    conversation_id=conversation_id,
-                    med_ctx=med_ctx,
-                    preferred_language=preferred_language,
-                    localize_output=localize_output,
-                    start_time=start_time,
-                    explicit_shortlist_start=explicit_shortlist_start,
-                    continuing_cutoff_flow=continuing_cutoff_flow,
-                    state=cutoff_stage_state,
-                ):
-                    yield event
-                if cutoff_stage_state.get("handled"):
-                    if request.user_id and conversation_id:
-                        asyncio.create_task(
-                            v2_background_generate_conversation_title(
-                                conversation_id,
-                                request.question,
-                                log_label="cutoff",
-                            )
-                        )
-                    return
+            # ========== CUTOFF PATH ==========
+            should_try_cutoff = _is_cutoff_query(request.question, med_ctx)
+            if should_try_cutoff:
+                # Skip LLM router for obvious continuations (pure number, state name, category word)
+                if _should_skip_cutoff_router(request.question, med_ctx):
+                    cutoff_confirmed = True
+                    log(f"[CUTOFF] ⚡ Skipping router — clear continuation: {request.question!r}")
+                else:
+                    cutoff_confirmed = await _should_route_to_cutoff(request.question, med_ctx)
+                if cutoff_confirmed:
+                    cutoff_stage_state: Dict[str, object] = {}
+                    async for event in _v2_handle_cutoff_stage(
+                        request=request,
+                        conversation_id=conversation_id,
+                        med_ctx=med_ctx,
+                        conversation_memory=conversation_memory,
+                        preferred_language=preferred_language,
+                        localize_output=localize_output,
+                        start_time=start_time,
+                        state=cutoff_stage_state,
+                    ):
+                        yield event
+                    if cutoff_stage_state.get("handled"):
+                        return
             
             # ========== FAQ CHECK (FAST PATH) ==========
             user_state = None
@@ -5914,14 +5594,19 @@ async def chat_v2_stream(request: ChatRequest):
             
             # Add conversation history
             if conversation_memory:
-                history = conversation_memory.get_formatted_history()
-                if history.strip():
-                    # Parse history and add as messages
-                    for line in history.strip().split("\n"):
-                        if line.startswith("User: "):
-                            messages.append({"role": "user", "content": line[6:]})
-                        elif line.startswith("Assistant: "):
-                            messages.append({"role": "assistant", "content": line[11:]})
+                # Use structured chat history directly.
+                # Parsing newline-formatted history drops multi-line assistant tables
+                # (e.g., shortlist rows), which breaks follow-up grounding like
+                # "above top 3 colleges".
+                for chat_msg in conversation_memory.get_chat_history()[-10:]:
+                    role_raw = str(getattr(chat_msg, "role", "")).lower()
+                    content = str(getattr(chat_msg, "content", "") or "").strip()
+                    if not content:
+                        continue
+                    if role_raw.endswith("user"):
+                        messages.append({"role": "user", "content": content})
+                    elif role_raw.endswith("assistant"):
+                        messages.append({"role": "assistant", "content": content})
             
             # Add current question
             messages.append({"role": "user", "content": request.question})
@@ -5934,6 +5619,11 @@ async def chat_v2_stream(request: ChatRequest):
                     "- Scope retrieval to the LATEST user message.\n"
                     "- If latest message implies a single target entity/college, do not issue retrieval calls for previously discussed entities.\n"
                     "- Only retrieve multiple entities when the latest message explicitly asks comparison, versus, list, or multi-target output.\n"
+                    "- If latest message uses relative references (e.g., 'above', 'these', 'those', 'top 5', 'same colleges'), resolve those entities from the most recent assistant shortlist/result in history before tool calls.\n"
+                    "- For relative 'top N' asks, resolve entities from the most recent ranked shortlist/table message (not from later derived summaries that may be partial).\n"
+                    "- For resolved multi-entity asks, keep actual resolved names in search queries (avoid generic replacements like 'top colleges in India').\n"
+                    "- For resolved relative 'top N' multi-entity asks, ensure retrieval covers all resolved entities in this turn (prefer one focused KB call per entity).\n"
+                    "- It is valid to run multiple KB calls (including one per resolved entity) and then use web search only for entities still missing after KB.\n"
                     "- You may infer missing topic words from immediate context (e.g., fee structure), "
                     "but must keep entity scope anchored to the latest message."
                 )

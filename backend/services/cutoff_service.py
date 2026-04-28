@@ -40,6 +40,16 @@ def _render_sql_for_debug(sql: str, params: Dict[str, object]) -> str:
     return rendered
 
 
+def _is_central_scope(target_states: List[str]) -> bool:
+    """
+    True when we're querying MCC/central counselling (deemed, AIIMS, JIPMER, etc.)
+    For these, we NEVER apply domicile or category filters.
+    """
+    if not target_states:
+        return False
+    return all(str(s).strip().upper() == "MCC" for s in target_states)
+
+
 def _domicile_sql_filter(*, home_state: str, row_state: str) -> str:
     """
     Domicile column uses exact semantic values: DOMICILE, NON DOMICILE, OPEN.
@@ -52,7 +62,10 @@ def _domicile_sql_filter(*, home_state: str, row_state: str) -> str:
     We normalize with TRIM/UPPER and hyphen→space so 'NON-DOMICILE' and 'NON DOMICILE' match.
     """
     same = (home_state or "").strip().lower() == (row_state or "").strip().lower()
-    allowed = "('DOMICILE', 'OPEN')" if same else "('NON DOMICILE', 'OPEN')"
+    if same:
+        allowed = "('DOMICILE', 'OPEN')"
+    else:
+        allowed = "('NON DOMICILE', 'OPEN')"
     return f"""AND (
           REPLACE(TRIM(UPPER(COALESCE(domicile, ''))), '-', ' ')
           IN {allowed}
@@ -88,35 +101,35 @@ async def fetch_cutoff_recommendations(
     target_states: List[str],
     category: str,
     sub_category: Optional[str] = None,
-    # Exact match filters — only passed when user explicitly mentions them
     college_type_filter: Optional[str] = None,
+    college_type_filters: Optional[List[str]] = None,
     course_filter: Optional[str] = None,
-    # Fuzzy ILIKE keyword filters — only passed when user explicitly mentions them
     quota_keywords: Optional[List[str]] = None,
     seat_type_keywords: Optional[List[str]] = None,
+    apply_category_filter: bool = True,
+    apply_domicile_filter: bool = True,
     total_limit: int = 20,
 ) -> List[Dict]:
     """
     Query cutoff table and return nearest eligible distinct colleges.
 
-    Filters applied only when explicitly provided (never asked proactively):
-    - college_type_filter: exact match against college_type column
-    - course_filter: exact match against course column
-    - quota_keywords: ILIKE '%keyword%' OR across keywords against quota column
-    - seat_type_keywords: ILIKE '%keyword%' OR across keywords against seat_type column
-
-    Domicile logic:
-    - Same home state as target state → DOMICILE or OPEN rows
-    - Different home state → NON DOMICILE or OPEN rows
+    KEY RULES:
+    - Treat all filters as optional across scopes.
+    - Apply a filter only when it is present/enabled by caller intent.
+    - No hard scope-based blocking of category/domicile/sub-category filters.
     """
     if not target_states:
         _log("[CUTOFF_SQL] No target states found; skipping query.")
         return []
 
+    # ── Determine if this is central/MCC scope (used only for diagnostics) ──
+    central_scope = _is_central_scope(target_states)
+
     per_state_limits = _state_limits(target_states, total_limit)
     category_norm = str(category or "").strip().upper()
     all_rows: List[Dict] = []
 
+    # Base SQL templates — __CATEGORY_FILTER__ and __DOMICILE_FILTER__ are placeholders
     score_sql_base = """
         SELECT DISTINCT ON (COALESCE(institution_name, college_name))
           state,
@@ -137,13 +150,18 @@ async def fetch_cutoff_recommendations(
         WHERE state ILIKE :state_like
           AND score IS NOT NULL
           AND score <= :user_score
-          AND TRIM(UPPER(COALESCE(category, ''))) = :category_exact
+          __CATEGORY_FILTER__
           __DOMICILE_FILTER__
+          __COLLEGE_TYPE_FILTER__
+          __COURSE_FILTER__
+          __QUOTA_FILTER__
+          __SEAT_TYPE_FILTER__
+          __SUB_CATEGORY_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
           score DESC
         LIMIT :state_limit;
-        """
+    """
 
     rank_sql_base = """
         SELECT DISTINCT ON (COALESCE(institution_name, college_name))
@@ -165,97 +183,139 @@ async def fetch_cutoff_recommendations(
         WHERE state ILIKE :state_like
           AND air_rank IS NOT NULL
           AND air_rank >= :user_rank
-          AND TRIM(UPPER(COALESCE(category, ''))) = :category_exact
+          __CATEGORY_FILTER__
           __DOMICILE_FILTER__
+          __COLLEGE_TYPE_FILTER__
+          __COURSE_FILTER__
+          __QUOTA_FILTER__
+          __SEAT_TYPE_FILTER__
+          __SUB_CATEGORY_FILTER__
         ORDER BY
           COALESCE(institution_name, college_name),
           air_rank ASC
         LIMIT :state_limit;
-        """
+    """
 
     async with async_session_maker() as db:
         _log(
             "[CUTOFF_SQL] Starting query run | "
             f"metric_type={metric_type} metric_value={metric_value} "
             f"home_state={home_state} category={category} total_limit={total_limit} "
-            f"target_states={target_states} "
-            f"college_type_filter={college_type_filter} course_filter={course_filter} "
-            f"quota_keywords={quota_keywords} seat_type_keywords={seat_type_keywords}"
+            f"target_states={target_states} central_scope={central_scope} "
+            f"college_type_filter={college_type_filter} college_type_filters={college_type_filters} "
+            f"course_filter={course_filter} "
+            f"quota_keywords={quota_keywords} seat_type_keywords={seat_type_keywords} "
+            f"apply_category_filter={apply_category_filter} apply_domicile_filter={apply_domicile_filter}"
         )
 
         for state in target_states:
             params: Dict[str, object] = {
                 "state_like": state,
-                "category_exact": category_norm,
                 "state_limit": per_state_limits.get(state, 1),
             }
-            domicile_filter = _domicile_sql_filter(home_state=home_state, row_state=state)
             sql_base = score_sql_base if metric_type == "score" else rank_sql_base
-            sql_base = sql_base.replace("__DOMICILE_FILTER__", domicile_filter)
 
-            # ── college_type: exact match (user said "government" / "AIIMS" etc.) ──
-            if college_type_filter:
+            # ── Category filter ──
+            if apply_category_filter:
+                params["category_exact"] = category_norm
                 sql_base = sql_base.replace(
-                    "        ORDER BY",
-                    "          AND TRIM(college_type) = :college_type_filter\n        ORDER BY",
+                    "__CATEGORY_FILTER__",
+                    "AND TRIM(UPPER(COALESCE(category, ''))) = :category_exact"
                 )
-                params["college_type_filter"] = college_type_filter.strip()
+            else:
+                sql_base = sql_base.replace("__CATEGORY_FILTER__", "")
 
-            # ── course: exact match (user said "MBBS" / "BDS" / "B.Sc. Nursing") ──
+            # ── Domicile filter ──
+            if apply_domicile_filter:
+                sql_base = sql_base.replace(
+                    "__DOMICILE_FILTER__",
+                    _domicile_sql_filter(home_state=home_state, row_state=state)
+                )
+            else:
+                sql_base = sql_base.replace("__DOMICILE_FILTER__", "")
+
+            # ── College type: exact match (user said "government" / "AIIMS" / "Deemed" etc.) ──
+            resolved_college_types: List[str] = []
+            if isinstance(college_type_filters, list) and college_type_filters:
+                resolved_college_types = [str(v).strip() for v in college_type_filters if str(v).strip()]
+            elif college_type_filter:
+                resolved_college_types = [str(college_type_filter).strip()]
+
+            if resolved_college_types:
+                if len(resolved_college_types) == 1:
+                    sql_base = sql_base.replace(
+                        "__COLLEGE_TYPE_FILTER__",
+                        "AND TRIM(college_type) = :college_type_filter_0"
+                    )
+                    params["college_type_filter_0"] = resolved_college_types[0]
+                else:
+                    type_clauses = " OR ".join(
+                        f"TRIM(college_type) = :college_type_filter_{i}"
+                        for i in range(len(resolved_college_types))
+                    )
+                    sql_base = sql_base.replace(
+                        "__COLLEGE_TYPE_FILTER__",
+                        f"AND ({type_clauses})"
+                    )
+                    for i, ctype in enumerate(resolved_college_types):
+                        params[f"college_type_filter_{i}"] = ctype
+            else:
+                sql_base = sql_base.replace("__COLLEGE_TYPE_FILTER__", "")
+
+            # ── Course: exact match (MBBS / BDS / B.Sc. Nursing) ──
             if course_filter:
                 sql_base = sql_base.replace(
-                    "        ORDER BY",
-                    "          AND TRIM(UPPER(COALESCE(course, ''))) = :course_filter\n        ORDER BY",
+                    "__COURSE_FILTER__",
+                    "AND TRIM(UPPER(COALESCE(course, ''))) = :course_filter"
                 )
                 params["course_filter"] = course_filter.strip().upper()
+            else:
+                sql_base = sql_base.replace("__COURSE_FILTER__", "")
 
-            # ── quota: ILIKE fuzzy OR across keywords (DB values are inconsistent) ──
+            # ── Quota: ILIKE fuzzy OR across keywords ──
             if quota_keywords:
                 quota_clauses = " OR ".join(
                     f"quota ILIKE :quota_kw_{i}"
                     for i in range(len(quota_keywords))
                 )
-                sql_base = sql_base.replace(
-                    "        ORDER BY",
-                    f"          AND ({quota_clauses})\n        ORDER BY",
-                )
+                sql_base = sql_base.replace("__QUOTA_FILTER__", f"AND ({quota_clauses})")
                 for i, kw in enumerate(quota_keywords):
                     params[f"quota_kw_{i}"] = f"%{kw}%"
+            else:
+                sql_base = sql_base.replace("__QUOTA_FILTER__", "")
 
-            # ── seat_type: ILIKE fuzzy OR across keywords ──
+            # ── Seat type: ILIKE fuzzy OR across keywords ──
             if seat_type_keywords:
                 seat_clauses = " OR ".join(
                     f"seat_type ILIKE :seat_kw_{i}"
                     for i in range(len(seat_type_keywords))
                 )
-                sql_base = sql_base.replace(
-                    "        ORDER BY",
-                    f"          AND ({seat_clauses})\n        ORDER BY",
-                )
+                sql_base = sql_base.replace("__SEAT_TYPE_FILTER__", f"AND ({seat_clauses})")
                 for i, kw in enumerate(seat_type_keywords):
                     params[f"seat_kw_{i}"] = f"%{kw}%"
+            else:
+                sql_base = sql_base.replace("__SEAT_TYPE_FILTER__", "")
 
-            # ── sub_category: exact match (optional, from user profile) ──
+            # ── Sub-category: exact match (optional, from user profile) ──
             if sub_category:
                 sql_base = sql_base.replace(
-                    "        ORDER BY",
-                    "          AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_category_exact\n        ORDER BY",
+                    "__SUB_CATEGORY_FILTER__",
+                    "AND TRIM(UPPER(COALESCE(sub_category, ''))) = :sub_category_exact"
                 )
                 params["sub_category_exact"] = str(sub_category).strip().upper()
+            else:
+                sql_base = sql_base.replace("__SUB_CATEGORY_FILTER__", "")
 
             sql_text_compact = _compact_sql(sql_base)
-
             if metric_type == "score":
                 params["user_score"] = metric_value
-                _log(f"[CUTOFF_SQL] Query text (score): {sql_text_compact}")
-                _log(f"[CUTOFF_SQL] Rendered: {_render_sql_for_debug(sql_text_compact, params)}")
-                result = await db.execute(text(sql_base), params)
             else:
                 params["user_rank"] = metric_value
-                _log(f"[CUTOFF_SQL] Query text (rank): {sql_text_compact}")
-                _log(f"[CUTOFF_SQL] Rendered: {_render_sql_for_debug(sql_text_compact, params)}")
-                result = await db.execute(text(sql_base), params)
 
+            _log(f"[CUTOFF_SQL] Query (state={state}): {sql_text_compact}")
+            _log(f"[CUTOFF_SQL] Rendered: {_render_sql_for_debug(sql_text_compact, params)}")
+
+            result = await db.execute(text(sql_base), params)
             rows = [dict(row) for row in result.mappings().all()]
             _log(f"[CUTOFF_SQL] Rows fetched | state={state} count={len(rows)}")
             all_rows.extend(rows)
@@ -304,32 +364,37 @@ def format_cutoff_markdown(
     sub_category: Optional[str],
     home_state: str,
     target_states: List[str],
+    central_mode: bool = False,
     display_limit: int = 10,
 ) -> str:
     if not rows:
         metric_label = "AIR Rank" if metric_type == "rank" else "Score"
         states_label = ", ".join(target_states) if target_states else "your selected states"
         has_sub_category = bool(str(sub_category or "").strip())
-        domicile_mode = (
-            "NON-DOMICILE or OPEN (home state differs from target state)"
-            if any(s.lower() != (home_state or "").lower() for s in target_states)
-            else "DOMICILE or OPEN (home state matches target state)"
-        )
         profile_lines = [
             "### Profile I Used",
             "",
             f"- {metric_label}: **{metric_value}**",
-            f"- Category: **{category}**",
         ]
+        if not central_mode:
+            profile_lines.append(f"- Category: **{category}**")
         if has_sub_category:
             profile_lines.append(f"- Sub-category: **{str(sub_category).strip()}**")
-        profile_lines.extend(
-            [
-                f"- Home state: **{home_state}**",
-                f"- Target state(s): **{states_label}**",
-                f"- Eligibility mode applied: **{domicile_mode}**",
-            ]
-        )
+        if central_mode:
+            profile_lines.append(f"- Counselling scope: **{states_label} (All India / MCC)**")
+        else:
+            domicile_mode = (
+                "NON-DOMICILE or OPEN"
+                if any(s.lower() != (home_state or "").lower() for s in target_states)
+                else "DOMICILE or OPEN"
+            )
+            profile_lines.extend(
+                [
+                    f"- Home state: **{home_state}**",
+                    f"- Target state(s): **{states_label}**",
+                    f"- Eligibility mode: **{domicile_mode}**",
+                ]
+            )
         profile_block = "\n".join(profile_lines)
 
         return (
@@ -355,16 +420,22 @@ def format_cutoff_markdown(
     lines = [
         "### Best-Match Colleges (Based on 2025 Cutoff Data)",
         "",
-        f"- Profile used: **{metric_label} = {metric_value}**, **Category = {category}**",
-        f"- Home state: **{home_state}**",
-        f"- Target states: **{states_label}**",
         f"- Showing top **{len(shown)}** of **{len(rows)}** matched options",
         "",
         "| # | Institution | State | Category | Quota | Domicile | AIR | Score | Round |",
         "|---|---|---|---|---|---|---:|---:|---|",
     ]
-    if has_sub_category:
-        lines.insert(4, f"- Sub-category: **{str(sub_category).strip()}**")
+
+    if central_mode:
+        lines.insert(2, f"- Profile used: **{metric_label} = {metric_value}**")
+        lines.insert(3, f"- Counselling scope: **All India (MCC)**")
+    else:
+        lines.insert(2, f"- Profile used: **{metric_label} = {metric_value}**, **Category = {category}**")
+        lines.insert(3, f"- Home state: **{home_state}**")
+        lines.insert(4, f"- Target states: **{states_label}**")
+
+    if has_sub_category and not central_mode:
+        lines.insert(5, f"- Sub-category: **{str(sub_category).strip()}**")
 
     for idx, row in enumerate(shown, start=1):
         lines.append(
