@@ -306,7 +306,7 @@ export default function Home() {
   const [guidedIntent, setGuidedIntent] = useState<GuidedIntent | null>(null);
   const [allowStarterReplies, setAllowStarterReplies] = useState(true);
   const [conversationId, setConversationId] = useState<number | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [selectedLanguage, setSelectedLanguage] = useState<LanguageCode>('en');
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [showSupportPanel, setShowSupportPanel] = useState(false);
