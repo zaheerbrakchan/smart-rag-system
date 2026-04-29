@@ -298,7 +298,7 @@ export default function MessageBubble({
   }
 
   return (
-    <div className={`flex items-start gap-4 message-enter ${isUser ? 'flex-row-reverse' : ''}`}>
+    <div className={`flex items-start gap-2 md:gap-4 message-enter min-w-0 ${isUser ? 'flex-row-reverse' : ''}`}>
       {/* Avatar */}
       <div
         className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 shadow-md ${
@@ -319,14 +319,14 @@ export default function MessageBubble({
       </div>
 
       {/* Message Content */}
-      <div className={`flex-1 max-w-[85%] ${isUser ? 'text-right' : ''}`}>
+      <div className={`flex-1 min-w-0 max-w-full md:max-w-[85%] ${isUser ? 'text-right' : ''}`}>
         {/* Role label */}
         <p className={`text-xs font-semibold mb-1.5 ${isUser ? 'text-gray-500 dark:text-gray-400' : 'text-blue-600 dark:text-blue-400'}`}>
           {isUser ? youLabel : buddyLabel}
         </p>
         
         <div
-          className={`inline-block rounded-2xl p-4 shadow-sm ${
+          className={`${isUser ? 'inline-block' : 'block w-full'} max-w-full rounded-2xl p-3 md:p-4 shadow-sm ${
             isUser
               ? 'bg-gradient-to-br from-gray-700 to-gray-800 text-white rounded-tr-sm'
               : message.isError
@@ -348,7 +348,7 @@ export default function MessageBubble({
                     </blockquote>
                   ),
                   table: ({ children }) => (
-                    <div className="my-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-600">
+                    <div className="my-4 max-w-full overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-600">
                       <table className="min-w-full border-collapse text-sm">{children}</table>
                     </div>
                   ),
@@ -377,7 +377,7 @@ export default function MessageBubble({
               </ReactMarkdown>
 
               {parsedCutoffTable && !isMultiStateCutoffTable && (
-                <div className="my-4 overflow-x-auto rounded-xl border border-slate-600 bg-slate-900/80">
+                <div className="my-4 max-w-full overflow-x-auto rounded-xl border border-slate-600 bg-slate-900/80">
                   <table className="min-w-full border-collapse text-sm">
                     <thead className="bg-slate-800">
                       <tr className="border-b border-slate-600">
@@ -411,7 +411,7 @@ export default function MessageBubble({
                   {cutoffStates.map((stateName) => {
                     const stateRows = groupedCutoffRows[stateName] || [];
                     return (
-                      <div key={stateName} className="rounded-xl border border-slate-600 bg-slate-900/80 overflow-x-auto">
+                      <div key={stateName} className="max-w-full rounded-xl border border-slate-600 bg-slate-900/80 overflow-x-auto">
                         <div className="px-3 py-2 bg-slate-800/90 border-b border-slate-600">
                           <span className="inline-flex items-center rounded-full bg-blue-600/20 text-blue-300 border border-blue-500/40 px-2.5 py-1 text-xs font-semibold">
                             {stateName}
