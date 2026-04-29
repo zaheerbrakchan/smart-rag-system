@@ -220,7 +220,7 @@ export default function ChatSidebar({
   // Collapsed state - just show toggle button
   if (isCollapsed) {
     return (
-      <div className="w-14 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col items-center py-4 gap-3">
+      <div className="w-10 md:w-14 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col items-center py-3 md:py-4 gap-2 md:gap-3">
         <button
           onClick={onToggleCollapse}
           className="p-2.5 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all"
@@ -240,9 +240,11 @@ export default function ChatSidebar({
   }
 
   return (
-    <div className="w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full">
+    <>
+      <div className="md:hidden fixed inset-0 bg-black/50 z-30" onClick={onToggleCollapse} />
+      <div className="fixed inset-y-0 left-0 z-40 w-[86vw] max-w-72 md:static md:w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full shadow-2xl md:shadow-none">
       {/* Header */}
-      <div className="p-4 border-b border-slate-200 dark:border-slate-700/50">
+      <div className="p-3 md:p-4 border-b border-slate-200 dark:border-slate-700/50">
         <div className="flex items-center gap-2">
           <button
             onClick={onNewChat}
@@ -452,6 +454,7 @@ export default function ChatSidebar({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

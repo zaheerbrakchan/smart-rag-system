@@ -881,7 +881,7 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="relative flex h-screen overflow-hidden">
       {/* Chat History Sidebar */}
       {isAuthenticated && token && (
         <ChatSidebar
@@ -896,23 +896,23 @@ export default function Home() {
         />
       )}
       
-      <main className="flex flex-col flex-1 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
+      <main className="flex flex-col flex-1 min-w-0 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
       {/* Header */}
-      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
+      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-2 md:px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 md:gap-3 min-w-0">
             <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
-            <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+            <div className="min-w-0">
+              <h1 className="text-base md:text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent truncate">
                 Med Buddy
               </h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">{t.poweredByHeader}</p>
+              <p className="hidden sm:block text-xs text-gray-500 dark:text-gray-400 font-medium">{t.poweredByHeader}</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 md:gap-3">
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-700 rounded-full">
               <Shield className="w-4 h-4 text-green-600 dark:text-green-400" />
               <span className="text-xs font-medium text-green-700 dark:text-green-400">{t.officialNtaSource}</span>
@@ -921,7 +921,7 @@ export default function Home() {
             <select
               value={selectedLanguage}
               onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
-              className="text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200"
+              className="text-xs px-1.5 md:px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200 max-w-[86px]"
               aria-label="Language"
             >
               <option value="en">{TRANSLATIONS.en.languageLabel}</option>
@@ -1050,7 +1050,7 @@ export default function Home() {
       </header>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto overflow-x-hidden">
         {messages.length === 0 ? (
           // Welcome Screen
           <div className="min-h-full flex flex-col items-center justify-center text-center px-4 py-8">
@@ -1138,9 +1138,9 @@ export default function Home() {
       </div>
 
       {/* Input Area */}
-      <div className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-blue-100 dark:border-slate-700 px-4 py-4">
+      <div className="sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-blue-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
         <div className="max-w-4xl mx-auto">
-          <div className="flex gap-3">
+          <div className="flex gap-2 md:gap-3">
             <div className="flex-1 relative">
               <textarea
                 value={inputValue}
@@ -1151,7 +1151,7 @@ export default function Home() {
                     ? t.placeholderClarification
                     : t.placeholderDefault
                 }
-                className="w-full px-5 py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500"
+                className="w-full px-3 md:px-5 py-3 md:py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm md:text-base"
                 rows={1}
                 disabled={isLoading}
               />
@@ -1159,7 +1159,7 @@ export default function Home() {
             <button
               onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || isLoading}
-              className="px-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl flex items-center gap-2"
+              className="px-4 md:px-6 py-3 md:py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl flex items-center gap-2"
             >
               {isLoading ? (
                 <>
