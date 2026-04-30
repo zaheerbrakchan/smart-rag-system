@@ -881,7 +881,7 @@ export default function Home() {
   }
 
   return (
-    <div className="relative flex h-screen overflow-hidden">
+    <div className="relative flex h-[100dvh] min-h-0 overflow-hidden overscroll-none">
       {/* Chat History Sidebar */}
       {isAuthenticated && token && (
         <ChatSidebar
@@ -896,7 +896,7 @@ export default function Home() {
         />
       )}
       
-      <main className="flex flex-col flex-1 min-w-0 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
+      <main className="flex min-h-0 flex-col flex-1 min-w-0 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
       {/* Header */}
       <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-2 md:px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
@@ -1050,7 +1050,7 @@ export default function Home() {
       </header>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-auto overflow-x-hidden">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         {messages.length === 0 ? (
           // Welcome Screen
           <div className="min-h-full flex flex-col items-center justify-center text-center px-4 py-8">
@@ -1138,7 +1138,7 @@ export default function Home() {
       </div>
 
       {/* Input Area */}
-      <div className="sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-blue-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+      <div className="shrink-0 sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-blue-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
         <div className="max-w-4xl mx-auto">
           <div className="flex gap-2 md:gap-3">
             <div className="flex-1 relative">
