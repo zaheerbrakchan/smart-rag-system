@@ -310,6 +310,7 @@ export default function Home() {
   const [selectedLanguage, setSelectedLanguage] = useState<LanguageCode>('en');
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [showSupportPanel, setShowSupportPanel] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [supportMessage, setSupportMessage] = useState('');
   const [supportLoading, setSupportLoading] = useState(false);
   const [supportSuccess, setSupportSuccess] = useState<string | null>(null);
@@ -866,6 +867,8 @@ export default function Home() {
     setInputValue('');
   };
 
+  const closeMobileMenu = () => setShowMobileMenu(false);
+
   // Show loading only while checking auth status
   if (authLoading) {
     return (
@@ -901,6 +904,13 @@ export default function Home() {
       <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-2 md:px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
+            <button
+              onClick={() => setSidebarCollapsed(false)}
+              className="md:hidden p-2 rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-gray-300"
+              aria-label="Open chats"
+            >
+              <Menu className="w-4 h-4" />
+            </button>
             <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
@@ -921,7 +931,7 @@ export default function Home() {
             <select
               value={selectedLanguage}
               onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
-              className="text-xs px-1.5 md:px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200 max-w-[86px]"
+              className="hidden md:block text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200 max-w-[86px]"
               aria-label="Language"
             >
               <option value="en">{TRANSLATIONS.en.languageLabel}</option>
@@ -959,7 +969,9 @@ export default function Home() {
             )}
             
             {/* Theme Toggle */}
-            <ThemeToggle language={selectedLanguage} />
+            <div className="hidden md:block">
+              <ThemeToggle language={selectedLanguage} />
+            </div>
             
             {/* Admin Dashboard - Modern Glass Design */}
             {isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin') && (
@@ -984,7 +996,7 @@ export default function Home() {
             {!authLoading && (
               <>
                 {isAuthenticated ? (
-                  <div className="relative">
+                  <div className="relative hidden md:block">
                     <button
                       onClick={() => setShowUserMenu(!showUserMenu)}
                       className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
@@ -1026,7 +1038,7 @@ export default function Home() {
                     )}
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="hidden md:flex items-center gap-2">
                     <Link
                       href="/login"
                       className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
@@ -1045,9 +1057,100 @@ export default function Home() {
                 )}
               </>
             )}
+            {isAuthenticated && (
+              <button
+                onClick={() => setShowMobileMenu((v) => !v)}
+                className="md:hidden p-2 rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-gray-300"
+                aria-label="Open mobile menu"
+              >
+                <ChevronDown className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       </header>
+
+      {showMobileMenu && (
+        <>
+          <div className="md:hidden fixed inset-0 z-[60] bg-black/40" onClick={closeMobileMenu} />
+          <div className="md:hidden fixed right-2 top-14 z-[70] w-[88vw] max-w-xs rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-2xl p-3 space-y-2">
+            <button
+              onClick={() => {
+                setSidebarCollapsed(false);
+                closeMobileMenu();
+              }}
+              className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
+            >
+              Chats
+            </button>
+            <button
+              onClick={() => {
+                handleNewChat();
+                closeMobileMenu();
+              }}
+              className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
+            >
+              {t.newChat}
+            </button>
+            <div className="px-1 pt-1">
+              <label className="text-xs text-gray-500 dark:text-gray-400">Language</label>
+              <select
+                value={selectedLanguage}
+                onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
+                className="mt-1 w-full text-sm px-2 py-2 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200"
+                aria-label="Language"
+              >
+                <option value="en">{TRANSLATIONS.en.languageLabel}</option>
+                <option value="hi">{TRANSLATIONS.hi.languageLabel}</option>
+                <option value="mr">{TRANSLATIONS.mr.languageLabel}</option>
+              </select>
+            </div>
+            <div className="px-1 py-1">
+              <ThemeToggle language={selectedLanguage} />
+            </div>
+            {!isAdminUser && (
+              <>
+                <button
+                  onClick={() => {
+                    setSupportError(null);
+                    setSupportSuccess(null);
+                    setShowSupportModal(true);
+                    closeMobileMenu();
+                  }}
+                  className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
+                >
+                  {t.contactSupport}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowSupportPanel(true);
+                    closeMobileMenu();
+                  }}
+                  className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
+                >
+                  {t.mySupportUpdates}
+                </button>
+              </>
+            )}
+            <Link
+              href="/profile"
+              className="block w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
+              onClick={closeMobileMenu}
+            >
+              {t.myProfile}
+            </Link>
+            <button
+              onClick={() => {
+                closeMobileMenu();
+                logout();
+              }}
+              className="w-full text-left px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-sm text-red-600 dark:text-red-400"
+            >
+              {t.signOut}
+            </button>
+          </div>
+        </>
+      )}
 
       {/* Chat Area */}
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
