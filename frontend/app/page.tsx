@@ -969,9 +969,7 @@ export default function Home() {
             )}
             
             {/* Theme Toggle */}
-            <div className="hidden md:block">
-              <ThemeToggle language={selectedLanguage} />
-            </div>
+            <ThemeToggle language={selectedLanguage} />
             
             {/* Admin Dashboard - Modern Glass Design */}
             {isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin') && (
@@ -1074,24 +1072,6 @@ export default function Home() {
         <>
           <div className="md:hidden fixed inset-0 z-[60] bg-black/40" onClick={closeMobileMenu} />
           <div className="md:hidden fixed right-2 top-14 z-[70] w-[88vw] max-w-xs rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-2xl p-3 space-y-2">
-            <button
-              onClick={() => {
-                setSidebarCollapsed(false);
-                closeMobileMenu();
-              }}
-              className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
-            >
-              Chats
-            </button>
-            <button
-              onClick={() => {
-                handleNewChat();
-                closeMobileMenu();
-              }}
-              className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-gray-800 dark:text-gray-100"
-            >
-              {t.newChat}
-            </button>
             <div className="px-1 pt-1">
               <label className="text-xs text-gray-500 dark:text-gray-400">Language</label>
               <select
@@ -1104,9 +1084,6 @@ export default function Home() {
                 <option value="hi">{TRANSLATIONS.hi.languageLabel}</option>
                 <option value="mr">{TRANSLATIONS.mr.languageLabel}</option>
               </select>
-            </div>
-            <div className="px-1 py-1">
-              <ThemeToggle language={selectedLanguage} />
             </div>
             {!isAdminUser && (
               <>
