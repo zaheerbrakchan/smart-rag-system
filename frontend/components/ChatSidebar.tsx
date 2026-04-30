@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { 
   MessageSquare, Plus, Trash2, Edit2, Check, X, 
-  ChevronLeft, ChevronRight, Clock, MoreHorizontal 
+  ChevronLeft, ChevronRight, Clock, MoreHorizontal, MessageCircleQuestion, Bell
 } from 'lucide-react';
 import { 
   getConversations, 
@@ -24,8 +24,6 @@ interface ChatSidebarProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   language: 'en' | 'hi' | 'mr';
-  selectedLanguage?: 'en' | 'hi' | 'mr';
-  onLanguageChange?: (lang: 'en' | 'hi' | 'mr') => void;
 }
 
 export default function ChatSidebar({
@@ -40,8 +38,6 @@ export default function ChatSidebar({
   isCollapsed,
   onToggleCollapse,
   language,
-  selectedLanguage = 'en',
-  onLanguageChange,
 }: ChatSidebarProps) {
   const PAGE_SIZE = 20;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -214,7 +210,7 @@ export default function ChatSidebar({
     myQueries: language === 'hi' ? 'मेरे प्रश्न' : language === 'mr' ? 'माझे प्रश्न' : 'My Queries',
     myProfile: language === 'hi' ? 'मेरा प्रोफाइल' : language === 'mr' ? 'माझे प्रोफाइल' : 'My Profile',
     signOut: language === 'hi' ? 'साइन आउट' : language === 'mr' ? 'साइन आउट' : 'Sign Out',
-    language: language === 'hi' ? 'भाषा' : language === 'mr' ? 'भाषा' : 'Language',
+    recents: language === 'hi' ? 'हाल की चैट्स' : language === 'mr' ? 'अलीकडील चॅट्स' : 'Recents',
   };
 
   const formatDate = (dateStr: string) => {
@@ -258,8 +254,8 @@ export default function ChatSidebar({
 
   return (
     <>
-      <div className="md:hidden fixed inset-0 bg-black/50 z-30" onClick={onToggleCollapse} />
-      <div className="fixed inset-y-0 left-0 z-40 w-[86vw] max-w-72 md:static md:w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full shadow-2xl md:shadow-none">
+      <div className="md:hidden fixed inset-0 bg-black/50 z-[70]" onClick={onToggleCollapse} />
+      <div className="fixed inset-y-0 left-0 z-[80] w-[86vw] max-w-72 md:static md:w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full shadow-2xl md:shadow-none">
       <div className="md:hidden flex items-center justify-between px-3 py-2 border-b border-slate-200 dark:border-slate-700/50">
         <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Chats</span>
         <button
@@ -297,29 +293,19 @@ export default function ChatSidebar({
             onNewChat();
             onToggleCollapse();
           }}
-          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100 flex items-center gap-2"
         >
+          <Plus size={14} />
           {i18n.newChat}
         </button>
-        <div>
-          <label className="text-xs text-slate-500 dark:text-slate-400">{i18n.language}</label>
-          <select
-            value={selectedLanguage}
-            onChange={(e) => onLanguageChange?.(e.target.value as 'en' | 'hi' | 'mr')}
-            className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-sm text-slate-800 dark:text-slate-100"
-          >
-            <option value="en">English</option>
-            <option value="hi">हिंदी</option>
-            <option value="mr">मराठी</option>
-          </select>
-        </div>
         <button
           onClick={() => {
             onOpenSupport?.();
             onToggleCollapse();
           }}
-          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100 flex items-center gap-2"
         >
+          <MessageCircleQuestion size={14} />
           {i18n.support}
         </button>
         <button
@@ -327,8 +313,9 @@ export default function ChatSidebar({
             onOpenMyQueries?.();
             onToggleCollapse();
           }}
-          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100 flex items-center gap-2"
         >
+          <Bell size={14} />
           {i18n.myQueries}
         </button>
       </div>
@@ -339,6 +326,9 @@ export default function ChatSidebar({
         onScroll={handleListScroll}
         className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
       >
+        <div className="md:hidden px-3 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          {i18n.recents}
+        </div>
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
