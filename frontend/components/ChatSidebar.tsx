@@ -17,9 +17,15 @@ interface ChatSidebarProps {
   currentConversationId: number | null;
   onSelectConversation: (id: number) => void;
   onNewChat: () => void;
+  onOpenSupport?: () => void;
+  onOpenMyQueries?: () => void;
+  onOpenProfile?: () => void;
+  onLogout?: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   language: 'en' | 'hi' | 'mr';
+  selectedLanguage?: 'en' | 'hi' | 'mr';
+  onLanguageChange?: (lang: 'en' | 'hi' | 'mr') => void;
 }
 
 export default function ChatSidebar({
@@ -27,9 +33,15 @@ export default function ChatSidebar({
   currentConversationId,
   onSelectConversation,
   onNewChat,
+  onOpenSupport,
+  onOpenMyQueries,
+  onOpenProfile,
+  onLogout,
   isCollapsed,
   onToggleCollapse,
   language,
+  selectedLanguage = 'en',
+  onLanguageChange,
 }: ChatSidebarProps) {
   const PAGE_SIZE = 20;
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -198,6 +210,11 @@ export default function ChatSidebar({
         ? 'हे संभाषण हटवायचे याची खात्री आहे का? सर्व संदेश कायमचे हटवले जातील.'
         : 'Are you sure you want to delete this conversation? All messages will be permanently removed.',
     cancel: language === 'hi' ? 'रद्द करें' : language === 'mr' ? 'रद्द करा' : 'Cancel',
+    support: language === 'hi' ? 'सहायता' : language === 'mr' ? 'सपोर्ट' : 'Support',
+    myQueries: language === 'hi' ? 'मेरे प्रश्न' : language === 'mr' ? 'माझे प्रश्न' : 'My Queries',
+    myProfile: language === 'hi' ? 'मेरा प्रोफाइल' : language === 'mr' ? 'माझे प्रोफाइल' : 'My Profile',
+    signOut: language === 'hi' ? 'साइन आउट' : language === 'mr' ? 'साइन आउट' : 'Sign Out',
+    language: language === 'hi' ? 'भाषा' : language === 'mr' ? 'भाषा' : 'Language',
   };
 
   const formatDate = (dateStr: string) => {
@@ -243,8 +260,18 @@ export default function ChatSidebar({
     <>
       <div className="md:hidden fixed inset-0 bg-black/50 z-30" onClick={onToggleCollapse} />
       <div className="fixed inset-y-0 left-0 z-40 w-[86vw] max-w-72 md:static md:w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700/50 flex flex-col h-full shadow-2xl md:shadow-none">
+      <div className="md:hidden flex items-center justify-between px-3 py-2 border-b border-slate-200 dark:border-slate-700/50">
+        <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Chats</span>
+        <button
+          onClick={onToggleCollapse}
+          className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
+          aria-label={i18n.collapseSidebar}
+        >
+          <X size={16} />
+        </button>
+      </div>
       {/* Header */}
-      <div className="p-3 md:p-4 border-b border-slate-200 dark:border-slate-700/50">
+      <div className="hidden md:block p-4 border-b border-slate-200 dark:border-slate-700/50">
         <div className="flex items-center gap-2">
           <button
             onClick={onNewChat}
@@ -261,6 +288,49 @@ export default function ChatSidebar({
             <ChevronLeft size={18} />
           </button>
         </div>
+      </div>
+
+      {/* Mobile actions */}
+      <div className="md:hidden px-3 py-2 border-b border-slate-200 dark:border-slate-700/50 space-y-2">
+        <button
+          onClick={() => {
+            onNewChat();
+            onToggleCollapse();
+          }}
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+        >
+          {i18n.newChat}
+        </button>
+        <div>
+          <label className="text-xs text-slate-500 dark:text-slate-400">{i18n.language}</label>
+          <select
+            value={selectedLanguage}
+            onChange={(e) => onLanguageChange?.(e.target.value as 'en' | 'hi' | 'mr')}
+            className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-2 text-sm text-slate-800 dark:text-slate-100"
+          >
+            <option value="en">English</option>
+            <option value="hi">हिंदी</option>
+            <option value="mr">मराठी</option>
+          </select>
+        </div>
+        <button
+          onClick={() => {
+            onOpenSupport?.();
+            onToggleCollapse();
+          }}
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+        >
+          {i18n.support}
+        </button>
+        <button
+          onClick={() => {
+            onOpenMyQueries?.();
+            onToggleCollapse();
+          }}
+          className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+        >
+          {i18n.myQueries}
+        </button>
       </div>
 
       {/* Conversation List */}
@@ -412,6 +482,26 @@ export default function ChatSidebar({
             {totalConversations !== 1 ? i18n.chatsPlural : i18n.chats}
           </span>
           <span className="text-slate-500 dark:text-slate-600">NEET UG 2026</span>
+        </div>
+        <div className="md:hidden mt-3 space-y-2">
+          <button
+            onClick={() => {
+              onOpenProfile?.();
+              onToggleCollapse();
+            }}
+            className="w-full text-left px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-slate-100"
+          >
+            {i18n.myProfile}
+          </button>
+          <button
+            onClick={() => {
+              onLogout?.();
+              onToggleCollapse();
+            }}
+            className="w-full text-left px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-sm text-red-600 dark:text-red-400"
+          >
+            {i18n.signOut}
+          </button>
         </div>
       </div>
 
