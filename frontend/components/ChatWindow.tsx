@@ -54,7 +54,7 @@ export default function ChatWindow({
   const showLoadingIndicator = isLoading && !isStreaming;
 
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden px-2 md:px-4 py-4 md:py-6">
+    <div className="h-full min-h-0 overflow-y-auto overflow-x-hidden px-2 md:px-4 py-4 md:py-6">
       <div className="max-w-4xl mx-auto space-y-6">
         {messages.map((message) => (
           <MessageBubble
