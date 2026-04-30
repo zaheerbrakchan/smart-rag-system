@@ -901,8 +901,6 @@ export default function Home() {
           isCollapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           language={selectedLanguage}
-          selectedLanguage={selectedLanguage}
-          onLanguageChange={setSelectedLanguage}
         />
       )}
       
@@ -938,7 +936,7 @@ export default function Home() {
             <select
               value={selectedLanguage}
               onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
-              className="hidden md:block text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200 max-w-[86px]"
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-gray-700 dark:text-gray-200 max-w-[86px]"
               aria-label="Language"
             >
               <option value="en">{TRANSLATIONS.en.languageLabel}</option>
