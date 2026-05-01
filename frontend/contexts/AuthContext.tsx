@@ -9,6 +9,7 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  refreshUser: () => Promise<void>;
   login: (phone: string, verificationToken: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
   logout: (reason?: 'manual' | 'inactive') => void;
@@ -192,6 +193,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return await authApi.verifyOtp(phone, otp, purpose);
   };
 
+  const refreshUser = async () => {
+    if (!token) return;
+    const currentUser = await authApi.getCurrentUser(token);
+    setUser(currentUser);
+    localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -199,6 +207,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         token,
         isLoading,
         isAuthenticated: !!user,
+        refreshUser,
         login,
         register,
         logout,

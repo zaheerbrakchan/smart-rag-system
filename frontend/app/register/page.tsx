@@ -121,17 +121,17 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800 flex flex-col">
+    <div className="min-h-screen bg-gradient-to-br from-red-50 via-white to-rose-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800 flex flex-col">
       {/* Header */}
-      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-6 py-3 flex-shrink-0">
+      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-red-100 dark:border-slate-700 px-6 py-3 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg">
+            <div className="bg-gradient-to-br from-red-600 to-rose-600 p-2 rounded-xl shadow-lg">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                Med Buddy
+              <h1 className="text-lg font-bold bg-gradient-to-r from-red-600 to-rose-600 bg-clip-text text-transparent">
+                Med Assist
               </h1>
               <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
             </div>
@@ -141,7 +141,7 @@ export default function RegisterPage() {
             <ThemeToggle />
             <Link 
               href="/login"
-              className="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+              className="text-sm font-medium text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
             >
               Already have an account? Sign in
             </Link>
@@ -156,20 +156,20 @@ export default function RegisterPage() {
           <div className="flex items-center justify-center mb-6">
             <div className="flex items-center">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${
-                step === 'phone' ? 'bg-blue-600 text-white' : 'bg-green-500 text-white'
+                step === 'phone' ? 'bg-red-600 text-white' : 'bg-green-500 text-white'
               }`}>
                 {step !== 'phone' ? <CheckCircle className="w-4 h-4" /> : '1'}
               </div>
               <div className={`w-12 h-1 ${step !== 'phone' ? 'bg-green-500' : 'bg-gray-200'}`} />
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${
-                step === 'otp' ? 'bg-blue-600 text-white' : 
+                step === 'otp' ? 'bg-red-600 text-white' :
                 step === 'details' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'
               }`}>
                 {step === 'details' ? <CheckCircle className="w-4 h-4" /> : '2'}
               </div>
-              <div className={`w-12 h-1 ${step === 'details' ? 'bg-blue-600' : 'bg-gray-200'}`} />
+              <div className={`w-12 h-1 ${step === 'details' ? 'bg-red-600' : 'bg-gray-200'}`} />
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm ${
-                step === 'details' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-500'
+                step === 'details' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-500'
               }`}>
                 3
               </div>
@@ -180,8 +180,8 @@ export default function RegisterPage() {
             {/* Step 1: Phone Number */}
             {step === 'phone' && (
               <>
-                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
-                  Med Buddy
+                <p className="text-xs uppercase tracking-wide text-red-600 dark:text-red-400 font-semibold mb-1">
+                  Med Assist
                 </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Create Account</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">Enter your mobile number to get started</p>
@@ -199,7 +199,7 @@ export default function RegisterPage() {
                         value={phone}
                         onChange={(e) => setPhone(e.target.value)}
                         placeholder="Enter mobile number"
-                        className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
                         required
                       />
                     </div>
@@ -215,7 +215,7 @@ export default function RegisterPage() {
                   <button
                     type="submit"
                     disabled={isLoading || !phone}
-                    className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="w-full py-3 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {isLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -233,8 +233,8 @@ export default function RegisterPage() {
             {/* Step 2: OTP Verification */}
             {step === 'otp' && (
               <>
-                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
-                  Med Buddy
+                <p className="text-xs uppercase tracking-wide text-red-600 dark:text-red-400 font-semibold mb-1">
+                  Med Assist
                 </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Verify OTP</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">
@@ -258,7 +258,7 @@ export default function RegisterPage() {
                       value={otp}
                       onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
                       placeholder="000000"
-                      className="w-full px-4 py-3 text-center text-2xl tracking-widest border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full px-4 py-3 text-center text-2xl tracking-widest border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
                       maxLength={6}
                       required
                     />
@@ -274,7 +274,7 @@ export default function RegisterPage() {
                   <button
                     type="submit"
                     disabled={isLoading || otp.length !== 6}
-                    className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="w-full py-3 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {isLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -293,7 +293,7 @@ export default function RegisterPage() {
                       <button
                         type="button"
                         onClick={handleSendOtp}
-                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium"
+                        className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 font-medium"
                       >
                         Resend OTP
                       </button>
@@ -313,8 +313,8 @@ export default function RegisterPage() {
             {/* Step 3: User Details */}
             {step === 'details' && (
               <>
-                <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
-                  Med Buddy
+                <p className="text-xs uppercase tracking-wide text-red-600 dark:text-red-400 font-semibold mb-1">
+                  Med Assist
                 </p>
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white mb-2">Complete Your Profile</h2>
                 <p className="text-gray-500 dark:text-gray-400 mb-6">Fill in your details to create your account</p>
@@ -333,7 +333,7 @@ export default function RegisterPage() {
                           value={formData.full_name}
                           onChange={(e) => setFormData({...formData, full_name: e.target.value})}
                           placeholder="John Doe"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
                           required
                         />
                       </div>
@@ -350,7 +350,7 @@ export default function RegisterPage() {
                           value={formData.email}
                           onChange={(e) => setFormData({...formData, email: e.target.value})}
                           placeholder="you@example.com"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
                         />
                       </div>
                     </div>
@@ -362,7 +362,7 @@ export default function RegisterPage() {
                       <select
                         value={formData.state_or_ut}
                         onChange={(e) => setFormData({...formData, state_or_ut: e.target.value})}
-                        className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-red-500"
                       >
                         <option value="">Select State / UT</option>
                         <option value="Andhra Pradesh">Andhra Pradesh</option>
@@ -410,7 +410,7 @@ export default function RegisterPage() {
                           value={formData.city}
                           onChange={(e) => setFormData({...formData, city: e.target.value})}
                           placeholder="Enter your city"
-                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          className="w-full pl-11 pr-4 py-3 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
                         />
                       </div>
                     </div>
@@ -426,7 +426,7 @@ export default function RegisterPage() {
                   <button
                     type="submit"
                     disabled={isLoading}
-                    className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="w-full py-3 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {isLoading ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -444,9 +444,9 @@ export default function RegisterPage() {
           
           <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-6">
             By registering, you agree to our{' '}
-            <a href="#" className="text-blue-600 dark:text-blue-400 hover:underline">Terms of Service</a>
+            <a href="#" className="text-red-600 dark:text-red-400 hover:underline">Terms of Service</a>
             {' '}and{' '}
-            <a href="#" className="text-blue-600 dark:text-blue-400 hover:underline">Privacy Policy</a>
+            <a href="#" className="text-red-600 dark:text-red-400 hover:underline">Privacy Policy</a>
           </p>
         </div>
       </main>

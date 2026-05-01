@@ -16,6 +16,18 @@ export interface User {
     preferred_state?: string;
     category?: string;
   };
+  profile_data?: {
+    email?: string;
+    state_or_ut?: string;
+    city?: string;
+    cutoff_profile?: {
+      home_state?: string;
+      category?: string;
+      sub_category?: string;
+      preferences_set?: boolean;
+      updated_at?: string;
+    };
+  };
   created_at: string;
 }
 

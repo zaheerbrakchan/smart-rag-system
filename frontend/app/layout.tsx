@@ -3,9 +3,11 @@ import './globals.css';
 import { Providers } from './providers';
 
 export const metadata: Metadata = {
-  title: 'NEET UG 2026 Assistant | Get My University',
-  description: 'Your AI-powered assistant for NEET UG 2026 queries. Get instant, accurate answers from the official NTA Information Bulletin.',
-  keywords: 'NEET UG 2026, NTA, NEET eligibility, NEET exam dates, medical entrance, Get My University',
+  title: 'NEET UG 2026 Med Assist | Get My University',
+  description:
+    'Your AI-powered assistant for NEET UG 2026 queries. Get instant, accurate answers from the official NTA Information Bulletin.',
+  keywords:
+    'NEET UG 2026, NTA, NEET eligibility, NEET exam dates, medical entrance, Get My University, Med Assist',
 };
 
 export default function RootLayout({

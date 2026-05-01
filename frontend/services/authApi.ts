@@ -4,6 +4,26 @@ import { User, AuthResponse } from '@/types';
 // This avoids CORS issues in development
 const API_BASE_URL = '/api';
 
+function extractAuthErrorMessage(error: any, fallback: string): string {
+  const detail = error?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const firstMsg = detail.find((d) => typeof d?.msg === 'string')?.msg;
+    if (firstMsg) return firstMsg;
+    const joined = detail
+      .map((d) => (typeof d?.msg === 'string' ? d.msg : typeof d?.message === 'string' ? d.message : ''))
+      .filter(Boolean)
+      .join(', ');
+    if (joined) return joined;
+  }
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message;
+    if (typeof detail.error === 'string' && detail.error.trim()) return detail.error;
+  }
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message;
+  return fallback;
+}
+
 /**
  * Send OTP to phone number
  */
@@ -26,7 +46,7 @@ export async function sendOtp(
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: 'Failed to send OTP' }));
       console.error('OTP Error:', error);
-      throw new Error(error.detail || 'Failed to send OTP');
+      throw new Error(extractAuthErrorMessage(error, 'Failed to send OTP'));
     }
 
     const data = await response.json();
@@ -56,7 +76,7 @@ export async function verifyOtp(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'OTP verification failed' }));
-    throw new Error(error.detail || 'OTP verification failed');
+    throw new Error(extractAuthErrorMessage(error, 'OTP verification failed'));
   }
 
   return response.json();
@@ -83,7 +103,7 @@ export async function register(data: {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Registration failed' }));
-    throw new Error(error.detail || 'Registration failed');
+    throw new Error(extractAuthErrorMessage(error, 'Registration failed'));
   }
 
   return response.json();
@@ -110,7 +130,7 @@ export async function login(phone: string, verification_token: string): Promise<
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: 'Invalid credentials' }));
-      throw new Error(error.detail || 'Login failed');
+      throw new Error(extractAuthErrorMessage(error, 'Login failed'));
     }
 
     return response.json();
@@ -182,6 +202,32 @@ export async function getCurrentUser(access_token: string): Promise<User> {
     clearTimeout(timeoutId);
     throw error;
   }
+}
+
+export async function updateMyProfile(
+  access_token: string,
+  data: {
+    email?: string;
+    home_state?: string;
+    category?: string;
+    sub_category?: string;
+  }
+): Promise<User> {
+  const response = await fetch(`${API_BASE_URL}/auth/me/profile`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${access_token}`,
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to update profile' }));
+    throw new Error(extractAuthErrorMessage(error, 'Failed to update profile'));
+  }
+
+  return response.json();
 }
 
 /**

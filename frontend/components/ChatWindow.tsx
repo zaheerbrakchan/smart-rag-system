@@ -70,11 +70,11 @@ export default function ChatWindow({
         {/* Loading indicator - only show when waiting for first response */}
         {showLoadingIndicator && (
           <div className="flex items-start gap-4 message-enter">
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center flex-shrink-0 shadow-md">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-red-600 to-rose-600 flex items-center justify-center flex-shrink-0 shadow-md">
               <GraduationCap className="w-5 h-5 text-white" />
             </div>
             <div className="flex-1">
-              <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1.5">{assistantLabel}</p>
+              <p className="text-xs font-semibold text-red-600 dark:text-red-400 mb-1.5">{assistantLabel}</p>
               <div className="bg-white dark:bg-slate-800 border border-gray-100 dark:border-slate-700 rounded-2xl rounded-tl-sm p-4 shadow-md dark:shadow-lg dark:shadow-black/10">
                 <TypingIndicator loadingPhases={loadingPhases} />
               </div>
@@ -104,12 +104,12 @@ function TypingIndicator({ loadingPhases }: { loadingPhases: string[] }) {
 
   return (
     <div className="flex items-center gap-3">
-      <Search className="w-4 h-4 text-blue-500 dark:text-blue-400 animate-pulse" />
+      <Search className="w-4 h-4 text-red-500 dark:text-red-400 animate-pulse" />
       <span className="text-sm text-gray-500 dark:text-gray-400">{activeLabel}</span>
       <div className="flex gap-1">
-        <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
-        <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
-        <div className="w-2 h-2 bg-blue-400 rounded-full typing-dot" />
+        <div className="w-2 h-2 bg-red-400 rounded-full typing-dot" />
+        <div className="w-2 h-2 bg-red-400 rounded-full typing-dot" />
+        <div className="w-2 h-2 bg-red-400 rounded-full typing-dot" />
       </div>
     </div>
   );

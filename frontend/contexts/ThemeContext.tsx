@@ -15,7 +15,7 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 const THEME_KEY = 'app_theme';
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>('dark');
+  const [theme, setThemeState] = useState<Theme>('light');
   const [mounted, setMounted] = useState(false);
 
   // Load theme from localStorage on mount
@@ -24,8 +24,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (savedTheme && (savedTheme === 'light' || savedTheme === 'dark')) {
       setThemeState(savedTheme);
     } else {
-      // Default to dark mode
-      setThemeState('dark');
+      // Default to light mode
+      setThemeState('light');
     }
     setMounted(true);
   }, []);

@@ -91,17 +91,17 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800 flex flex-col overflow-hidden">
+    <div className="h-screen bg-gradient-to-br from-red-50 via-white to-rose-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800 flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-6 py-3 flex-shrink-0">
+      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-red-100 dark:border-slate-700 px-6 py-3 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3">
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg">
+            <div className="bg-gradient-to-br from-red-600 to-rose-600 p-2 rounded-xl shadow-lg">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                Med Buddy
+              <h1 className="text-lg font-bold bg-gradient-to-r from-red-600 to-rose-600 bg-clip-text text-transparent">
+                Med Assist
               </h1>
               <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">Powered by Get My University</p>
             </div>
@@ -111,7 +111,7 @@ export default function LoginPage() {
             <ThemeToggle />
             <Link 
               href="/register"
-              className="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+              className="text-sm font-medium text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
             >
               Don't have an account? Sign up
             </Link>
@@ -124,11 +124,11 @@ export default function LoginPage() {
         <div className="w-full max-w-md">
           <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl dark:shadow-2xl dark:shadow-black/20 p-6">
             <div className="text-center mb-5">
-              <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl mb-3">
+              <div className="inline-flex items-center justify-center w-14 h-14 bg-gradient-to-br from-red-600 to-rose-600 rounded-2xl mb-3">
                 <GraduationCap className="w-7 h-7 text-white" />
               </div>
-              <p className="text-xs uppercase tracking-wide text-blue-600 dark:text-blue-400 font-semibold mb-1">
-                Med Buddy
+              <p className="text-xs uppercase tracking-wide text-red-600 dark:text-red-400 font-semibold mb-1">
+                Med Assist
               </p>
               <h2 className="text-xl font-bold text-gray-800 dark:text-white">Sign In with OTP</h2>
               <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Use your registered mobile number</p>
@@ -148,7 +148,7 @@ export default function LoginPage() {
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
                       placeholder="Enter registered mobile number"
-                      className="w-full pl-11 pr-4 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full pl-11 pr-4 py-2.5 border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
                       required
                     />
                   </div>
@@ -170,7 +170,7 @@ export default function LoginPage() {
                 <button
                   type="submit"
                   disabled={isLoading}
-                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+                  className="w-full py-2.5 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
                 >
                   {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Send OTP <ArrowRight className="w-5 h-5" /></>}
                 </button>
@@ -188,7 +188,7 @@ export default function LoginPage() {
                     value={otp}
                     onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
                     placeholder="000000"
-                    className="w-full px-4 py-2.5 text-center text-2xl tracking-widest border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    className="w-full px-4 py-2.5 text-center text-2xl tracking-widest border border-gray-200 dark:border-slate-600 rounded-xl bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
                     maxLength={6}
                     required
                   />
@@ -216,7 +216,7 @@ export default function LoginPage() {
                 <button
                   type="submit"
                   disabled={isLoading || otp.length !== 6}
-                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+                  className="w-full py-2.5 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
                 >
                   {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <>Verify OTP & Sign In <ArrowRight className="w-5 h-5" /></>}
                 </button>
@@ -228,7 +228,7 @@ export default function LoginPage() {
                     <button
                       type="button"
                       onClick={handleSendOtp}
-                      className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium"
+                      className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 font-medium"
                     >
                       Resend OTP
                     </button>
@@ -247,8 +247,8 @@ export default function LoginPage() {
           </div>
           
           <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-4">
-            New to Med Buddy?{' '}
-            <Link href="/register" className="text-blue-600 dark:text-blue-400 hover:underline font-medium">
+            New to Med Assist?{' '}
+            <Link href="/register" className="text-red-600 dark:text-red-400 hover:underline font-medium">
               Create an account
             </Link>
           </p>

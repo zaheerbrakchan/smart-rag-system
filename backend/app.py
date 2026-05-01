@@ -620,7 +620,7 @@ async def v2_background_update_conversation_context(
     conversation_id: int,
     medbuddy_context: Dict[str, object],
 ) -> None:
-    """Persist Med Buddy lightweight conversation orchestration state."""
+    """Persist Med Assist lightweight conversation orchestration state."""
     from database.connection import async_session_maker
 
     try:
@@ -1103,7 +1103,7 @@ def _first_visit_welcome_message(first_name: Optional[str] = None, greeting_word
     )
     return (
         f"{greeting}"
-        "I am **Med Buddy**, India’s first AI counselling companion built exclusively for NEET UG aspirants, "
+        "I am **Med Assist**, India’s first AI counselling companion built exclusively for NEET UG aspirants, "
         "proudly powered by **Get My University**.\n\n"
         "Whether you are trying to figure out which medical/dental colleges match your score, understand "
         "last year’s cutoffs, decode fee structures, plan counselling process, or check NEET exam details, "
@@ -1140,7 +1140,7 @@ def _build_session_close_message(med_ctx: Dict[str, object]) -> str:
         f"- Last focus area: **{topic}**"
         f"{state_line}\n\n"
         "Your progress is saved. Come back anytime and we can continue from here.\n\n"
-        "_Med Buddy, powered by Get My University_"
+        "_Med Assist, powered by Get My University_"
     )
 
 

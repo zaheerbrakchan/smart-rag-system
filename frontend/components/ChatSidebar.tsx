@@ -243,7 +243,7 @@ export default function ChatSidebar({
         </button>
         <button
           onClick={onNewChat}
-          className="p-2.5 bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-xl shadow-lg hover:shadow-blue-500/25 transition-all hover:scale-105"
+          className="p-2.5 bg-gradient-to-br from-red-600 to-rose-600 text-white rounded-xl shadow-lg hover:shadow-red-500/25 transition-all hover:scale-105"
           title={i18n.newChat}
         >
           <Plus size={20} />
@@ -271,7 +271,7 @@ export default function ChatSidebar({
         <div className="flex items-center gap-2">
           <button
             onClick={onNewChat}
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl transition-all font-medium text-sm shadow-lg hover:shadow-blue-500/25"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white rounded-xl transition-all font-medium text-sm shadow-lg hover:shadow-red-500/25"
           >
             <Plus size={18} />
             {i18n.newChat}
@@ -331,7 +331,7 @@ export default function ChatSidebar({
         </div>
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-red-500"></div>
           </div>
         ) : conversations.length === 0 ? (
           <div className="text-center py-12 px-6">
@@ -348,7 +348,7 @@ export default function ChatSidebar({
                 key={conv.id}
                 className={`group relative mx-2 rounded-lg transition-all ${
                   currentConversationId === conv.id
-                    ? 'bg-gradient-to-r from-blue-600/20 to-indigo-600/20 border border-blue-500/30'
+                    ? 'bg-gradient-to-r from-red-600/20 to-rose-600/20 border border-red-500/30'
                     : 'hover:bg-slate-100 dark:hover:bg-slate-800/80'
                 }`}
               >
@@ -358,7 +358,7 @@ export default function ChatSidebar({
                       type="text"
                       value={editTitle}
                       onChange={(e) => setEditTitle(e.target.value)}
-                      className="flex-1 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                      className="flex-1 bg-white dark:bg-slate-700 text-slate-900 dark:text-white text-sm px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') handleSaveEdit(conv.id);
@@ -385,7 +385,7 @@ export default function ChatSidebar({
                   >
                     <div className={`p-2 rounded-lg ${
                       currentConversationId === conv.id 
-                        ? 'bg-blue-600 text-white' 
+                        ? 'bg-red-600 text-white' 
                         : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 group-hover:bg-slate-200 dark:group-hover:bg-slate-600 group-hover:text-slate-700 dark:group-hover:text-slate-300'
                     }`}>
                       <MessageSquare size={16} />
@@ -407,7 +407,7 @@ export default function ChatSidebar({
                     {/* Action menu button - always visible on hover or when menu is open */}
                     <div 
                       ref={menuOpenId === conv.id ? menuRef : null}
-                      className={`relative ${menuOpenId === conv.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}
+                      className={`relative ${menuOpenId === conv.id ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'} transition-opacity`}
                     >
                       <button
                         onClick={(e) => {
@@ -430,7 +430,7 @@ export default function ChatSidebar({
                             onClick={(e) => handleStartEdit(conv, e)}
                             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white transition-colors"
                           >
-                            <Edit2 size={14} className="text-blue-400" />
+                            <Edit2 size={14} className="text-red-400" />
                             {i18n.rename}
                           </button>
                           <div className="h-px bg-slate-200 dark:bg-slate-700 mx-2 my-1" />
