@@ -54,6 +54,13 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
+class UserProfileUpdateRequest(BaseModel):
+    email: Optional[str] = Field(default=None, max_length=255)
+    home_state: Optional[str] = Field(default=None, max_length=100)
+    category: Optional[str] = Field(default=None, max_length=30)
+    sub_category: Optional[str] = Field(default=None, max_length=50)
+
+
 # ============== RESPONSE SCHEMAS ==============
 
 class UserResponse(BaseModel):
@@ -438,6 +445,70 @@ async def get_current_user_info(
         preferences=current_user.preferences or {},
         profile_data=current_user.profile_data or {},
         created_at=current_user.created_at
+    )
+
+
+@router.patch("/me/profile", response_model=UserResponse)
+async def update_my_profile(
+    request: UserProfileUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update current user's profile_data and cutoff_profile details.
+    """
+    profile_data = dict(current_user.profile_data or {})
+
+    if request.email is not None:
+        email = request.email.strip()
+        if email:
+            profile_data["email"] = email
+        else:
+            profile_data.pop("email", None)
+
+    cutoff_profile = dict(profile_data.get("cutoff_profile") or {})
+    if request.home_state is not None:
+        hs = request.home_state.strip()
+        if hs:
+            cutoff_profile["home_state"] = hs
+        else:
+            cutoff_profile.pop("home_state", None)
+
+    if request.category is not None:
+        cat = request.category.strip().upper()
+        if cat:
+            cutoff_profile["category"] = cat
+        else:
+            cutoff_profile.pop("category", None)
+
+    if request.sub_category is not None:
+        sub = request.sub_category.strip().upper()
+        if sub:
+            cutoff_profile["sub_category"] = sub
+        else:
+            cutoff_profile.pop("sub_category", None)
+
+    cutoff_profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+    cutoff_profile["preferences_set"] = bool(
+        str(cutoff_profile.get("home_state") or "").strip()
+        and str(cutoff_profile.get("category") or "").strip()
+    )
+    profile_data["cutoff_profile"] = cutoff_profile
+
+    current_user.profile_data = profile_data
+    db.add(current_user)
+    await db.flush()
+
+    return UserResponse(
+        id=current_user.id,
+        full_name=current_user.full_name,
+        phone=current_user.phone,
+        role=current_user.role.value,
+        is_active=current_user.is_active,
+        is_verified=current_user.is_verified,
+        preferences=current_user.preferences or {},
+        profile_data=current_user.profile_data or {},
+        created_at=current_user.created_at,
     )
 
 

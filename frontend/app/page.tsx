@@ -108,7 +108,7 @@ const TRANSLATIONS: Record<
     startWith: 'Start With',
     noteLabel: 'Note: ',
     noteBody:
-      'Med Buddy is powered by Get My University. Guidance is based on available counselling documents and official sources. Always verify final admission decisions with MCC/state counselling authorities and college websites.',
+      'Med Assist is powered by Get My University. Guidance is based on available counselling documents and official sources. Always verify final admission decisions with MCC/state counselling authorities and college websites.',
     placeholderClarification: 'Reply in your own words — e.g. All India / MCC, or name a state…',
     placeholderDefault: 'Ask any question about NEET UG 2026...',
     searching: 'Searching...',
@@ -170,7 +170,7 @@ const TRANSLATIONS: Record<
     startWith: 'शुरुआत करें',
     noteLabel: 'नोट: ',
     noteBody:
-      'Med Buddy, Get My University द्वारा संचालित है। मार्गदर्शन उपलब्ध काउंसलिंग दस्तावेज़ों और आधिकारिक स्रोतों पर आधारित है। अंतिम निर्णय से पहले MCC/राज्य काउंसलिंग प्राधिकरण और कॉलेज वेबसाइट पर अवश्य सत्यापित करें।',
+      'Med Assist, Get My University द्वारा संचालित है। मार्गदर्शन उपलब्ध काउंसलिंग दस्तावेज़ों और आधिकारिक स्रोतों पर आधारित है। अंतिम निर्णय से पहले MCC/राज्य काउंसलिंग प्राधिकरण और कॉलेज वेबसाइट पर अवश्य सत्यापित करें।',
     placeholderClarification: 'अपने शब्दों में जवाब दें — जैसे All India / MCC, या किसी राज्य का नाम…',
     placeholderDefault: 'NEET UG 2026 से जुड़ा कोई भी प्रश्न पूछें...',
     searching: 'खोज जारी है...',
@@ -232,7 +232,7 @@ const TRANSLATIONS: Record<
     startWith: 'यापासून सुरू करा',
     noteLabel: 'टीप: ',
     noteBody:
-      'Med Buddy हे Get My University द्वारे समर्थित आहे. मार्गदर्शन उपलब्ध समुपदेशन दस्तऐवज आणि अधिकृत स्रोतांवर आधारित आहे. अंतिम प्रवेश निर्णयापूर्वी MCC/राज्य समुपदेशन प्राधिकरण आणि कॉलेज संकेतस्थळावर पडताळणी करा.',
+      'Med Assist हे Get My University द्वारे समर्थित आहे. मार्गदर्शन उपलब्ध समुपदेशन दस्तऐवज आणि अधिकृत स्रोतांवर आधारित आहे. अंतिम प्रवेश निर्णयापूर्वी MCC/राज्य समुपदेशन प्राधिकरण आणि कॉलेज संकेतस्थळावर पडताळणी करा.',
     placeholderClarification: 'तुमच्या शब्दांत उत्तर द्या — उदा. All India / MCC किंवा राज्याचे नाव…',
     placeholderDefault: 'NEET UG 2026 बद्दल कोणताही प्रश्न विचारा...',
     searching: 'शोध सुरू आहे...',
@@ -830,6 +830,8 @@ export default function Home() {
     if (!token || id === conversationId) return;
     
     try {
+      // Reflect selection immediately so click feels responsive.
+      setConversationId(id);
       setIsLoading(true);
       const conv = await getConversation(token, id);
       
@@ -844,7 +846,6 @@ export default function Home() {
       }));
       
       setMessages(loadedMessages);
-      setConversationId(id);
       setPendingClarification(null);
       setGuidedIntent(null);
       setAllowStarterReplies(loadedMessages.length === 0);
@@ -869,8 +870,8 @@ export default function Home() {
   // Show loading only while checking auth status
   if (authLoading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-600"></div>
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-red-50 via-white to-rose-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-red-600"></div>
       </div>
     );
   }
@@ -904,9 +905,9 @@ export default function Home() {
         />
       )}
       
-      <main className="flex min-h-0 flex-col flex-1 min-w-0 bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
+      <main className="flex min-h-0 flex-col flex-1 min-w-0 bg-gradient-to-br from-red-50 via-white to-rose-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 overflow-hidden">
       {/* Header */}
-      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-blue-100 dark:border-slate-700 px-2 md:px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
+      <header className="bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-b border-red-100 dark:border-slate-700 px-2 md:px-6 py-2.5 shadow-sm sticky top-0 z-50 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
             <button
@@ -916,12 +917,12 @@ export default function Home() {
             >
               <Menu className="w-4 h-4" />
             </button>
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg">
+            <div className="bg-gradient-to-br from-red-600 to-rose-600 p-2 rounded-xl shadow-lg">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
             <div className="min-w-0">
-              <h1 className="text-base md:text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent truncate">
-                Med Buddy
+              <h1 className="text-base md:text-lg font-bold bg-gradient-to-r from-red-600 to-rose-600 bg-clip-text text-transparent truncate">
+                Med Assist
               </h1>
               <p className="hidden sm:block text-xs text-gray-500 dark:text-gray-400 font-medium">{t.poweredByHeader}</p>
             </div>
@@ -952,7 +953,7 @@ export default function Home() {
                     setSupportSuccess(null);
                     setShowSupportModal(true);
                   }}
-                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-blue-200 dark:border-blue-700 rounded-lg text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+                  className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-200 dark:border-red-700 rounded-lg text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30"
                 >
                   <MessageCircleQuestion className="w-3.5 h-3.5" />
                   <span>{t.contactSupport}</span>
@@ -980,17 +981,17 @@ export default function Home() {
             {isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin') && (
               <Link
                 href="/admin"
-                className="group flex items-center gap-2 px-3 py-2 bg-white/80 dark:bg-slate-700/80 backdrop-blur-xl border border-gray-200/60 dark:border-slate-600 rounded-xl shadow-sm hover:shadow-md hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-gradient-to-r hover:from-indigo-50 hover:to-purple-50 dark:hover:from-indigo-900/30 dark:hover:to-purple-900/30 transition-all duration-300"
+                className="group flex items-center gap-2 px-3 py-2 bg-white/80 dark:bg-slate-700/80 backdrop-blur-xl border border-gray-200/60 dark:border-slate-600 rounded-xl shadow-sm hover:shadow-md hover:border-rose-300 dark:hover:border-rose-500 hover:bg-gradient-to-r hover:from-rose-50 hover:to-purple-50 dark:hover:from-rose-900/30 dark:hover:to-purple-900/30 transition-all duration-300"
               >
                 <div className="relative">
-                  <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg blur-sm opacity-0 group-hover:opacity-60 transition-opacity duration-300" />
-                  <div className="relative w-6 h-6 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-md shadow-indigo-500/30">
+                  <div className="absolute inset-0 bg-gradient-to-br from-rose-500 to-purple-600 rounded-lg blur-sm opacity-0 group-hover:opacity-60 transition-opacity duration-300" />
+                  <div className="relative w-6 h-6 bg-gradient-to-br from-rose-500 to-purple-600 rounded-lg flex items-center justify-center shadow-md shadow-rose-500/30">
                     <Settings className="w-3.5 h-3.5 text-white group-hover:rotate-180 transition-transform duration-500" />
                   </div>
                 </div>
                 <div className="hidden sm:block">
-                  <p className="text-xs font-semibold text-gray-800 group-hover:text-indigo-700 transition-colors">{t.dashboard}</p>
-                  <p className="text-[10px] text-gray-400 group-hover:text-indigo-400 transition-colors -mt-0.5">{t.admin}</p>
+                  <p className="text-xs font-semibold text-gray-800 group-hover:text-rose-700 transition-colors">{t.dashboard}</p>
+                  <p className="text-[10px] text-gray-400 group-hover:text-rose-400 transition-colors -mt-0.5">{t.admin}</p>
                 </div>
               </Link>
             )}
@@ -1004,7 +1005,7 @@ export default function Home() {
                       onClick={() => setShowUserMenu(!showUserMenu)}
                       className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
                     >
-                      <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                      <div className="w-8 h-8 bg-gradient-to-br from-red-500 to-rose-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
                         {user?.full_name?.charAt(0).toUpperCase() || 'U'}
                       </div>
                       <span className="hidden sm:inline max-w-24 truncate">{user?.full_name?.split(' ')[0]}</span>
@@ -1051,7 +1052,7 @@ export default function Home() {
                     </Link>
                     <Link
                       href="/register"
-                      className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 rounded-lg transition-colors"
+                      className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 rounded-lg transition-colors"
                     >
                       <UserPlus className="w-4 h-4" />
                       <span className="hidden sm:inline">{t.signUp}</span>
@@ -1071,14 +1072,14 @@ export default function Home() {
           <div className="min-h-full flex flex-col items-center justify-center text-center px-4 py-8">
             {/* Hero Section */}
             <div className="relative mb-8">
-              <div className="absolute inset-0 bg-gradient-to-r from-blue-400 to-indigo-400 rounded-full blur-2xl opacity-20 animate-pulse" />
-              <div className="relative bg-gradient-to-br from-blue-600 to-indigo-600 p-5 rounded-2xl shadow-xl">
+              <div className="absolute inset-0 bg-gradient-to-r from-red-400 to-rose-400 rounded-full blur-2xl opacity-20 animate-pulse" />
+              <div className="relative bg-gradient-to-br from-red-600 to-rose-600 p-5 rounded-2xl shadow-xl">
                 <Sparkles className="w-14 h-14 text-white" />
               </div>
             </div>
             
             <h2 className="text-3xl md:text-4xl font-bold text-gray-800 dark:text-white mb-3">
-              NEET UG 2026 <span className="bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Med Buddy</span>
+              NEET UG 2026 <span className="bg-gradient-to-r from-red-600 to-rose-600 bg-clip-text text-transparent">Med Assist</span>
             </h2>
             <p className="text-gray-600 dark:text-gray-300 max-w-xl mb-4 text-lg">
               {t.heroDescription}
@@ -1086,9 +1087,9 @@ export default function Home() {
             
             {/* Trust Badges */}
             <div className="flex flex-wrap justify-center gap-3 mb-8">
-              <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 rounded-full">
-                <BookOpen className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span className="text-sm font-medium text-blue-700 dark:text-blue-400">{t.officialNtaDocument}</span>
+              <div className="flex items-center gap-2 px-4 py-2 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-700 rounded-full">
+                <BookOpen className="w-4 h-4 text-red-600 dark:text-red-400" />
+                <span className="text-sm font-medium text-red-700 dark:text-red-400">{t.officialNtaDocument}</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-700 rounded-full">
                 <Shield className="w-4 h-4 text-green-600 dark:text-green-400" />
@@ -1153,7 +1154,7 @@ export default function Home() {
       </div>
 
       {/* Input Area */}
-      <div className="shrink-0 sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-blue-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+      <div className="shrink-0 sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-red-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
         <div className="max-w-4xl mx-auto">
           <div className="flex gap-2 md:gap-3">
             <div className="flex-1 relative">
@@ -1166,7 +1167,7 @@ export default function Home() {
                     ? t.placeholderClarification
                     : t.placeholderDefault
                 }
-                className="w-full px-3 md:px-5 py-3 md:py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm md:text-base"
+                className="w-full px-3 md:px-5 py-3 md:py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm md:text-base"
                 rows={1}
                 disabled={isLoading}
               />
@@ -1174,7 +1175,7 @@ export default function Home() {
             <button
               onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || isLoading}
-              className="px-4 md:px-6 py-3 md:py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl flex items-center gap-2"
+              className="px-4 md:px-6 py-3 md:py-4 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-2xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl flex items-center gap-2"
             >
               {isLoading ? (
                 <>
@@ -1190,7 +1191,7 @@ export default function Home() {
             </button>
           </div>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-2 text-center">
-            {t.footerPowerBy} <span className="font-semibold text-blue-600 dark:text-blue-400">Get My University</span> • {t.footerEnter}
+            {t.footerPowerBy} <span className="font-semibold text-red-600 dark:text-red-400">Get My University</span> • {t.footerEnter}
           </p>
         </div>
       </div>
@@ -1221,7 +1222,7 @@ export default function Home() {
               <button
                 onClick={() => void handleSubmitSupportQuery()}
                 disabled={supportLoading || !supportMessage.trim()}
-                className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white disabled:opacity-60"
+                className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white disabled:opacity-60"
               >
                 {supportLoading ? t.loading : t.submitSupport}
               </button>
@@ -1271,9 +1272,9 @@ export default function Home() {
                         </div>
                         <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 whitespace-pre-wrap">{q.message}</p>
                         {latestReply && (
-                          <div className="mt-2 p-2 rounded bg-blue-50 dark:bg-blue-900/20">
-                            <p className="text-xs font-medium text-blue-700 dark:text-blue-300">{t.latestReplyLabel}</p>
-                            <p className="text-sm text-blue-900 dark:text-blue-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
+                          <div className="mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20">
+                            <p className="text-xs font-medium text-red-700 dark:text-red-300">{t.latestReplyLabel}</p>
+                            <p className="text-sm text-red-900 dark:text-red-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
                           </div>
                         )}
                         <p className="text-xs text-gray-400 mt-2">{new Date(q.created_at).toLocaleString()}</p>
@@ -1303,12 +1304,12 @@ function QuickQuestion({
   return (
     <button
       onClick={onClick}
-      className="group flex items-center gap-3 p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl text-left hover:border-blue-300 dark:hover:border-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:shadow-md transition-all"
+      className="group flex items-center gap-3 p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl text-left hover:border-red-300 dark:hover:border-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 hover:shadow-md transition-all"
     >
-      <div className="p-2 bg-blue-100 dark:bg-blue-900/50 rounded-lg text-blue-600 dark:text-blue-400 group-hover:bg-blue-600 group-hover:text-white transition-colors">
+      <div className="p-2 bg-red-100 dark:bg-red-900/50 rounded-lg text-red-600 dark:text-red-400 group-hover:bg-red-600 group-hover:text-white transition-colors">
         {icon}
       </div>
-      <span className="text-gray-700 dark:text-gray-300 text-sm font-medium group-hover:text-blue-700 dark:group-hover:text-blue-400">{children}</span>
+      <span className="text-gray-700 dark:text-gray-300 text-sm font-medium group-hover:text-red-700 dark:group-hover:text-red-400">{children}</span>
     </button>
   );
 }

@@ -174,7 +174,7 @@ export default function MessageBubble({
   const [profileSubmitting, setProfileSubmitting] = useState(false);
   const isUser = message.role === 'user';
   const youLabel = language === 'hi' ? 'आप' : language === 'mr' ? 'तुम्ही' : 'You';
-  const buddyLabel = 'Med Buddy';
+  const buddyLabel = 'Med Assist';
   const tableHeaders =
     language === 'hi'
       ? ['संस्थान', 'राज्य', 'श्रेणी', 'कोटा', 'निवास', 'AIR', 'स्कोर', 'राउंड']
@@ -306,7 +306,7 @@ export default function MessageBubble({
             ? 'bg-gradient-to-br from-gray-700 to-gray-800'
             : message.isError
             ? 'bg-gradient-to-br from-red-500 to-red-600'
-            : 'bg-gradient-to-br from-blue-600 to-indigo-600'
+            : 'bg-gradient-to-br from-red-600 to-rose-600'
         }`}
       >
         {isUser ? (
@@ -321,7 +321,7 @@ export default function MessageBubble({
       {/* Message Content */}
       <div className={`flex-1 min-w-0 max-w-full md:max-w-[85%] ${isUser ? 'text-right' : ''}`}>
         {/* Role label */}
-        <p className={`text-xs font-semibold mb-1.5 ${isUser ? 'text-gray-500 dark:text-gray-400' : 'text-blue-600 dark:text-blue-400'}`}>
+        <p className={`text-xs font-semibold mb-1.5 ${isUser ? 'text-gray-500 dark:text-gray-400' : 'text-red-600 dark:text-red-400'}`}>
           {isUser ? youLabel : buddyLabel}
         </p>
         
@@ -382,7 +382,7 @@ export default function MessageBubble({
                     <thead className="bg-slate-800">
                       <tr className="border-b border-slate-600">
                         {tableHeaders.map((h) => (
-                          <th key={h} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
+                          <th key={h} className="px-3 py-2 text-left font-semibold !bg-slate-800 !text-slate-100 whitespace-nowrap">
                             {h}
                           </th>
                         ))}
@@ -413,7 +413,7 @@ export default function MessageBubble({
                     return (
                       <div key={stateName} className="max-w-full rounded-xl border border-slate-600 bg-slate-900/80 overflow-x-auto">
                         <div className="px-3 py-2 bg-slate-800/90 border-b border-slate-600">
-                          <span className="inline-flex items-center rounded-full bg-blue-600/20 text-blue-300 border border-blue-500/40 px-2.5 py-1 text-xs font-semibold">
+                          <span className="inline-flex items-center rounded-full bg-red-600/20 text-red-300 border border-red-500/40 px-2.5 py-1 text-xs font-semibold">
                             {stateName}
                           </span>
                         </div>
@@ -421,7 +421,7 @@ export default function MessageBubble({
                           <thead className="bg-slate-800">
                             <tr className="border-b border-slate-600">
                               {tableHeadersWithoutState.map((h) => (
-                                <th key={`${stateName}-${h}`} className="px-3 py-2 text-left font-semibold text-slate-100 whitespace-nowrap">
+                                <th key={`${stateName}-${h}`} className="px-3 py-2 text-left font-semibold !bg-slate-800 !text-slate-100 whitespace-nowrap">
                                   {h}
                                 </th>
                               ))}
@@ -449,12 +449,12 @@ export default function MessageBubble({
 
               {parsedCutoffTable && message.cutoffInterpretationLoading && (
                 <div className="my-3 flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
-                  <Search className="w-4 h-4 text-blue-500 dark:text-blue-400 animate-pulse" />
+                  <Search className="w-4 h-4 text-red-500 dark:text-red-400 animate-pulse" />
                   <span>Generating quick interpretation...</span>
                   <div className="flex gap-1">
-                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
-                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
-                    <span className="typing-dot w-2 h-2 bg-blue-400 rounded-full"></span>
+                    <span className="typing-dot w-2 h-2 bg-red-400 rounded-full"></span>
+                    <span className="typing-dot w-2 h-2 bg-red-400 rounded-full"></span>
+                    <span className="typing-dot w-2 h-2 bg-red-400 rounded-full"></span>
                   </div>
                   <span>Thinking...</span>
                 </div>
@@ -501,7 +501,7 @@ export default function MessageBubble({
           <div className="mt-3">
             <button
               onClick={() => setShowSources(!showSources)}
-              className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors font-medium"
+              className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors font-medium"
             >
               <BookOpen className="w-4 h-4" />
               <span>{viewRefsLabel}</span>
@@ -529,7 +529,7 @@ export default function MessageBubble({
               <button
                 key={`${reply}-${idx}`}
                 onClick={() => onSuggestedReply(reply)}
-                className="px-3 py-1.5 rounded-full border border-blue-200 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-800/40 transition-colors"
+                className="px-3 py-1.5 rounded-full border border-red-200 dark:border-red-700 bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-medium hover:bg-red-100 dark:hover:bg-red-800/40 transition-colors"
               >
                 {reply}
               </button>
@@ -539,11 +539,11 @@ export default function MessageBubble({
 
         {/* Cutoff profile form */}
         {hasCutoffProfileForm && (
-          <div className="mt-3 rounded-xl border border-blue-200 dark:border-blue-500/70 bg-blue-50/70 dark:bg-slate-900 p-3 space-y-3 shadow-sm dark:shadow-lg dark:shadow-black/20">
+          <div className="mt-3 rounded-xl border border-red-200 dark:border-red-500/70 bg-red-50/70 dark:bg-slate-900 p-3 space-y-3 shadow-sm dark:shadow-lg dark:shadow-black/20">
             <div>
               <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Home state</label>
               <select
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-red-500/70 cursor-pointer disabled:cursor-not-allowed"
                 value={selectedState}
                 onChange={(e) => {
                   setSelectedState(e.target.value);
@@ -561,7 +561,7 @@ export default function MessageBubble({
             <div>
               <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Category</label>
               <select
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-red-500/70 cursor-pointer disabled:cursor-not-allowed"
                 value={selectedCategory}
                 onChange={(e) => {
                   setSelectedCategory(e.target.value);
@@ -579,7 +579,7 @@ export default function MessageBubble({
             <div>
               <label className="text-xs font-semibold text-gray-700 dark:text-slate-100">Sub-category (optional)</label>
               <select
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 cursor-pointer disabled:cursor-not-allowed"
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-slate-400 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-gray-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-red-500/70 cursor-pointer disabled:cursor-not-allowed"
                 value={selectedSubCategory}
                 onChange={(e) => setSelectedSubCategory(e.target.value)}
                 disabled={!selectedState || !selectedCategory || selectedCategory === 'NOT_SURE'}
@@ -591,7 +591,7 @@ export default function MessageBubble({
               </select>
             </div>
             <button
-              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               disabled={!selectedState || !selectedCategory || profileSubmitting}
               onClick={async () => {
                 setProfileSubmitting(true);
@@ -639,16 +639,16 @@ function SourceCard({ source, index, language }: { source: Source; index: number
       ? 'भाग विषय (AI, पृष्ठानुसार)'
       : 'Chunk topic (AI, page-wise)';
   return (
-    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200 dark:border-blue-500/30 rounded-xl p-4">
+    <div className="bg-gradient-to-r from-red-50 to-rose-50 dark:from-red-900/20 dark:to-rose-900/20 border border-red-200 dark:border-red-500/30 rounded-xl p-4">
       <div className="flex items-center gap-2 mb-2">
-        <div className="p-1.5 bg-blue-100 dark:bg-blue-500/20 rounded-lg">
-          <FileText className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+        <div className="p-1.5 bg-red-100 dark:bg-red-500/20 rounded-lg">
+          <FileText className="w-4 h-4 text-red-600 dark:text-red-400" />
         </div>
         <span className="text-sm font-semibold text-gray-800 dark:text-white">
           {source.file_name}
         </span>
         {source.page && (
-          <span className="px-2 py-0.5 bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">
+          <span className="px-2 py-0.5 bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-300 text-xs font-medium rounded-full">
             {pageLabel} {source.page}
           </span>
         )}
