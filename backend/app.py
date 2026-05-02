@@ -3151,7 +3151,9 @@ def assess_kb_sufficiency_with_llm(
     Returns (is_sufficient, reason, web_queries).
     """
     try:
-        kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=6000)
+        # Large KB tool payloads (e.g. merged deemed fee PDFs) can exceed a few thousand chars across
+        # multiple chunks; truncating too early hides the chunk that actually names the college → false web fallback.
+        kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=24000)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
@@ -3163,6 +3165,10 @@ def assess_kb_sufficiency_with_llm(
                         "Given the user question and retrieved knowledge-base text, decide if the KB alone "
                         "is enough to answer accurately without inventing facts.\n"
                         "Judge against the user's intent, not naive substring matching.\n"
+                        "READ ALL CHUNKS: KB_RESULT may list multiple numbered segments ([1], [2], ...). "
+                        "Do not treat chunk [1] alone as the whole KB — later chunks may contain the named college/fees. "
+                        "Consolidated fee PDFs often begin with a long preamble in the first chunk while specific "
+                        "institutes appear deeper in the same retrieval payload.\n"
                         "Same-institution matching: treat as the same college when the KB clearly refers to the institution "
                         "the user meant—common abbreviations vs full official names, minor spelling variants of place names.\n"
                         "Entity-specific questions (critical): If the user names a **specific** college or location "
@@ -3189,6 +3195,17 @@ def assess_kb_sufficiency_with_llm(
                         "- Treat morphological variants as match only when clearly canonical (punctuation/abbreviation/order), not different place names.\n"
                         "- Example: 'Autonomous State Medical College, Kaushambi' is NOT covered by chunks for Hardoi/Ghazipur/Fatehpur.\n"
                         "If retrieved text is for a different college/state than asked, mark is_sufficient=false.\n"
+                        "NAMED-INSTITUTE ANTI-FALSE-POSITIVE (mandatory): If USER_QUESTION names a specific college or hospital "
+                        "(fee, tuition, hostel, cutoff, seats, etc.), scan the **entire** KB_RESULT. You MUST set is_sufficient=false "
+                        "unless some chunk **explicitly names that institute** (or an unmistakable official synonym the user meant) "
+                        "and contains the requested topic for **that** institute. Generic chunks from the same PDF type "
+                        "(e.g. other deemed universities' fee tables—Rajarajeswari, MMIMSR, etc.) do **not** count as covering "
+                        "a different named college (e.g. 'JR Medical College and Hospital'). Do not infer sufficiency from "
+                        "similar fee numbers alone.\n"
+                        "Parenthetical / brand names: for asks like **K.S. Hegde Medical Academy (NITTE)** fees, the KB must "
+                        "contain a chunk whose **heading or first lines** include that academy (e.g. **K.S. Hegde** with **NITTE** "
+                        "context), not a different college that also mentions **NITTE** in another sense or omits **Hegde**. "
+                        "If only unrelated deemed-college tables are present, is_sufficient=false.\n"
                         "Mark is_sufficient=true when the KB contains the requested data for the correct scope/entity; "
                         "mark false when the requested college/state/round/detail is absent, wrong, or ambiguous.\n"
                         "If is_sufficient=false, also provide targeted web queries ONLY for missing entities/details "
@@ -3208,7 +3225,7 @@ def assess_kb_sufficiency_with_llm(
                 },
             ],
             temperature=0,
-            max_tokens=70,
+            max_tokens=400,
         )
         raw = (response.choices[0].message.content or "").strip()
         try:
@@ -5024,9 +5041,12 @@ async def _v2_run_rag_pipeline(
                 kb_result = str(rec.get("result", ""))
                 if not kb_query:
                     continue
+                suff_user_q = (request.question or "").strip()
+                if kb_query and kb_query.strip() != suff_user_q:
+                    suff_user_q = f"{suff_user_q}\n\n(KB retrieval query used: {kb_query.strip()})"
                 call_sufficient, call_reason, _call_web_queries = assess_kb_sufficiency_with_llm(
                     client=client,
-                    user_question=kb_query,
+                    user_question=suff_user_q,
                     kb_tool_result=kb_result,
                     conversation_context=_build_sufficiency_context(messages, kb_query),
                 )
@@ -5741,6 +5761,7 @@ async def chat_v2_stream(request: ChatRequest):
                     "- For resolved multi-entity asks, keep actual resolved names in search queries (avoid generic replacements like 'top colleges in India').\n"
                     "- For resolved relative 'top N' multi-entity asks, ensure retrieval covers all resolved entities in this turn (prefer one focused KB call per entity).\n"
                     "- It is valid to run multiple KB calls (including one per resolved entity) and then use web search only for entities still missing after KB.\n"
+                    "- KB filter `state` / `states`: if the target college is **deemed** (deemed-to-be university / MCC), use **`state=\"All-India\"`** — not the geographic host state from the user text. For **state counselling** colleges, set `state` only when the UT/state is clear; if unsure, omit `state`/`states` and use a strong `query`.\n"
                     "- You may infer missing topic words from immediate context (e.g., fee structure), "
                     "but must keep entity scope anchored to the latest message."
                 )
