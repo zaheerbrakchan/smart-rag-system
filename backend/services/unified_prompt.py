@@ -21,11 +21,24 @@ METADATA_SCHEMA = """
 ## Knowledge base search (state filters)
 
 - **`search_knowledge_base` takes `query` (required), optional `state`, and optional `states` (array).**
-- Use **`state`** only when the **entire** current question is about **one** state/UT’s counselling, colleges, fees, cutoffs, etc.
+- **Before every call**, decide whether the target institute(s) are **deemed** (deemed-to-be university / MCC central counselling) vs **state counselling** (state govt / state private under state KEA, etc.) vs **unsure**.
+- Use **`state`** when the question is about **one** state/UT’s counselling, colleges, fees, cutoffs, etc. — **unless** the college is **deemed** (then use **`state="All-India"`** below, not the geographic state).
 - Use **`states`** (JSON array) when the user needs chunks from **more than one** state/UT in one call — not only comparisons, but also "as well as", "and also", multi-state lists, or broad multi-region requests. The backend merges results from each listed state.
 - When the question spans regions and you are **not** sure of exact metadata tags, **omit both `state` and `states`** and put **all** institutes/regions in **`query`** so retrieval is not wrongly narrowed.
 - Include **`"All-India"`** in `states` when central/MCC/AIIMS-style documents may be stored under that tag alongside a state.
-- Put college names, fee/cutoff topics, and categories in **`query`**; filters only narrow which documents are searched.
+- Put college names, cities, fee/cutoff topics, and categories in **`query`**; the **`state` / `states` parameters** follow the deemed vs state rules below (not every user-mentioned region is a filter).
+
+### Deemed universities / colleges (fees, seats, MCC institute facts)
+
+- If the **current** question is about a **deemed** medical college or **deemed university** (MBBS/BDS fee structure, tuition, hostel, bond, seat matrix, MCC rules for that institute, etc.), set **`state` to exactly `"All-India"`**.
+- **Never** set `state` or `states` to the **geographic** host state/UT where the campus sits when the institute is **deemed** — e.g. user writes "Jawaharlal Nehru Medical College Karnataka fee" but the college is **deemed** in Belgaum: use **`state="All-India"`**, **not** `"Karnataka"`. The user’s state word is context for **`query`** only, not a KB bucket filter.
+- Put the **full official college name**, city, course, and topic in **`query`** (e.g. "Jawaharlal Nehru Medical College Belgaum deemed university MBBS fee structure").
+- If you are **unsure** deemed vs state for a named college, prefer **one** call with a strong **`query`** and **omit** `state`/`states`, or use **`All-India`** when the ask is fee/MCC-style for an institute that is commonly deemed — do **not** guess a geographic `state` filter.
+
+### State counselling colleges (government / state private)
+
+- For institutes under **state quota** counselling, you may set **`state` / `states`** to that UT/state when the user gave it **or** when you are **fully certain** which state the college belongs to (e.g. "GMC Rajouri" → **Jammu & Kashmir**).
+- If you are **not** fully certain of the state/UT for a **non-deemed** college, **omit** `state` and `states` and rely on a rich **`query`** (college + city + topic) so retrieval is not wrongly narrowed to the wrong state.
 """
 
 # ============== TOOL DEFINITIONS ==============
@@ -38,7 +51,9 @@ TOOLS_DEFINITION = [
 Use this tool when you need factual data to answer the user's question.
 DO NOT call this tool for greetings, clarifications, or off-topic questions.
 
-**State filters:** You choose `state`, `states`, or neither — never rely on code to fix your choice. For **one** state use `state`. For **several** use `states` (array). For **unclear / cross-region** asks, omit both filters and use a rich `query`. Include **All-India** in `states` when central brochures may apply.""",
+**State filters:** Choose `state`, `states`, or neither — never rely on code to fix your choice. For **one** region use `state`. For **several** use `states` (array). For **unclear / cross-region** asks, omit both and use a rich `query`. Include **All-India** in `states` when mixing central docs with states.
+
+**Deemed vs state (mandatory):** First decide if the college is **deemed** (MCC / deemed-to-be university). If **deemed**, set **`state` to `"All-India"`** — **never** the geographic host state the user typed. If **state counselling** college and you are **sure** of the UT/state, set that `state` (or omit filters if unsure). Put institute name, city, topic in `query`.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -48,7 +63,7 @@ DO NOT call this tool for greetings, clarifications, or off-topic questions.
                     },
                     "state": {
                         "type": "string",
-                        "description": "Single state/UT filter. Use 'All-India' for NTA/MCC/central. Leave empty if using `states` or if searching all states."
+                        "description": "Single metadata bucket: use **All-India** for deemed universities/MCC-central institute docs, NTA/MCC-wide topics, or when KB stores deemed fee PDFs under All-India. Use a state/UT name only for state-counselling colleges when you are sure. Leave empty if using `states`, if unsure of state for a non-deemed college, or if omitting filters intentionally."
                     },
                     "states": {
                         "type": "array",
@@ -195,11 +210,12 @@ You may also have access to a tool called `search_web` (only when enabled by sys
 - DO NOT use the tool for: greetings, thank you messages, clarification questions you're asking, off-topic queries
 - **CRITICAL: ALWAYS formulate a NEW search query based on the CURRENT user message**
 - NEVER copy or reuse a query from a previous tool call - analyze what the user is asking NOW
-- Make your search query SPECIFIC - include state, category, topic context from conversation
+- Make your search query SPECIFIC — include category, topic, city/college tokens in **`query`**; set the tool’s **`state` / `states`** only per §3a (deemed → `All-India`; state college → confident state only; else omit)
 - Even if the state is same as before, the QUERY content must reflect the CURRENT question
 - After tool results arrive, extract and use values ONLY for the exact entity/state/quota/year asked in the current user message.
 - Never transfer numbers across entities (for example, never reuse GMC Rajouri values for GMC Srinagar) even if both are from the same state/category.
 - Every numeric line must be attributable to the same entity named in that subsection heading; if not attributable, omit it and state missing data.
+- **Merged deemed fee PDF rule (critical):** When tool output lists several chunks `[1]`, `[2]`, … from the **same** source file, each rupee amount belongs **only** to the college named in **that chunk’s heading / title lines** (e.g. the line starting with the institute name). **Never** answer for "K.S. Hegde Medical Academy (NITTE)" using fee lines from a chunk whose heading names Rajarajeswari, MMIMSR, or any other college—even if scores are high or the PDF is the same. If **no** chunk heading matches the user’s college, say the KB retrieval for this call does not contain that institute’s table (then use `search_web` if enabled, or the standard insufficiency message)—**do not invent or borrow** numbers.
 - If user asked for one entity in current turn, final answer should be scoped to that one entity only (unless user explicitly asked compare/list/all).
 - Default order for factual queries: first `search_knowledge_base` -> then `search_web` only if KB is empty/insufficient and web tool is available.
 - In two-college comparison flows:
@@ -210,6 +226,13 @@ You may also have access to a tool called `search_web` (only when enabled by sys
 ### 3. CONVERSATION CONTEXT
 - Use history for **follow-ups** that clearly refer to the same thread (e.g. after J&K fees, "what about ST?" → keep J&K in the search).
 - When the user **pivots** (new college, new state, comparison, "now show me…"), do **not** keep filtering tools as if the session were still only the old scope — align `state` / `states` / unfiltered `query` with the **current** ask.
+
+### 3a. DEEMED VS STATE — KB `state` / `states` CHOICE (MANDATORY)
+- **Step 1 — Classify** the institute in the **latest** user message: **deemed** (deemed-to-be university / MCC central institute) vs **state counselling** (state govt / state private under state authority) vs **unsure**.
+- **Step 2 — If deemed** (fee structure, fees, tuition, hostel, bond, seat type under MCC, etc.): call `search_knowledge_base` with **`state="All-India"`** (exact string). Put full college name, city, and topic in **`query`**. **Do not** set `state` or `states` to the **geographic** host state/UT the user mentioned (e.g. "Karnataka" next to a deemed campus is **not** the filter — use **`All-India`**). Wrong: `state="Karnataka"` for a deemed JNMC Belgaum fee ask. Right: `state="All-India"` + query naming the college and city.
+- **Step 3 — If state counselling** and you are **fully sure** of the UT/state: you may set **`state`** to that UT/state (user’s state or inferred from college/city, e.g. GMC Rajouri → Jammu & Kashmir). If **not** fully sure, **omit** `state` and `states` and use a strong **`query`** only.
+- **Step 4 — If unsure** deemed vs state: prefer **omit** filters + strong **`query`**, or **`All-India`** when the question is fee/MCC-style and the name matches a commonly deemed institute — **do not** invent a geographic state filter.
+- Rationale: deemed fee prospectuses in this KB are aligned with **All-India** scope; a geographic state filter can return the wrong state brochure or hide the deemed PDF.
 
 ### 4. WHEN TO ASK FOR CLARIFICATION
 Ask for clarification ONLY when truly ambiguous:

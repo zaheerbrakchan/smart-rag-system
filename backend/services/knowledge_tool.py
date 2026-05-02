@@ -8,6 +8,7 @@ This module provides a unified search interface that:
 """
 
 import os
+import re
 import logging
 from typing import Optional, List, Dict, Any, Tuple, Union, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,117 @@ from llama_index.vector_stores.postgres import PGVectorStore
 
 logger = logging.getLogger(__name__)
 TOOL_CHUNK_DEBUG_LOG = os.getenv("TOOL_CHUNK_DEBUG_LOG", "true").lower() in ("1", "true", "yes")
+
+# Tokens too generic to help disambiguate colleges inside merged deemed fee PDFs.
+_LEXICAL_STOP_WORDS = frozenset(
+    {
+        "fee",
+        "fees",
+        "structure",
+        "structre",
+        "information",
+        "detail",
+        "details",
+        "mbbs",
+        "bds",
+        "neet",
+        "counselling",
+        "counseling",
+        "total",
+        "year",
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "annual",
+        "tuition",
+        "course",
+        "hostel",
+        "mess",
+        "about",
+        "regarding",
+        "college",
+        "medical",
+        "hospital",
+        "institute",
+        "university",
+        "general",
+        "category",
+        "seat",
+        "seats",
+        "admission",
+        "academic",
+        "stipend",
+        "bond",
+        "document",
+        "source",
+        "chart",
+        "table",
+        "data",
+    }
+)
+
+
+def _query_terms_for_lexical_boost(query: str) -> List[str]:
+    """Short tokens from the query used to up-rank chunks that mention the same names."""
+    if not query:
+        return []
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", query)
+    out: List[str] = []
+    seen: set = set()
+    for w in raw:
+        t = w.lower()
+        if len(t) < 4:
+            continue
+        if t in _LEXICAL_STOP_WORDS:
+            continue
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:14]
+
+
+def _lexical_rerank_results(
+    results: List["SearchResult"],
+    query: str,
+    top_k: int,
+) -> List["SearchResult"]:
+    """
+    Re-order vector hits using query-token overlap that is *rare within this batch*.
+
+    Merged deemed-university PDFs often return several high-similarity chunks from other
+    institutes; distinctive tokens (e.g. hegde, nitte) usually appear in fewer chunks,
+    so boosting on rare hits surfaces the correct college without hardcoding lists.
+    """
+    if not results or not query or top_k <= 0:
+        return results[:top_k] if top_k else results
+
+    terms = _query_terms_for_lexical_boost(query)
+    if not terms:
+        return results[:top_k]
+
+    lowered: List[Tuple["SearchResult", str]] = [
+        (r, (r.text or "").lower()) for r in results
+    ]
+    n = len(lowered)
+    term_freq = {t: sum(1 for _, text in lowered if t in text) for t in terms}
+    # Prefer terms that hit at most ~1/3 of this batch (discriminative for this query).
+    max_common = max(1, (n + 2) // 3)
+    rare = [t for t in terms if term_freq.get(t, 0) <= max_common]
+    if not rare:
+        rare = sorted(terms, key=lambda t: term_freq.get(t, n))[: min(5, len(terms))]
+
+    scored: List[Tuple[float, "SearchResult"]] = []
+    for r, text in lowered:
+        hits = sum(1 for t in rare if t in text)
+        bonus = min(0.42, hits * 0.09)
+        base = float(r.score or 0.0)
+        scored.append((base + bonus, r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored][:top_k]
+
 
 def log(msg: str):
     """Simple logging helper."""
@@ -191,12 +303,16 @@ def _search_knowledge_base_single_state(
     if state:
         filters_applied["state"] = state
 
+    # Pull a wider candidate pool, then re-rank so the right college block inside a merged
+    # deemed PDF can surface (pure embedding top_k often returns sibling institutes).
+    fetch_k = min(80, max(top_k * 5, 36))
+
     index = get_vector_index()
-    retriever = index.as_retriever(similarity_top_k=top_k, filters=filters)
+    retriever = index.as_retriever(similarity_top_k=fetch_k, filters=filters)
 
     try:
         nodes: List[NodeWithScore] = retriever.retrieve(query)
-        log(f"[TOOL] Retrieved {len(nodes)} results (state={state or 'ALL'})")
+        log(f"[TOOL] Retrieved {len(nodes)} results (state={state or 'ALL'}, fetch_k={fetch_k})")
     except Exception as e:
         log(f"[TOOL] Search error: {e}")
 
@@ -207,21 +323,21 @@ def _search_knowledge_base_single_state(
                 log("[TOOL] Detected transient DB disconnect; rebuilding vector index and retrying...")
                 _reset_vector_index()
                 index = get_vector_index()
-                retriever = index.as_retriever(similarity_top_k=top_k, filters=filters)
+                retriever = index.as_retriever(similarity_top_k=fetch_k, filters=filters)
                 nodes = retriever.retrieve(query)
                 log(f"[TOOL] Retry succeeded with {len(nodes)} results (state={state or 'ALL'})")
             except Exception as retry_err:
                 log(f"[TOOL] Retry after reconnect failed: {retry_err}")
                 if filters:
                     log("[TOOL] Retrying without filters...")
-                    retriever = index.as_retriever(similarity_top_k=top_k)
+                    retriever = index.as_retriever(similarity_top_k=fetch_k)
                     nodes = retriever.retrieve(query)
                     filters_applied = {}
                 else:
                     nodes = []
         elif filters:
             log("[TOOL] Retrying without filters...")
-            retriever = index.as_retriever(similarity_top_k=top_k)
+            retriever = index.as_retriever(similarity_top_k=fetch_k)
             nodes = retriever.retrieve(query)
             filters_applied = {}
         else:
@@ -243,6 +359,8 @@ def _search_knowledge_base_single_state(
                 page_label=metadata.get("page_label"),
             )
         )
+
+    results = _lexical_rerank_results(results, query, top_k)
 
     # Optional chunk-level debug visibility for hallucination/root-cause analysis.
     if TOOL_CHUNK_DEBUG_LOG and results:
