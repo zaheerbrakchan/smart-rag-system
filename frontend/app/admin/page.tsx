@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
-import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
 import { 
   Upload, FileText, Trash2, RefreshCw, Database, Users, Settings,
@@ -1651,17 +1650,17 @@ export default function AdminPage() {
         {activeTab === 'documents' && (
           <div className="space-y-6">
             {/* Upload */}
-            <div className="bg-gradient-to-r from-blue-600/10 to-purple-600/10 rounded-2xl border border-blue-500/20 p-6">
-              <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                <Upload className="w-5 h-5 text-blue-400" /> Upload Document
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-600/10 dark:to-purple-600/10 rounded-2xl border border-blue-200/80 dark:border-blue-500/20 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <Upload className="w-5 h-5 text-blue-600 dark:text-blue-400" /> Upload Document
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <label className="block cursor-pointer min-w-0">
-                  <div className="border-2 border-dashed border-slate-600 hover:border-blue-500 rounded-xl p-6 text-center min-w-0 max-w-full overflow-hidden">
+                  <div className="border-2 border-dashed border-gray-300 bg-white/70 dark:bg-transparent dark:border-slate-600 hover:border-blue-500 dark:hover:border-blue-500 rounded-xl p-6 text-center min-w-0 max-w-full overflow-hidden">
                     <input id="file-upload" type="file" accept=".pdf" onChange={handleFileChange} className="hidden" />
-                    <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2 shrink-0" />
+                    <Upload className="w-8 h-8 text-gray-500 dark:text-slate-400 mx-auto mb-2 shrink-0" />
                     <p
-                      className={`text-slate-300 text-sm w-full min-w-0 ${selectedFile ? 'truncate' : ''}`}
+                      className={`text-gray-800 dark:text-slate-300 text-sm w-full min-w-0 ${selectedFile ? 'truncate' : ''}`}
                       title={selectedFile ? selectedFile.name : undefined}
                     >
                       {selectedFile ? selectedFile.name : 'Choose PDF'}
@@ -1670,17 +1669,17 @@ export default function AdminPage() {
                 </label>
                 <div className="space-y-3">
                   <select value={uploadForm.state} onChange={(e) => setUploadForm(f => ({ ...f, state: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                   <select value={uploadForm.document_type} onChange={(e) => setUploadForm(f => ({ ...f, document_type: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.document_types.map((dt) => <option key={dt.value} value={dt.value}>{dt.label}</option>)}
                   </select>
                 </div>
                 <div className="space-y-3">
                   <select value={uploadForm.category} onChange={(e) => setUploadForm(f => ({ ...f, category: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                   </select>
                   <button onClick={handleUpload} disabled={!selectedFile || uploading}
@@ -1692,22 +1691,22 @@ export default function AdminPage() {
             </div>
 
             {/* Documents List */}
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 overflow-hidden">
-              <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border-b border-slate-700">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 overflow-hidden shadow-sm dark:shadow-none">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border-b border-gray-200 dark:border-slate-700">
                 <div className="flex-1 min-w-0 relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-slate-400" />
                   <input type="text" placeholder="Search documents..." value={docsSearch}
                     onChange={(e) => { setDocsSearch(e.target.value); setDocsPage(1); }}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400" />
                 </div>
                 <div className="flex flex-wrap gap-2 sm:gap-3">
                   <select value={docsStateFilter} onChange={(e) => { setDocsStateFilter(e.target.value); setDocsPage(1); }}
-                    className="min-w-[140px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="min-w-[140px] flex-1 sm:flex-none px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     <option value="">All States</option>
                     {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                   <select value={docsDocTypeFilter} onChange={(e) => { setDocsDocTypeFilter(e.target.value); setDocsPage(1); }}
-                    className="min-w-[160px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="min-w-[160px] flex-1 sm:flex-none px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     <option value="">All document types</option>
                     {metadataOptions?.document_types.map((dt) => (
                       <option key={dt.value} value={dt.value}>{dt.label}</option>
@@ -1721,114 +1720,114 @@ export default function AdminPage() {
                   // Skeleton loading for document cards
                   <>
                     {[1, 2, 3, 4, 5, 6].map((i) => (
-                      <div key={i} className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 animate-pulse">
+                      <div key={i} className="bg-gray-100 dark:bg-slate-700/30 rounded-xl p-4 border border-gray-200 dark:border-slate-600 animate-pulse">
                         <div className="flex items-center gap-3 mb-3">
-                          <div className="w-10 h-10 bg-slate-700 rounded-lg"></div>
+                          <div className="w-10 h-10 bg-gray-200 dark:bg-slate-700 rounded-lg"></div>
                           <div className="flex-1">
-                            <div className="h-4 bg-slate-700 rounded w-3/4 mb-1"></div>
-                            <div className="h-3 bg-slate-700 rounded w-1/2"></div>
+                            <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-3/4 mb-1"></div>
+                            <div className="h-3 bg-gray-200 dark:bg-slate-700 rounded w-1/2"></div>
                           </div>
                         </div>
                         <div className="space-y-2">
-                          <div className="h-4 bg-slate-700 rounded w-full"></div>
-                          <div className="h-4 bg-slate-700 rounded w-full"></div>
-                          <div className="h-4 bg-slate-700 rounded w-2/3"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-2/3"></div>
                         </div>
                       </div>
                     ))}
                   </>
                 ) : (
                 documents.map((doc) => (
-                  <div key={doc.id} className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 hover:border-blue-500/50 overflow-hidden">
+                  <div key={doc.id} className="bg-gray-50 dark:bg-slate-700/30 rounded-xl p-4 border border-gray-200 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500/50 overflow-hidden">
                     <div className="flex items-start justify-between mb-3 gap-2">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className="bg-purple-500/10 p-2 rounded-lg flex-shrink-0">
-                          <FileText className="w-5 h-5 text-purple-400" />
+                        <div className="bg-purple-100 dark:bg-purple-500/10 p-2 rounded-lg flex-shrink-0">
+                          <FileText className="w-5 h-5 text-purple-700 dark:text-purple-400" />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="text-white font-medium truncate" title={doc.original_filename}>{doc.original_filename}</p>
-                          <p className="text-slate-500 text-xs">{doc.file_id}</p>
+                          <p className="text-gray-900 dark:text-white font-medium truncate" title={doc.original_filename}>{doc.original_filename}</p>
+                          <p className="text-gray-500 dark:text-slate-500 text-xs">{doc.file_id}</p>
                         </div>
                       </div>
                       <div className="flex gap-1 flex-shrink-0">
                         <button
                           onClick={() => handleViewDocument(doc)}
-                          className="p-1.5 rounded hover:bg-indigo-500/10"
+                          className="p-1.5 rounded hover:bg-indigo-100 dark:hover:bg-indigo-500/10"
                           title="View document"
                         >
-                          <Eye className="w-4 h-4 text-indigo-400" />
+                          <Eye className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
                         </button>
                         <button
                           onClick={() => handleDownloadDocument(doc)}
-                          className="p-1.5 rounded hover:bg-emerald-500/10"
+                          className="p-1.5 rounded hover:bg-emerald-100 dark:hover:bg-emerald-500/10"
                           title="Download document"
                         >
-                          <Download className="w-4 h-4 text-emerald-400" />
+                          <Download className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                         </button>
                         <button 
                           onClick={() => handleReindexDocument(doc.id, doc.original_filename)} 
                           disabled={reindexingDocs.has(doc.id)}
-                          className="p-1.5 rounded hover:bg-blue-500/10 disabled:opacity-50"
+                          className="p-1.5 rounded hover:bg-blue-100 dark:hover:bg-blue-500/10 disabled:opacity-50"
                           title="Reindex with updated categories"
                         >
                           {reindexingDocs.has(doc.id) ? (
-                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+                            <Loader2 className="w-4 h-4 text-blue-600 dark:text-blue-400 animate-spin" />
                           ) : (
-                            <RefreshCw className="w-4 h-4 text-blue-400" />
+                            <RefreshCw className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                           )}
                         </button>
-                        <button onClick={() => handleDeleteDocument(doc.id, doc.original_filename)} className="p-1.5 hover:bg-red-500/10 rounded">
-                          <Trash2 className="w-4 h-4 text-red-400" />
+                        <button onClick={() => handleDeleteDocument(doc.id, doc.original_filename)} className="p-1.5 hover:bg-red-100 dark:hover:bg-red-500/10 rounded">
+                          <Trash2 className="w-4 h-4 text-red-600 dark:text-red-400" />
                         </button>
                       </div>
                     </div>
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between gap-2 items-start">
-                        <span className="text-slate-400 shrink-0">Document type</span>
-                        <span className="text-right text-violet-300 font-medium text-xs leading-snug max-w-[65%]" title={doc.document_type}>
+                        <span className="text-gray-600 dark:text-slate-400 shrink-0">Document type</span>
+                        <span className="text-right text-violet-800 dark:text-violet-300 font-medium text-xs leading-snug max-w-[65%]" title={doc.document_type}>
                           {metadataOptions?.document_types.find((d) => d.value === doc.document_type)?.label ?? doc.document_type}
                         </span>
                       </div>
                       <div className="flex justify-between gap-2 items-start">
-                        <span className="text-slate-400 shrink-0">Sub-category</span>
-                        <span className="text-right text-amber-200/90 text-xs font-medium max-w-[65%]" title={doc.category}>
+                        <span className="text-gray-600 dark:text-slate-400 shrink-0">Sub-category</span>
+                        <span className="text-right text-amber-900 dark:text-amber-200/90 text-xs font-medium max-w-[65%]" title={doc.category}>
                           {metadataOptions?.categories.find((c) => c.value === doc.category)?.label ?? doc.category}
                         </span>
                       </div>
-                      <div className="flex justify-between"><span className="text-slate-400">State</span><span className="text-blue-400">{doc.state}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Pages</span><span className="text-white">{doc.total_pages}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Vectors</span><span className="text-green-400">{doc.total_vectors}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Size</span><span className="text-white">{doc.file_size_kb.toFixed(1)} KB</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">State</span><span className="text-blue-700 dark:text-blue-400 font-medium">{doc.state}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Pages</span><span className="text-gray-900 dark:text-white">{doc.total_pages}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Vectors</span><span className="text-green-700 dark:text-green-400 font-medium">{doc.total_vectors}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Size</span><span className="text-gray-900 dark:text-white">{doc.file_size_kb.toFixed(1)} KB</span></div>
                     </div>
-                    <div className="mt-3 pt-3 border-t border-slate-600 flex items-center justify-between">
-                      <span className={`text-xs px-2 py-1 rounded ${
-                        doc.index_status === 'indexed' ? 'bg-green-500/10 text-green-400' :
-                        doc.index_status === 'deleted' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'
+                    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-600 flex items-center justify-between">
+                      <span className={`text-xs px-2 py-1 rounded font-medium ${
+                        doc.index_status === 'indexed' ? 'bg-green-100 text-green-800 dark:bg-green-500/10 dark:text-green-400' :
+                        doc.index_status === 'deleted' ? 'bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400' : 'bg-yellow-100 text-yellow-900 dark:bg-yellow-500/10 dark:text-yellow-400'
                       }`}>{doc.index_status}</span>
-                      <span className="text-slate-500 text-xs">{new Date(doc.indexed_at).toLocaleDateString()}</span>
+                      <span className="text-gray-500 dark:text-slate-500 text-xs">{new Date(doc.indexed_at).toLocaleDateString()}</span>
                     </div>
                   </div>
                 ))
                 )}
                 {!docsLoading && documents.length === 0 && (
                   <div className="col-span-full py-12 text-center">
-                    <Layers className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                    <p className="text-slate-400">No documents indexed yet</p>
+                    <Layers className="w-12 h-12 text-gray-400 dark:text-slate-600 mx-auto mb-3" />
+                    <p className="text-gray-600 dark:text-slate-400">No documents indexed yet</p>
                   </div>
                 )}
               </div>
 
               {documents.length > 0 && (
-                <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
-                  <p className="text-sm text-slate-400">{docsTotal} documents</p>
+                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-slate-700">
+                  <p className="text-sm text-gray-600 dark:text-slate-400">{docsTotal} documents</p>
                   <div className="flex gap-2">
                     <button onClick={() => setDocsPage(p => Math.max(1, p - 1))} disabled={docsPage === 1}
-                      className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                      <ChevronLeft className="w-4 h-4 text-white" />
+                      className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                      <ChevronLeft className="w-4 h-4 text-gray-800 dark:text-white" />
                     </button>
                     <button onClick={() => setDocsPage(p => Math.min(docsTotalPages, p + 1))} disabled={docsPage === docsTotalPages}
-                      className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                      <ChevronRight className="w-4 h-4 text-white" />
+                      className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                      <ChevronRight className="w-4 h-4 text-gray-800 dark:text-white" />
                     </button>
                   </div>
                 </div>

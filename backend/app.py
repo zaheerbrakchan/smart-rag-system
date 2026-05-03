@@ -1660,6 +1660,15 @@ When user sends a follow-up that adds a filter, carry all previous fields forwar
 ## METRIC DISAMBIGUATION
 - Numbers ≤ 720 → score; Numbers > 720 → rank
 - "rank"/"AIR" → rank; "score"/"marks" → score
+- Indian lakh/lac for AIR: "3 lakh rank" / "under 2.5 lakh" → rank integers (3 lakh = 300000). Prefer metric_type=rank when user says lakh/lac with "rank"/"AIR".
+
+## STATE COLLEGE LISTS BY RANK (HIGH PRIORITY — NOT KNOWLEDGE-BASE)
+When the user asks to **list / show / which** **colleges or institutes** in a **named state/UT** at or **under/below/within** a **NEET AIR** (including "under X lakh rank"):
+- scope MUST be **state** (not need_more_info) once the state name maps to the DB list.
+- **target_states** = only the state(s) they want college rows **from** (seat location), e.g. "Jammu and Kashmir" / "JK" → **Jammu & Kashmir**; "UP" → **Uttar Pradesh**.
+- **home_state** = **user_profile.home_state** whenever set — used only for **domicile** eligibility in SQL (student's domicile), **not** as target_states unless they said "my state/home state".
+- **category** / **sub_category**: if the user did not override filters this turn, copy from **user_profile** so the shortlist is personalized.
+- **metric_type** = rank and **metric_value** = parsed AIR threshold.
 
 ## PROFILE DATA
 user_profile contains saved home_state and category — use directly, never ask again.
@@ -2003,12 +2012,24 @@ def _cutoff_format_markdown(
         applied_filters.append(f"- **Quota keywords:** {', '.join(quota_keywords)}")
 
     if not rows:
-        return (
-            f"I searched the 2025 cutoff data but found no matches for your profile.\n\n"
-            + "### Applied Filters\n\n"
-            + "\n".join(applied_filters)
-            + f"\n\nTry relaxing filters — for example, remove college type or try nearby states."
+        if is_central:
+            scope_phrase = "All India (MCC)"
+        elif states_label:
+            scope_phrase = states_label
+        else:
+            scope_phrase = "your selected state(s)"
+        intro = (
+            f"I looked through the **2025 cutoff data** for **{scope_phrase}** "
+            f"with your profile (**{metric_label}:** {metric_value}), but couldn't find matching colleges this time."
         )
+        filters_block = "### Applied Filters\n\n" + "\n".join(applied_filters)
+        guidance = (
+            "This usually means the cutoffs closed before reaching your rank/score range "
+            "for this combination.\n\n"
+            "Don't worry — you still have good options! Try nearby states, update the filters, "
+            "or let me know if you'd like to explore other possibilities."
+        )
+        return f"{intro}\n\n{filters_block}\n\n{guidance}"
 
     shown = rows[:display_limit]
     lines = [
@@ -2102,14 +2123,117 @@ async def _cutoff_quick_interpretation(
 
 # ── Routing helper: is this a cutoff query? ─────────────────────────────────
 
+# Phrases that should use FAQ / document RAG, not cutoff SQL — unless the same
+# message also clearly asks for rank/score-based cutoff data (see
+# _query_strongly_signals_cutoff_table).
+_NON_CUTOFF_SQL_HINT_PHRASES: Tuple[str, ...] = (
+    "fee structure",
+    "fee for",
+    "fees for",
+    "fee of",
+    "fees of",
+    "college fee",
+    "tuition",
+    "annual fee",
+    "semester fee",
+    "hostel fee",
+    "hostel charges",
+    "mess fee",
+    "mess charges",
+    "bond",
+    "stipend",
+    "refund",
+    "registration fee",
+    "choice filling",
+    "document verification",
+    "reporting date",
+    "reporting time",
+    "counselling registration",
+    "counseling registration",
+    "registration for counselling",
+    "registration for counseling",
+    "counselling process",
+    "counseling process",
+    "how to register",
+    "payment",
+    "how to pay",
+    "placement",
+    "internship",
+    "curriculum",
+    "faculty",
+)
+
+
+def _query_strongly_signals_cutoff_table(q: str) -> bool:
+    """True when the message is clearly asking for rank/score cutoff shortlist data."""
+    if re.search(r"\b(cutoff|cut off|closing rank|opening rank|last rank|shortlist)\b", q):
+        return True
+    if re.search(r"\b(lakh|lac)\b", q) and re.search(r"\b(rank|air)\b", q):
+        return True
+    if re.search(
+        r"\b(rank|air|score)\b.{0,20}\d{2,7}\b|\b\d{2,7}\b.{0,20}\b(rank|air|score|marks)\b",
+        q,
+    ):
+        return True
+    if re.search(r"\b(for|at|with|under|below)\s+.{0,24}\b(rank|air|score)\b", q):
+        return True
+    return False
+
+
+def _is_explicit_non_cutoff_intent(q: str) -> bool:
+    """
+    User wants brochure/FAQ-style answers (fees, policies, counselling steps),
+    not the cutoff SQL table. Current message wins over an active cutoff thread.
+    """
+    ql = q.strip().lower()
+    if not ql:
+        return False
+    if any(h in ql for h in _NON_CUTOFF_SQL_HINT_PHRASES):
+        return not _query_strongly_signals_cutoff_table(ql)
+    if re.search(r"\b(above|previous|those|these|last (?:reply|response|message))\b", ql):
+        if any(x in ql for x in ("fee", "fees", "tuition", "hostel", "bond", "cost", "structure")):
+            return not _query_strongly_signals_cutoff_table(ql)
+    return False
+
+
 def _is_cutoff_query(question: str, med_ctx: Dict[str, object]) -> bool:
     """Fast pre-check before calling the router LLM."""
     q = question.strip().lower()
+    if _is_explicit_non_cutoff_intent(q):
+        return False
+    # Avoid bare "college" — it matches fee questions ("fee for three colleges").
     cutoff_keywords = [
-        "college", "shortlist", "rank", "score", "cutoff", "cut off", "mbbs",
-        "bds", "aiims", "jipmer", "deemed", "mcc", "aiq", "amu", "bhu",
-        "admission", "seat", "which college", "can i get", "eligible",
-        "nursing", "government medical", "private medical", "state quota",
+        "shortlist",
+        "rank",
+        "score",
+        "cutoff",
+        "cut off",
+        "mbbs",
+        "bds",
+        "aiims",
+        "jipmer",
+        "deemed",
+        "mcc",
+        "aiq",
+        "amu",
+        "bhu",
+        "admission",
+        "seat",
+        "which college",
+        "what college",
+        "colleges in",
+        "colleges at",
+        "colleges under",
+        "colleges for",
+        "list of colleges",
+        "college list",
+        "can i get",
+        "eligible",
+        "nursing",
+        "government medical",
+        "private medical",
+        "state quota",
+        "institute",  # so "institutes in …" reaches cutoff router (LLM decides)
     ]
     if any(k in q for k in cutoff_keywords):
         return True
@@ -2140,6 +2264,9 @@ def _should_skip_cutoff_router(question: str, med_ctx: Dict[str, object]) -> boo
     Returns True when we can skip the LLM router entirely and go straight to cutoff handler.
     Handles pure continuations: number reply, single category word, single state name, short refinement.
     """
+    ql = question.strip().lower()
+    if _is_explicit_non_cutoff_intent(ql):
+        return False
     cutoff_ctx = dict(med_ctx.get("cutoff") or {})
     if not cutoff_ctx:
         return False
@@ -2213,8 +2340,40 @@ async def _get_registered_home_state(user_id: Optional[int]) -> Optional[str]:
 
 
 
+_CUTOFF_ROUTER_SYSTEM_PROMPT = """You route NEET counselling chat messages to ONE of two backends:
+- route=true → **Cutoff / college-shortlist backend** (SQL over last-year cutoff rows; answers with a data table — NOT document RAG).
+- route=false → normal Q&A (FAQ, knowledge base, brochures: fees, policies, counselling steps).
+
+## Highest-priority rule (read first)
+Interpret the **current user_message alone** for what they want **right now**.
+`prior_cutoff_context` only helps disambiguate **very short** follow-ups (e.g. a lone number, state name, or category word) that clearly continue rank/score shortlisting.
+It is **NOT** a reason to send **fee / hostel / bond / registration / document / policy** questions to the cutoff SQL backend — those always stay route=false even if the previous turn showed a cutoff table.
+
+## ALWAYS route=true (cutoff SQL) when the current message is about
+- A **list, shortlist, or names of colleges/institutes** the user may get **from NEET AIR rank or score** (e.g. "under 3 lakh rank", "for score 589", "at my rank", "options in UP").
+- **Which / what colleges** in a **state/UT or MCC/AIQ** **at or vs a rank or score**.
+- **Cutoff / closing rank / opening rank / last rank / chances / prediction** tied to rank/score and college options.
+- **Short continuations** of that same topic: new rank/score, state, category, college type, quota, or "what if I try another state" **when the wording is still about seat chances from cutoff data**.
+
+## ALWAYS route=false
+- **Anything primarily about money or campus economics:** fee structure, tuition, annual fee, hostel/mess charges, bond, stipend, refund, payment.
+- **Counselling operations:** registration, choice filling, locking, reporting, document verification, dates, rounds (as process), reservation rules explained as policy — unless the user is explicitly asking for **last-year closing ranks** from data.
+- **Relative references to colleges already listed** when the ask is **not** rank/score shortlisting (e.g. "fee structure of the above three colleges", "tell me about hostel for those institutes") → route=false (use normal Q&A / KB).
+- Greetings, thanks, small talk.
+
+## Edge cases
+- **Same message** clearly asks **both** (A) rank/score-based college list **and** (B) fees → route=true (cutoff table answers the list part; fee detail is not in SQL anyway, but the primary structured ask is cutoff).
+- If the message is **only** fees/policies/counselling help about colleges named earlier → route=false **even if** prior_cutoff_context is true.
+
+Return JSON only with keys route (boolean) and reason (short string)."""
+
+
 async def _should_route_to_cutoff(question: str, med_ctx: Dict[str, object]) -> bool:
     """LLM router: is this question about college cutoff shortlisting?"""
+    ql = question.strip().lower()
+    if _is_explicit_non_cutoff_intent(ql):
+        log("[CUTOFF] 🧭 Route=False | explicit non-cutoff intent (skip router LLM)")
+        return False
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         cutoff_ctx = dict(med_ctx.get("cutoff") or {})
@@ -2222,31 +2381,19 @@ async def _should_route_to_cutoff(question: str, med_ctx: Dict[str, object]) -> 
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a router. Return JSON only: {\"route\": true/false, \"reason\": \"brief\"}",
-                },
+                {"role": "system", "content": _CUTOFF_ROUTER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": (
-                        "Is this message asking about college shortlisting, cutoffs, or which colleges "
-                        "a student can get based on their NEET rank/score?\n\n"
-                        "Route TRUE for: college shortlist, which college can I get, AIIMS/Deemed/MCC colleges, "
-                        "colleges in a state, rank/score + college query, short follow-ups in active cutoff conversation "
-                        "(supplying rank, state, category, college type).\n"
-                        "Also route TRUE for state-switch continuation wording such as "
-                        "'if I look in Maharashtra what options can I get', even if state spelling is imperfect.\n"
-                        "Route FALSE for: fee structure, hostel, counselling process steps, documents, "
-                        "eligibility rules, exam dates, 'how does X work' questions.\n\n"
-                        f"Active cutoff conversation: {bool(cutoff_ctx.get('metric_value'))}\n"
-                        f"Last topic: {med_ctx.get('last_topic') or 'none'}\n"
-                        f"User message: \"{question}\"\n\n"
-                        "Return JSON only."
+                        "Decide routing for this single user message.\n\n"
+                        f"prior_cutoff_context: {bool(cutoff_ctx.get('metric_value'))}\n"
+                        f"last_topic_hint: {med_ctx.get('last_topic') or 'none'}\n\n"
+                        f"user_message:\n\"{question}\"\n"
                     ),
                 },
             ],
             temperature=0,
-            max_tokens=60,
+            max_tokens=120,
         )
         data = json.loads(resp.choices[0].message.content or "{}")
         result = bool(data.get("route", False))
@@ -2560,9 +2707,8 @@ async def _v2_handle_cutoff_stage(
         # Domicile/home-state filters should never be auto-applied for generic MCC central queries.
         sql_home_state = None
     else:
-        # Non-home-state guard (strict):
-        # apply category/sub-category only for home-state queries.
-        # For other states, never apply these filters.
+        # Category/sub-category: keep profile-based filters for home-state queries, and also when the
+        # question is a forced rank+state college list (domicile uses home_state; category still applies).
         target_states = list(cutoff_ctx.get("target_states") or [])
         target_state = target_states[0] if target_states else None
         is_home_state_query = (
