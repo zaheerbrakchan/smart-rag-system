@@ -806,6 +806,83 @@ async def toggle_chat_references(
     }
 
 
+@router.get("/settings/daily-token-quota/public")
+async def get_daily_token_quota_public(db: AsyncSession = Depends(get_db)):
+    """Public: whether daily LLM quota is on and the configured limit (no per-user usage)."""
+    from services.token_quota_service import get_daily_token_limit_enabled, get_daily_token_limit_per_user
+
+    enabled = await get_daily_token_limit_enabled(db)
+    limit = await get_daily_token_limit_per_user(db)
+    return {"enabled": enabled, "limit": limit}
+
+
+@router.get("/settings/daily-token-quota")
+async def get_daily_token_quota_admin(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    from services.token_quota_service import get_daily_token_limit_enabled, get_daily_token_limit_per_user
+
+    enabled = await get_daily_token_limit_enabled(db)
+    limit = await get_daily_token_limit_per_user(db)
+    row_e = await db.get(SystemSettings, SettingsKeys.DAILY_TOKEN_LIMIT_ENABLED)
+    row_l = await db.get(SystemSettings, SettingsKeys.DAILY_TOKEN_LIMIT_PER_USER)
+    return {
+        "enabled": enabled,
+        "limit": limit,
+        "updated_at_enabled": row_e.updated_at.isoformat() if row_e else None,
+        "updated_by_enabled": row_e.updated_by if row_e else None,
+        "updated_at_limit": row_l.updated_at.isoformat() if row_l else None,
+        "updated_by_limit": row_l.updated_by if row_l else None,
+        "description": "Per-student OpenAI token budget per UTC day (admins exempt).",
+    }
+
+
+@router.post("/settings/daily-token-quota")
+async def update_daily_token_quota_admin(
+    enable: Optional[bool] = Query(None, description="Enable daily token limit"),
+    limit: Optional[int] = Query(None, ge=1000, le=10_000_000, description="Max tokens per user per day"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    if enable is None and limit is None:
+        raise HTTPException(status_code=400, detail="Provide enable and/or limit")
+
+    out: dict = {}
+    if enable is not None:
+        row = await db.get(SystemSettings, SettingsKeys.DAILY_TOKEN_LIMIT_ENABLED)
+        if row is None:
+            row = SystemSettings(
+                key=SettingsKeys.DAILY_TOKEN_LIMIT_ENABLED,
+                value=str(enable).lower(),
+                description="Enable daily OpenAI token limit for students",
+                updated_by=current_admin.id,
+            )
+            db.add(row)
+        else:
+            row.value = str(enable).lower()
+            row.updated_by = current_admin.id
+        out["enabled"] = enable
+
+    if limit is not None:
+        row = await db.get(SystemSettings, SettingsKeys.DAILY_TOKEN_LIMIT_PER_USER)
+        if row is None:
+            row = SystemSettings(
+                key=SettingsKeys.DAILY_TOKEN_LIMIT_PER_USER,
+                value=str(limit),
+                description="Max OpenAI total_tokens per student per UTC day",
+                updated_by=current_admin.id,
+            )
+            db.add(row)
+        else:
+            row.value = str(limit)
+            row.updated_by = current_admin.id
+        out["limit"] = limit
+
+    await db.commit()
+    return {"success": True, **out, "updated_at": datetime.utcnow().isoformat(), "updated_by": current_admin.id}
+
+
 @router.post("/settings/cutoff-result-limit")
 async def update_cutoff_result_limit(
     limit: int = Query(..., ge=1, le=200, description="Cutoff result limit (1-200)"),

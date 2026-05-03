@@ -53,3 +53,5 @@ class SettingsKeys:
     SUPPORT_EMAIL_ENABLED = "support_email_enabled"
     SUPPORT_SMS_ENABLED = "support_sms_enabled"
     SUPPORT_INBOX_EMAIL = "support_inbox_email"
+    DAILY_TOKEN_LIMIT_ENABLED = "daily_token_limit_enabled"
+    DAILY_TOKEN_LIMIT_PER_USER = "daily_token_limit_per_user"

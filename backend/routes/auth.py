@@ -428,6 +428,17 @@ async def refresh_token(request: RefreshTokenRequest):
     return result
 
 
+@router.get("/me/daily-token-quota")
+async def get_my_daily_token_quota(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Current user's daily OpenAI token budget status (UTC day). Admins are exempt."""
+    from services.token_quota_service import get_quota_status_for_user
+
+    return await get_quota_status_for_user(db, current_user.id)
+
+
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
     current_user: User = Depends(get_current_user)

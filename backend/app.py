@@ -299,25 +299,43 @@ async def _stream_chat_completion_text(
     messages: List[Dict[str, Any]],
     temperature: float = 0.3,
     max_tokens: int = V2_FINAL_MAX_TOKENS,
+    usage_accumulator: Optional[Dict[str, int]] = None,
 ):
     """
     Yield text deltas from OpenAI chat completion stream.
+    When usage_accumulator is provided, adds total_tokens from the final stream chunk (include_usage).
     """
+    from services.token_quota_service import accum_add_tokens
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     done = object()
     error_holder: List[Exception] = []
 
     def _producer() -> None:
+        stream_total: Optional[int] = None
         try:
-            stream = client.chat.completions.create(
+            kwargs: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
             )
+            try:
+                kwargs["stream_options"] = {"include_usage": True}
+            except Exception:
+                pass
+            stream = client.chat.completions.create(**kwargs)
             for chunk in stream:
+                try:
+                    u = getattr(chunk, "usage", None)
+                    if u is not None:
+                        tt = getattr(u, "total_tokens", None)
+                        if tt is not None:
+                            stream_total = int(tt)
+                except Exception:
+                    pass
                 try:
                     delta = chunk.choices[0].delta.content
                 except Exception:
@@ -327,6 +345,8 @@ async def _stream_chat_completion_text(
         except Exception as e:
             error_holder.append(e)
         finally:
+            if usage_accumulator is not None and stream_total and stream_total > 0:
+                loop.call_soon_threadsafe(accum_add_tokens, usage_accumulator, stream_total)
             loop.call_soon_threadsafe(queue.put_nowait, done)
 
     thread = threading.Thread(target=_producer, daemon=True)
@@ -881,6 +901,7 @@ async def _generate_contextual_suggested_replies(
     med_ctx: Optional[Dict[str, object]] = None,
     retrieval_evidence: Optional[str] = None,
     output_language: str = "en",
+    usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> List[str]:
     """Generate optional quick-reply chips grounded in retrieval evidence."""
     response_text = str(assistant_response or "")
@@ -902,6 +923,8 @@ async def _generate_contextual_suggested_replies(
         return _medbuddy_default_replies_for_language(output_language)
 
     max_words = 6 if _normalize_language_code(output_language) == "en" else 14
+
+    from services.token_quota_service import accum_add_openai_completion
 
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -948,6 +971,7 @@ async def _generate_contextual_suggested_replies(
             temperature=0.2,
             max_tokens=200,
         )
+        accum_add_openai_completion(usage_accumulator, resp)
         raw = (resp.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
         replies = parsed.get("replies", [])
@@ -1681,11 +1705,14 @@ async def _cutoff_resolve_intent(
     conversation_history: List[Dict],
     cutoff_ctx: Dict[str, object],
     user_profile: Dict[str, object],
+    usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> Dict[str, object]:
     """
     Single LLM call that resolves everything needed to build the SQL query.
     Returns a clean dict with scope, filters, missing_fields, follow_up_message.
     """
+    from services.token_quota_service import accum_add_openai_completion
+
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -1740,6 +1767,7 @@ Return JSON only."""
             temperature=0,
             max_tokens=400,
         )
+        accum_add_openai_completion(usage_accumulator, resp)
 
         raw = (resp.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2068,9 +2096,12 @@ async def _cutoff_quick_interpretation(
     rows: List[Dict],
     intent: Dict[str, object],
     user_question: str,
+    usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> str:
     if not rows:
         return ""
+    from services.token_quota_service import accum_add_openai_completion
+
     try:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         sample = [
@@ -2115,6 +2146,7 @@ async def _cutoff_quick_interpretation(
             temperature=0.2,
             max_tokens=300,
         )
+        accum_add_openai_completion(usage_accumulator, resp)
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         log(f"[CUTOFF] ⚠️ Quick interpretation failed: {e}")
@@ -2368,8 +2400,14 @@ It is **NOT** a reason to send **fee / hostel / bond / registration / document /
 Return JSON only with keys route (boolean) and reason (short string)."""
 
 
-async def _should_route_to_cutoff(question: str, med_ctx: Dict[str, object]) -> bool:
+async def _should_route_to_cutoff(
+    question: str,
+    med_ctx: Dict[str, object],
+    usage_accumulator: Optional[Dict[str, int]] = None,
+) -> bool:
     """LLM router: is this question about college cutoff shortlisting?"""
+    from services.token_quota_service import accum_add_openai_completion
+
     ql = question.strip().lower()
     if _is_explicit_non_cutoff_intent(ql):
         log("[CUTOFF] 🧭 Route=False | explicit non-cutoff intent (skip router LLM)")
@@ -2395,6 +2433,7 @@ async def _should_route_to_cutoff(question: str, med_ctx: Dict[str, object]) -> 
             temperature=0,
             max_tokens=120,
         )
+        accum_add_openai_completion(usage_accumulator, resp)
         data = json.loads(resp.choices[0].message.content or "{}")
         result = bool(data.get("route", False))
         log(f"[CUTOFF] 🧭 Route={result} | {data.get('reason', '')}")
@@ -2455,6 +2494,7 @@ async def _v2_handle_cutoff_stage(
     localize_output,
     start_time: "datetime",
     state: Dict[str, object],
+    llm_usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> "AsyncGenerator[str, None]":
     """
     Clean cutoff handler. Called when routing decides this is a cutoff query.
@@ -2491,6 +2531,7 @@ async def _v2_handle_cutoff_stage(
         conversation_history=chat_history,
         cutoff_ctx=cutoff_ctx,
         user_profile=user_profile,
+        usage_accumulator=llm_usage_accumulator,
     )
     intent_ms = _elapsed_ms(t_intent)
 
@@ -2762,7 +2803,9 @@ async def _v2_handle_cutoff_stage(
     # ── STEP 6: Quick interpretation (concurrent) ──
     yield f"data: {json.dumps({'type': 'meta', 'cutoff_interpretation_loading': True})}\n\n"
     t_explain = time.perf_counter()
-    explain_task = asyncio.create_task(_cutoff_quick_interpretation(rows, intent, request.question))
+    explain_task = asyncio.create_task(
+        _cutoff_quick_interpretation(rows, intent, request.question, usage_accumulator=llm_usage_accumulator)
+    )
 
     # ── STEP 7: Suggested chips (concurrent) ──
     chips_task = asyncio.create_task(
@@ -2772,6 +2815,7 @@ async def _v2_handle_cutoff_stage(
             med_ctx,
             retrieval_evidence=table_md,
             output_language=preferred_language,
+            usage_accumulator=llm_usage_accumulator,
         )
     )
 
@@ -3291,6 +3335,7 @@ def assess_kb_sufficiency_with_llm(
     user_question: str,
     kb_tool_result: str,
     conversation_context: Optional[str] = None,
+    usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> tuple[bool, str, List[str]]:
     """
     LLM-based generic sufficiency check.
@@ -3299,6 +3344,8 @@ def assess_kb_sufficiency_with_llm(
     try:
         # Large KB tool payloads (e.g. merged deemed fee PDFs) can exceed a few thousand chars across
         # multiple chunks; truncating too early hides the chunk that actually names the college → false web fallback.
+        from services.token_quota_service import accum_add_openai_completion
+
         kb_compact = _trim_tool_result_for_model(kb_tool_result, limit=24000)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -3373,6 +3420,7 @@ def assess_kb_sufficiency_with_llm(
             temperature=0,
             max_tokens=400,
         )
+        accum_add_openai_completion(usage_accumulator, response)
         raw = (response.choices[0].message.content or "").strip()
         try:
             parsed = json.loads(raw)
@@ -4975,6 +5023,7 @@ async def _v2_run_rag_pipeline(
     request_started_at: float,
     round_stats: List[Dict[str, object]],
     state: Dict[str, object],
+    llm_usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stage function for V2 RAG pipeline:
@@ -4983,6 +5032,7 @@ async def _v2_run_rag_pipeline(
     - optional suggested replies
     """
     from services.knowledge_tool import execute_tool_call
+    from services.token_quota_service import accum_add_openai_completion
 
     used_web_fallback = False
     max_tool_rounds = 3
@@ -5021,6 +5071,7 @@ async def _v2_run_rag_pipeline(
                 messages=messages,
                 temperature=final_temperature,
                 max_tokens=final_max_tokens,
+                usage_accumulator=llm_usage_accumulator,
             ):
                 streamed_raw += delta
                 if _first_out:
@@ -5061,6 +5112,7 @@ async def _v2_run_rag_pipeline(
             temperature=0.3,
             max_tokens=V2_FINAL_MAX_TOKENS
         )
+        accum_add_openai_completion(llm_usage_accumulator, response)
         llm_round_ms = _elapsed_ms(t_llm)
         assistant_message = response.choices[0].message
         _log_v2_tool_debug(
@@ -5195,6 +5247,7 @@ async def _v2_run_rag_pipeline(
                     user_question=suff_user_q,
                     kb_tool_result=kb_result,
                     conversation_context=_build_sufficiency_context(messages, kb_query),
+                    usage_accumulator=llm_usage_accumulator,
                 )
                 _log_v2_tool_debug(
                     f"[V2][DBG] per_call_sufficiency query={kb_query!r} "
@@ -5401,6 +5454,7 @@ async def _v2_run_rag_pipeline(
                 messages=messages,
                 temperature=final_temperature,
                 max_tokens=final_max_tokens,
+                usage_accumulator=llm_usage_accumulator,
             ):
                 streamed_raw += delta
                 if _first_out:
@@ -5460,6 +5514,7 @@ async def _v2_run_rag_pipeline(
                 messages=messages,
                 temperature=final_temperature,
                 max_tokens=final_max_tokens,
+                usage_accumulator=llm_usage_accumulator,
             ):
                 streamed_raw += delta
                 if _first_out:
@@ -5489,6 +5544,7 @@ async def _v2_run_rag_pipeline(
                 temperature=final_temperature,
                 max_tokens=final_max_tokens,
             )
+            accum_add_openai_completion(llm_usage_accumulator, final_response)
             full_response = localize_output(_apply_response_policy(final_response.choices[0].message.content or "", request.question, allow_factual_addons=has_retrieval_evidence))
             _first_out = True
             for token in sse_tokens_preserving_formatting(full_response):
@@ -5509,6 +5565,7 @@ async def _v2_run_rag_pipeline(
             med_ctx,
             retrieval_evidence=chip_evidence,
             output_language=preferred_language,
+            usage_accumulator=llm_usage_accumulator,
         )
         if replies:
             yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': replies})}\n\n"
@@ -5643,7 +5700,9 @@ async def chat_v2_stream(request: ChatRequest):
             if direct_non_english:
                 return text
             return _translate_text_sync(text, "en", preferred_language)
-        
+
+        llm_usage_accumulator: Dict[str, int] = {"total": 0}
+
         try:
             # Emit an immediate frame to encourage early proxy/client flush for SSE.
             yield f"data: {json.dumps({'type': 'stream_started'})}\n\n"
@@ -5652,6 +5711,20 @@ async def chat_v2_stream(request: ChatRequest):
             if not request.question.strip():
                 yield f"data: {json.dumps({'error': 'Question cannot be empty'})}\n\n"
                 return
+
+            if request.user_id:
+                from services.token_quota_service import get_quota_status_for_user
+
+                async with async_session_maker() as quota_db:
+                    qstat = await get_quota_status_for_user(quota_db, request.user_id)
+                yield f"data: {json.dumps({'type': 'meta', 'daily_token_quota': qstat})}\n\n"
+                if qstat.get("blocked"):
+                    msg = localize_output(
+                        "Your daily Med Assist limit has been reached. You can resume tomorrow. Thank you for using Med Assist."
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'error': msg, 'code': 'daily_token_quota'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+                    return
             
             # ========== LOAD/CREATE CONVERSATION ==========
             if request.user_id:
@@ -5721,7 +5794,9 @@ async def chat_v2_stream(request: ChatRequest):
                     cutoff_confirmed = True
                     log(f"[CUTOFF] ⚡ Skipping router — clear continuation: {request.question!r}")
                 else:
-                    cutoff_confirmed = await _should_route_to_cutoff(request.question, med_ctx)
+                    cutoff_confirmed = await _should_route_to_cutoff(
+                        request.question, med_ctx, usage_accumulator=llm_usage_accumulator
+                    )
                 if cutoff_confirmed:
                     cutoff_stage_state: Dict[str, object] = {}
                     async for event in _v2_handle_cutoff_stage(
@@ -5733,6 +5808,7 @@ async def chat_v2_stream(request: ChatRequest):
                         localize_output=localize_output,
                         start_time=start_time,
                         state=cutoff_stage_state,
+                        llm_usage_accumulator=llm_usage_accumulator,
                     ):
                         yield event
                     if cutoff_stage_state.get("handled"):
@@ -5780,6 +5856,7 @@ async def chat_v2_stream(request: ChatRequest):
                         faq_answer,
                         med_ctx,
                         retrieval_evidence=str(faq_match.get("answer") or ""),
+                        usage_accumulator=llm_usage_accumulator,
                     )
                     if faq_replies:
                         yield f"data: {json.dumps({'type': 'suggested_replies', 'replies': faq_replies})}\n\n"
@@ -6019,6 +6096,7 @@ async def chat_v2_stream(request: ChatRequest):
                 request_started_at=t_wall,
                 round_stats=round_stats,
                 state=rag_state,
+                llm_usage_accumulator=llm_usage_accumulator,
             ):
                 yield event
 
@@ -6101,6 +6179,19 @@ async def chat_v2_stream(request: ChatRequest):
             log(f"[V2] ❌ ERROR: {e}")
             traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            if request.user_id and int(llm_usage_accumulator.get("total") or 0) > 0:
+                try:
+                    from services.token_quota_service import increment_user_daily_tokens
+
+                    async with async_session_maker() as usage_db:
+                        await increment_user_daily_tokens(
+                            usage_db,
+                            request.user_id,
+                            int(llm_usage_accumulator["total"]),
+                        )
+                except Exception as ex:
+                    log(f"[V2] ⚠️ Token usage ledger write failed: {ex}")
     
     return StreamingResponse(
         generate_stream(),

@@ -9,6 +9,7 @@ from .system_settings import SystemSettings, SettingsKeys
 from .support_query import SupportQuery, SupportQueryReply, UserNotification, SupportQueryStatus
 from .otp_verification import OTPVerification
 from .neet_ug_cutoff import NeetUg2025Cutoff
+from .user_daily_llm_usage import UserDailyLlmUsage
 
 __all__ = [
     "User", "UserRole",
@@ -21,4 +22,5 @@ __all__ = [
     "SupportQuery", "SupportQueryReply", "UserNotification", "SupportQueryStatus",
     "OTPVerification",
     "NeetUg2025Cutoff",
+    "UserDailyLlmUsage",
 ]
