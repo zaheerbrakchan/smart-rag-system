@@ -56,6 +56,35 @@ export interface SupportNotification {
   created_at: string;
 }
 
+export interface DailyTokenQuotaStatus {
+  exempt: boolean;
+  enabled: boolean;
+  limit: number;
+  used_today: number;
+  remaining: number;
+  blocked: boolean;
+}
+
+/** Public caps (no auth) — used when student is not logged in. */
+export async function fetchDailyTokenQuotaPublic(): Promise<{ enabled: boolean; limit: number }> {
+  const r = await fetch(`${API_BASE_URL}/faq/settings/daily-token-quota/public`, { cache: 'no-store' });
+  if (!r.ok) return { enabled: false, limit: 200000 };
+  return r.json();
+}
+
+/** Logged-in student's quota for today (UTC). */
+export async function fetchMyDailyTokenQuota(accessToken: string): Promise<DailyTokenQuotaStatus> {
+  const r = await fetch(`${API_BASE_URL}/auth/me/daily-token-quota`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(extractApiErrorMessage(err, 'Failed to load token quota'));
+  }
+  return r.json();
+}
+
 function extractApiErrorMessage(error: any, fallback: string): string {
   const detail = error?.detail;
   if (typeof detail === 'string' && detail.trim()) return detail;

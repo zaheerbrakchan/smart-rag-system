@@ -377,28 +377,28 @@ export default function MessageBubble({
               </ReactMarkdown>
 
               {parsedCutoffTable && !isMultiStateCutoffTable && (
-                <div className="my-4 max-w-full overflow-x-auto rounded-xl border border-slate-600 bg-slate-900/80">
+                <div className="my-4 max-w-full overflow-x-auto rounded-xl border border-gray-200 bg-gray-50/90 dark:border-slate-600 dark:bg-slate-900/80">
                   <table className="min-w-full border-collapse text-sm">
-                    <thead className="bg-slate-800">
-                      <tr className="border-b border-slate-600">
+                    <thead className="bg-gray-100 dark:bg-slate-800">
+                      <tr className="border-b border-gray-200 dark:border-slate-600">
                         {tableHeaders.map((h) => (
-                          <th key={h} className="px-3 py-2 text-left font-semibold !bg-slate-800 !text-slate-100 whitespace-nowrap">
+                          <th key={h} className="px-3 py-2 text-left font-semibold !bg-gray-100 !text-gray-900 whitespace-nowrap dark:!bg-slate-800 dark:!text-slate-100">
                             {h}
                           </th>
                         ))}
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="bg-white dark:bg-transparent">
                       {parsedCutoffTable.rows.map((row) => (
-                        <tr key={`${row.idx}-${row.institution}`} className="border-b border-slate-700">
-                          <td className="px-3 py-2 text-slate-100 font-medium">{row.institution}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.state}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.category}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.quota}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.domicile}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.air}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.score}</td>
-                          <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.round}</td>
+                        <tr key={`${row.idx}-${row.institution}`} className="border-b border-gray-200 dark:border-slate-700">
+                          <td className="px-3 py-2 text-gray-900 font-medium dark:text-slate-100">{row.institution}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.state}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.category}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.quota}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.domicile}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.air}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.score}</td>
+                          <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.round}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -411,32 +411,32 @@ export default function MessageBubble({
                   {cutoffStates.map((stateName) => {
                     const stateRows = groupedCutoffRows[stateName] || [];
                     return (
-                      <div key={stateName} className="max-w-full rounded-xl border border-slate-600 bg-slate-900/80 overflow-x-auto">
-                        <div className="px-3 py-2 bg-slate-800/90 border-b border-slate-600">
-                          <span className="inline-flex items-center rounded-full bg-red-600/20 text-red-300 border border-red-500/40 px-2.5 py-1 text-xs font-semibold">
+                      <div key={stateName} className="max-w-full rounded-xl border border-gray-200 bg-gray-50/90 overflow-x-auto dark:border-slate-600 dark:bg-slate-900/80">
+                        <div className="px-3 py-2 bg-gray-100 border-b border-gray-200 dark:bg-slate-800/90 dark:border-slate-600">
+                          <span className="inline-flex items-center rounded-full bg-red-100 text-red-800 border border-red-200 px-2.5 py-1 text-xs font-semibold dark:bg-red-600/20 dark:text-red-300 dark:border-red-500/40">
                             {stateName}
                           </span>
                         </div>
                         <table className="min-w-full border-collapse text-sm">
-                          <thead className="bg-slate-800">
-                            <tr className="border-b border-slate-600">
+                          <thead className="bg-gray-100 dark:bg-slate-800">
+                            <tr className="border-b border-gray-200 dark:border-slate-600">
                               {tableHeadersWithoutState.map((h) => (
-                                <th key={`${stateName}-${h}`} className="px-3 py-2 text-left font-semibold !bg-slate-800 !text-slate-100 whitespace-nowrap">
+                                <th key={`${stateName}-${h}`} className="px-3 py-2 text-left font-semibold !bg-gray-100 !text-gray-900 whitespace-nowrap dark:!bg-slate-800 dark:!text-slate-100">
                                   {h}
                                 </th>
                               ))}
                             </tr>
                           </thead>
-                          <tbody>
+                          <tbody className="bg-white dark:bg-transparent">
                             {stateRows.map((row) => (
-                              <tr key={`${stateName}-${row.idx}-${row.institution}`} className="border-b border-slate-700">
-                                <td className="px-3 py-2 text-slate-100 font-medium">{row.institution}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.category}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.quota}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.domicile}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.air}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.score}</td>
-                                <td className="px-3 py-2 text-slate-200 whitespace-nowrap">{row.round}</td>
+                              <tr key={`${stateName}-${row.idx}-${row.institution}`} className="border-b border-gray-200 dark:border-slate-700">
+                                <td className="px-3 py-2 text-gray-900 font-medium dark:text-slate-100">{row.institution}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.category}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.quota}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.domicile}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.air}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.score}</td>
+                                <td className="px-3 py-2 text-gray-700 whitespace-nowrap dark:text-slate-200">{row.round}</td>
                               </tr>
                             ))}
                           </tbody>

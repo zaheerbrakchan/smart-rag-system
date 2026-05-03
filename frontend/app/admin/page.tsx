@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
-import { useTheme } from '@/contexts/ThemeContext';
 import ThemeToggle from '@/components/ThemeToggle';
 import { 
   Upload, FileText, Trash2, RefreshCw, Database, Users, Settings,
@@ -226,6 +225,11 @@ export default function AdminPage() {
   const [cutoffResultLimitLoading, setCutoffResultLimitLoading] = useState<boolean>(false);
   const [cutoffResultLimitUpdatedAt, setCutoffResultLimitUpdatedAt] = useState<string | null>(null);
   const [cutoffResultLimitUpdatedBy, setCutoffResultLimitUpdatedBy] = useState<number | null>(null);
+  const [dailyTokenLimitEnabled, setDailyTokenLimitEnabled] = useState(false);
+  const [dailyTokenLimitValue, setDailyTokenLimitValue] = useState(200000);
+  const [dailyTokenLimitInput, setDailyTokenLimitInput] = useState('200000');
+  const [dailyTokenLoading, setDailyTokenLoading] = useState(false);
+  const [dailyTokenUpdatedAt, setDailyTokenUpdatedAt] = useState<string | null>(null);
 
   // Cutoff Excel management state
   const [cutoffDataLoading, setCutoffDataLoading] = useState(false);
@@ -606,6 +610,83 @@ export default function AdminPage() {
   }, []);
 
   // Update cutoff result limit
+  const fetchDailyTokenQuotaSettings = useCallback(async () => {
+    try {
+      const token = getAuthToken();
+      const response = await fetch(`${API_BASE_URL}/faq/settings/daily-token-quota`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setDailyTokenLimitEnabled(Boolean(data.enabled));
+        setDailyTokenLimitValue(Number(data.limit) || 200000);
+        setDailyTokenLimitInput(String(Number(data.limit) || 200000));
+        setDailyTokenUpdatedAt(data.updated_at_limit || data.updated_at_enabled || null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch daily token quota settings:', err);
+    }
+  }, []);
+
+  const toggleDailyTokenLimit = async () => {
+    setDailyTokenLoading(true);
+    try {
+      const token = getAuthToken();
+      const next = !dailyTokenLimitEnabled;
+      const response = await fetch(
+        `${API_BASE_URL}/faq/settings/daily-token-quota?enable=${next}`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setDailyTokenLimitEnabled(Boolean(data.enabled ?? next));
+        setSuccess(data.message || 'Daily token limit updated');
+        await fetchDailyTokenQuotaSettings();
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to update daily token limit');
+      }
+    } catch (err) {
+      setError('Failed to update daily token limit');
+    } finally {
+      setDailyTokenLoading(false);
+    }
+  };
+
+  const saveDailyTokenLimitValue = async () => {
+    const parsed = Number(dailyTokenLimitInput);
+    if (!Number.isFinite(parsed) || parsed < 1000 || parsed > 10_000_000) {
+      setError('Daily token limit must be between 1,000 and 10,000,000');
+      return;
+    }
+    setDailyTokenLoading(true);
+    try {
+      const token = getAuthToken();
+      const response = await fetch(
+        `${API_BASE_URL}/faq/settings/daily-token-quota?limit=${parsed}`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setDailyTokenLimitValue(Number(data.limit) || parsed);
+        setDailyTokenLimitInput(String(Number(data.limit) || parsed));
+        await fetchDailyTokenQuotaSettings();
+        setSuccess(
+          dailyTokenLimitEnabled
+            ? (data.message || 'Token limit saved')
+            : 'Token limit saved. Turn on Enforced above to block students who exceed this limit.'
+        );
+      } else {
+        const err = await response.json();
+        setError(err.detail || 'Failed to save token limit');
+      }
+    } catch (err) {
+      setError('Failed to save token limit');
+    } finally {
+      setDailyTokenLoading(false);
+    }
+  };
+
   const updateCutoffResultLimit = async () => {
     const parsed = Number(cutoffResultLimitInput);
     if (!Number.isFinite(parsed) || parsed < 1 || parsed > 200) {
@@ -745,6 +826,7 @@ export default function AdminPage() {
         fetchWebFallbackStatus(),
         fetchChatReferencesSetting(),
         fetchCutoffResultLimit(),
+        fetchDailyTokenQuotaSettings(),
         fetchCutoffSummary()
       ]);
       setInitialLoadDone(true);
@@ -752,7 +834,7 @@ export default function AdminPage() {
     if (isAuthenticated && (user?.role === 'admin' || user?.role === 'super_admin')) {
       loadAllData();
     }
-  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchChatReferencesSetting, fetchCutoffResultLimit, fetchCutoffSummary]);
+  }, [isAuthenticated, user, fetchStats, fetchMetadataOptions, fetchUsers, fetchDocuments, fetchFaqs, fetchSupportQueries, fetchFaqStats, fetchAutoLearningStatus, fetchWebFallbackStatus, fetchChatReferencesSetting, fetchCutoffResultLimit, fetchDailyTokenQuotaSettings, fetchCutoffSummary]);
 
   // Refetch tab data when filters/pagination change (not on initial load since data is pre-loaded)
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -1261,7 +1343,12 @@ export default function AdminPage() {
                   if (activeTab === 'documents') fetchDocuments();
                   if (activeTab === 'faqs') { fetchFaqs(); fetchFaqStats(); fetchAutoLearningStatus(); fetchWebFallbackStatus(); }
                   if (activeTab === 'queries') fetchSupportQueries();
-                  if (activeTab === 'configurations') { fetchAutoLearningStatus(); fetchWebFallbackStatus(); fetchCutoffResultLimit(); }
+                  if (activeTab === 'configurations') {
+                    fetchAutoLearningStatus();
+                    fetchWebFallbackStatus();
+                    fetchCutoffResultLimit();
+                    fetchDailyTokenQuotaSettings();
+                  }
                   if (activeTab === 'cutoffs') { fetchCutoffSummary(); }
                 }}
                 className="p-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 rounded-lg"
@@ -1394,7 +1481,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="max-w-7xl mx-auto px-6 pt-6">
-        <div className="flex gap-1 bg-gray-100 dark:bg-slate-800/50 p-1 rounded-xl w-fit">
+        <div className="flex flex-wrap gap-1 bg-gray-100 dark:bg-slate-800/50 p-1 rounded-xl w-fit max-w-full">
           {[
             { id: 'overview', label: 'Overview', icon: BarChart3 },
             { id: 'users', label: 'Users', icon: Users },
@@ -1407,16 +1494,16 @@ export default function AdminPage() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as TabType)}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-all ${
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-all shrink-0 ${
                 activeTab === tab.id
                   ? 'bg-blue-600 text-white shadow-lg'
-                  : 'text-gray-500 dark:text-slate-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-slate-700/50'
+                  : 'text-gray-800 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700/50 hover:text-gray-950 dark:hover:text-white'
               }`}
             >
-              <tab.icon className="w-4 h-4" />
-              {tab.label}
-              {tab.badge && tab.badge > 0 && (
-                <span className="px-1.5 py-0.5 text-xs bg-orange-500 text-white rounded-full">{tab.badge}</span>
+              <tab.icon className="w-4 h-4 shrink-0" />
+              <span>{tab.label}</span>
+              {tab.badge != null && tab.badge > 0 && (
+                <span className="px-1.5 py-0.5 text-xs bg-orange-500 text-white rounded-full tabular-nums">{tab.badge}</span>
               )}
             </button>
           ))}
@@ -1494,27 +1581,27 @@ export default function AdminPage() {
         {/* Users Tab */}
         {activeTab === 'users' && (
           <div className="space-y-6">
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-4">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-4 shadow-sm dark:shadow-none">
               <div className="flex flex-wrap gap-4">
                 <div className="flex-1 min-w-[200px] relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-slate-400" />
                   <input
                     type="text"
                     placeholder="Search users..."
                     value={usersSearch}
                     onChange={(e) => { setUsersSearch(e.target.value); setUsersPage(1); }}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400"
                   />
                 </div>
                 <select value={usersRoleFilter} onChange={(e) => { setUsersRoleFilter(e.target.value); setUsersPage(1); }}
-                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                  className="px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                   <option value="">All Roles</option>
                   <option value="student">Student</option>
                   <option value="admin">Admin</option>
                   <option value="super_admin">Super Admin</option>
                 </select>
                 <select value={usersActiveFilter} onChange={(e) => { setUsersActiveFilter(e.target.value); setUsersPage(1); }}
-                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                  className="px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                   <option value="">All Status</option>
                   <option value="true">Active</option>
                   <option value="false">Inactive</option>
@@ -1522,20 +1609,20 @@ export default function AdminPage() {
               </div>
             </div>
 
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 overflow-hidden">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 overflow-hidden shadow-sm dark:shadow-none">
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead>
-                    <tr className="border-b border-slate-700">
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">User</th>
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Contact</th>
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Role</th>
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Status</th>
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Joined</th>
-                      <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">Actions</th>
+                    <tr className="border-b border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-transparent">
+                      <th className="text-left px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">User</th>
+                      <th className="text-left px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">Contact</th>
+                      <th className="text-left px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">Role</th>
+                      <th className="text-left px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">Status</th>
+                      <th className="text-left px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">Joined</th>
+                      <th className="text-right px-6 py-4 text-sm font-medium text-gray-600 dark:text-slate-400">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-700">
+                  <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
                     {usersLoading && users.length === 0 ? (
                       // Skeleton loading rows
                       <>
@@ -1543,30 +1630,30 @@ export default function AdminPage() {
                           <tr key={i} className="animate-pulse">
                             <td className="px-6 py-4">
                               <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 bg-slate-700 rounded-full"></div>
+                                <div className="w-10 h-10 bg-gray-200 dark:bg-slate-700 rounded-full"></div>
                                 <div>
-                                  <div className="h-4 bg-slate-700 rounded w-24 mb-1"></div>
-                                  <div className="h-3 bg-slate-700 rounded w-16"></div>
+                                  <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-24 mb-1"></div>
+                                  <div className="h-3 bg-gray-200 dark:bg-slate-700 rounded w-16"></div>
                                 </div>
                               </div>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="h-4 bg-slate-700 rounded w-32 mb-1"></div>
-                              <div className="h-3 bg-slate-700 rounded w-20"></div>
+                              <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-32 mb-1"></div>
+                              <div className="h-3 bg-gray-200 dark:bg-slate-700 rounded w-20"></div>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="h-6 bg-slate-700 rounded-full w-16"></div>
+                              <div className="h-6 bg-gray-200 dark:bg-slate-700 rounded-full w-16"></div>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="h-4 bg-slate-700 rounded w-16"></div>
+                              <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-16"></div>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="h-4 bg-slate-700 rounded w-20"></div>
+                              <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-20"></div>
                             </td>
                             <td className="px-6 py-4">
                               <div className="flex justify-end gap-2">
-                                <div className="w-8 h-8 bg-slate-700 rounded-lg"></div>
-                                <div className="w-8 h-8 bg-slate-700 rounded-lg"></div>
+                                <div className="w-8 h-8 bg-gray-200 dark:bg-slate-700 rounded-lg"></div>
+                                <div className="w-8 h-8 bg-gray-200 dark:bg-slate-700 rounded-lg"></div>
                               </div>
                             </td>
                           </tr>
@@ -1574,50 +1661,49 @@ export default function AdminPage() {
                       </>
                     ) : (
                     users.map((u) => (
-                      <tr key={u.id} className="hover:bg-slate-700/30">
+                      <tr key={u.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/30">
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
                               <span className="text-white font-medium">{u.full_name[0]}</span>
                             </div>
                             <div>
-                              <p className="text-white font-medium">{u.full_name}</p>
-                              <p className="text-slate-400 text-sm">ID: {u.id}</p>
+                              <p className="text-gray-900 dark:text-white font-medium">{u.full_name}</p>
+                              <p className="text-gray-500 dark:text-slate-400 text-sm">ID: {u.id}</p>
                             </div>
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <p className="text-slate-300 text-sm">{u.phone || 'No phone'}</p>
-                          <p className="text-slate-500 text-sm">{u.phone || '-'}</p>
+                          <p className="text-gray-700 dark:text-slate-300 text-sm">{u.phone || 'No phone'}</p>
                         </td>
                         <td className="px-6 py-4">
                           <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                            u.role === 'super_admin' ? 'bg-red-500/10 text-red-400' :
-                            u.role === 'admin' ? 'bg-orange-500/10 text-orange-400' : 'bg-blue-500/10 text-blue-400'
+                            u.role === 'super_admin' ? 'bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400' :
+                            u.role === 'admin' ? 'bg-orange-100 text-orange-800 dark:bg-orange-500/10 dark:text-orange-400' : 'bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400'
                           }`}>{u.role.replace('_', ' ')}</span>
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
                             <span className={`w-2 h-2 rounded-full ${u.is_active ? 'bg-green-500' : 'bg-red-500'}`} />
-                            <span className={`text-sm ${u.is_active ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className={`text-sm font-medium ${u.is_active ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>
                               {u.is_active ? 'Active' : 'Inactive'}
                             </span>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-slate-400 text-sm">
+                        <td className="px-6 py-4 text-gray-600 dark:text-slate-400 text-sm">
                           {new Date(u.created_at).toLocaleDateString()}
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex items-center justify-end gap-2">
-                            <button onClick={() => setEditingUser(u)} className="p-2 hover:bg-slate-600 rounded-lg" title="Edit">
-                              <Edit2 className="w-4 h-4 text-slate-400" />
+                            <button onClick={() => setEditingUser(u)} className="p-2 hover:bg-gray-100 dark:hover:bg-slate-600 rounded-lg" title="Edit">
+                              <Edit2 className="w-4 h-4 text-gray-600 dark:text-slate-400" />
                             </button>
-                            <button onClick={() => handleResetPassword(u.id, u.full_name)} className="p-2 hover:bg-slate-600 rounded-lg" title="Reset Password">
-                              <Key className="w-4 h-4 text-slate-400" />
+                            <button onClick={() => handleResetPassword(u.id, u.full_name)} className="p-2 hover:bg-gray-100 dark:hover:bg-slate-600 rounded-lg" title="Reset Password">
+                              <Key className="w-4 h-4 text-gray-600 dark:text-slate-400" />
                             </button>
                             {u.role !== 'super_admin' && (
-                              <button onClick={() => handleDeleteUser(u.id, u.full_name)} className="p-2 hover:bg-red-500/10 rounded-lg" title="Deactivate">
-                                <UserX className="w-4 h-4 text-red-400" />
+                              <button onClick={() => handleDeleteUser(u.id, u.full_name)} className="p-2 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg" title="Deactivate">
+                                <UserX className="w-4 h-4 text-red-600 dark:text-red-400" />
                               </button>
                             )}
                           </div>
@@ -1628,18 +1714,18 @@ export default function AdminPage() {
                   </tbody>
                 </table>
               </div>
-              <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
-                <p className="text-sm text-slate-400">
+              <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-slate-700">
+                <p className="text-sm text-gray-600 dark:text-slate-400">
                   {((usersPage - 1) * 10) + 1} - {Math.min(usersPage * 10, usersTotal)} of {usersTotal}
                 </p>
                 <div className="flex gap-2">
                   <button onClick={() => setUsersPage(p => Math.max(1, p - 1))} disabled={usersPage === 1}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                    <ChevronLeft className="w-4 h-4 text-white" />
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                    <ChevronLeft className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
                   <button onClick={() => setUsersPage(p => Math.min(usersTotalPages, p + 1))} disabled={usersPage === usersTotalPages}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                    <ChevronRight className="w-4 h-4 text-white" />
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                    <ChevronRight className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
                 </div>
               </div>
@@ -1651,17 +1737,17 @@ export default function AdminPage() {
         {activeTab === 'documents' && (
           <div className="space-y-6">
             {/* Upload */}
-            <div className="bg-gradient-to-r from-blue-600/10 to-purple-600/10 rounded-2xl border border-blue-500/20 p-6">
-              <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                <Upload className="w-5 h-5 text-blue-400" /> Upload Document
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-600/10 dark:to-purple-600/10 rounded-2xl border border-blue-200/80 dark:border-blue-500/20 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+                <Upload className="w-5 h-5 text-blue-600 dark:text-blue-400" /> Upload Document
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <label className="block cursor-pointer min-w-0">
-                  <div className="border-2 border-dashed border-slate-600 hover:border-blue-500 rounded-xl p-6 text-center min-w-0 max-w-full overflow-hidden">
+                  <div className="border-2 border-dashed border-gray-300 bg-white/70 dark:bg-transparent dark:border-slate-600 hover:border-blue-500 dark:hover:border-blue-500 rounded-xl p-6 text-center min-w-0 max-w-full overflow-hidden">
                     <input id="file-upload" type="file" accept=".pdf" onChange={handleFileChange} className="hidden" />
-                    <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2 shrink-0" />
+                    <Upload className="w-8 h-8 text-gray-500 dark:text-slate-400 mx-auto mb-2 shrink-0" />
                     <p
-                      className={`text-slate-300 text-sm w-full min-w-0 ${selectedFile ? 'truncate' : ''}`}
+                      className={`text-gray-800 dark:text-slate-300 text-sm w-full min-w-0 ${selectedFile ? 'truncate' : ''}`}
                       title={selectedFile ? selectedFile.name : undefined}
                     >
                       {selectedFile ? selectedFile.name : 'Choose PDF'}
@@ -1670,17 +1756,17 @@ export default function AdminPage() {
                 </label>
                 <div className="space-y-3">
                   <select value={uploadForm.state} onChange={(e) => setUploadForm(f => ({ ...f, state: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                   <select value={uploadForm.document_type} onChange={(e) => setUploadForm(f => ({ ...f, document_type: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.document_types.map((dt) => <option key={dt.value} value={dt.value}>{dt.label}</option>)}
                   </select>
                 </div>
                 <div className="space-y-3">
                   <select value={uploadForm.category} onChange={(e) => setUploadForm(f => ({ ...f, category: e.target.value }))}
-                    className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 text-gray-900 rounded-lg dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     {metadataOptions?.categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                   </select>
                   <button onClick={handleUpload} disabled={!selectedFile || uploading}
@@ -1692,22 +1778,22 @@ export default function AdminPage() {
             </div>
 
             {/* Documents List */}
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 overflow-hidden">
-              <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border-b border-slate-700">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 overflow-hidden shadow-sm dark:shadow-none">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border-b border-gray-200 dark:border-slate-700">
                 <div className="flex-1 min-w-0 relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-slate-400" />
                   <input type="text" placeholder="Search documents..." value={docsSearch}
                     onChange={(e) => { setDocsSearch(e.target.value); setDocsPage(1); }}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400" />
                 </div>
                 <div className="flex flex-wrap gap-2 sm:gap-3">
                   <select value={docsStateFilter} onChange={(e) => { setDocsStateFilter(e.target.value); setDocsPage(1); }}
-                    className="min-w-[140px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="min-w-[140px] flex-1 sm:flex-none px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     <option value="">All States</option>
                     {metadataOptions?.states.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                   <select value={docsDocTypeFilter} onChange={(e) => { setDocsDocTypeFilter(e.target.value); setDocsPage(1); }}
-                    className="min-w-[160px] flex-1 sm:flex-none px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white">
+                    className="min-w-[160px] flex-1 sm:flex-none px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                     <option value="">All document types</option>
                     {metadataOptions?.document_types.map((dt) => (
                       <option key={dt.value} value={dt.value}>{dt.label}</option>
@@ -1721,114 +1807,114 @@ export default function AdminPage() {
                   // Skeleton loading for document cards
                   <>
                     {[1, 2, 3, 4, 5, 6].map((i) => (
-                      <div key={i} className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 animate-pulse">
+                      <div key={i} className="bg-gray-100 dark:bg-slate-700/30 rounded-xl p-4 border border-gray-200 dark:border-slate-600 animate-pulse">
                         <div className="flex items-center gap-3 mb-3">
-                          <div className="w-10 h-10 bg-slate-700 rounded-lg"></div>
+                          <div className="w-10 h-10 bg-gray-200 dark:bg-slate-700 rounded-lg"></div>
                           <div className="flex-1">
-                            <div className="h-4 bg-slate-700 rounded w-3/4 mb-1"></div>
-                            <div className="h-3 bg-slate-700 rounded w-1/2"></div>
+                            <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-3/4 mb-1"></div>
+                            <div className="h-3 bg-gray-200 dark:bg-slate-700 rounded w-1/2"></div>
                           </div>
                         </div>
                         <div className="space-y-2">
-                          <div className="h-4 bg-slate-700 rounded w-full"></div>
-                          <div className="h-4 bg-slate-700 rounded w-full"></div>
-                          <div className="h-4 bg-slate-700 rounded w-2/3"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full"></div>
+                          <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-2/3"></div>
                         </div>
                       </div>
                     ))}
                   </>
                 ) : (
                 documents.map((doc) => (
-                  <div key={doc.id} className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 hover:border-blue-500/50 overflow-hidden">
+                  <div key={doc.id} className="bg-gray-50 dark:bg-slate-700/30 rounded-xl p-4 border border-gray-200 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500/50 overflow-hidden">
                     <div className="flex items-start justify-between mb-3 gap-2">
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className="bg-purple-500/10 p-2 rounded-lg flex-shrink-0">
-                          <FileText className="w-5 h-5 text-purple-400" />
+                        <div className="bg-purple-100 dark:bg-purple-500/10 p-2 rounded-lg flex-shrink-0">
+                          <FileText className="w-5 h-5 text-purple-700 dark:text-purple-400" />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="text-white font-medium truncate" title={doc.original_filename}>{doc.original_filename}</p>
-                          <p className="text-slate-500 text-xs">{doc.file_id}</p>
+                          <p className="text-gray-900 dark:text-white font-medium truncate" title={doc.original_filename}>{doc.original_filename}</p>
+                          <p className="text-gray-500 dark:text-slate-500 text-xs">{doc.file_id}</p>
                         </div>
                       </div>
                       <div className="flex gap-1 flex-shrink-0">
                         <button
                           onClick={() => handleViewDocument(doc)}
-                          className="p-1.5 rounded hover:bg-indigo-500/10"
+                          className="p-1.5 rounded hover:bg-indigo-100 dark:hover:bg-indigo-500/10"
                           title="View document"
                         >
-                          <Eye className="w-4 h-4 text-indigo-400" />
+                          <Eye className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
                         </button>
                         <button
                           onClick={() => handleDownloadDocument(doc)}
-                          className="p-1.5 rounded hover:bg-emerald-500/10"
+                          className="p-1.5 rounded hover:bg-emerald-100 dark:hover:bg-emerald-500/10"
                           title="Download document"
                         >
-                          <Download className="w-4 h-4 text-emerald-400" />
+                          <Download className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                         </button>
                         <button 
                           onClick={() => handleReindexDocument(doc.id, doc.original_filename)} 
                           disabled={reindexingDocs.has(doc.id)}
-                          className="p-1.5 rounded hover:bg-blue-500/10 disabled:opacity-50"
+                          className="p-1.5 rounded hover:bg-blue-100 dark:hover:bg-blue-500/10 disabled:opacity-50"
                           title="Reindex with updated categories"
                         >
                           {reindexingDocs.has(doc.id) ? (
-                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+                            <Loader2 className="w-4 h-4 text-blue-600 dark:text-blue-400 animate-spin" />
                           ) : (
-                            <RefreshCw className="w-4 h-4 text-blue-400" />
+                            <RefreshCw className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                           )}
                         </button>
-                        <button onClick={() => handleDeleteDocument(doc.id, doc.original_filename)} className="p-1.5 hover:bg-red-500/10 rounded">
-                          <Trash2 className="w-4 h-4 text-red-400" />
+                        <button onClick={() => handleDeleteDocument(doc.id, doc.original_filename)} className="p-1.5 hover:bg-red-100 dark:hover:bg-red-500/10 rounded">
+                          <Trash2 className="w-4 h-4 text-red-600 dark:text-red-400" />
                         </button>
                       </div>
                     </div>
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between gap-2 items-start">
-                        <span className="text-slate-400 shrink-0">Document type</span>
-                        <span className="text-right text-violet-300 font-medium text-xs leading-snug max-w-[65%]" title={doc.document_type}>
+                        <span className="text-gray-600 dark:text-slate-400 shrink-0">Document type</span>
+                        <span className="text-right text-violet-800 dark:text-violet-300 font-medium text-xs leading-snug max-w-[65%]" title={doc.document_type}>
                           {metadataOptions?.document_types.find((d) => d.value === doc.document_type)?.label ?? doc.document_type}
                         </span>
                       </div>
                       <div className="flex justify-between gap-2 items-start">
-                        <span className="text-slate-400 shrink-0">Sub-category</span>
-                        <span className="text-right text-amber-200/90 text-xs font-medium max-w-[65%]" title={doc.category}>
+                        <span className="text-gray-600 dark:text-slate-400 shrink-0">Sub-category</span>
+                        <span className="text-right text-amber-900 dark:text-amber-200/90 text-xs font-medium max-w-[65%]" title={doc.category}>
                           {metadataOptions?.categories.find((c) => c.value === doc.category)?.label ?? doc.category}
                         </span>
                       </div>
-                      <div className="flex justify-between"><span className="text-slate-400">State</span><span className="text-blue-400">{doc.state}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Pages</span><span className="text-white">{doc.total_pages}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Vectors</span><span className="text-green-400">{doc.total_vectors}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-400">Size</span><span className="text-white">{doc.file_size_kb.toFixed(1)} KB</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">State</span><span className="text-blue-700 dark:text-blue-400 font-medium">{doc.state}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Pages</span><span className="text-gray-900 dark:text-white">{doc.total_pages}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Vectors</span><span className="text-green-700 dark:text-green-400 font-medium">{doc.total_vectors}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-600 dark:text-slate-400">Size</span><span className="text-gray-900 dark:text-white">{doc.file_size_kb.toFixed(1)} KB</span></div>
                     </div>
-                    <div className="mt-3 pt-3 border-t border-slate-600 flex items-center justify-between">
-                      <span className={`text-xs px-2 py-1 rounded ${
-                        doc.index_status === 'indexed' ? 'bg-green-500/10 text-green-400' :
-                        doc.index_status === 'deleted' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'
+                    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-600 flex items-center justify-between">
+                      <span className={`text-xs px-2 py-1 rounded font-medium ${
+                        doc.index_status === 'indexed' ? 'bg-green-100 text-green-800 dark:bg-green-500/10 dark:text-green-400' :
+                        doc.index_status === 'deleted' ? 'bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400' : 'bg-yellow-100 text-yellow-900 dark:bg-yellow-500/10 dark:text-yellow-400'
                       }`}>{doc.index_status}</span>
-                      <span className="text-slate-500 text-xs">{new Date(doc.indexed_at).toLocaleDateString()}</span>
+                      <span className="text-gray-500 dark:text-slate-500 text-xs">{new Date(doc.indexed_at).toLocaleDateString()}</span>
                     </div>
                   </div>
                 ))
                 )}
                 {!docsLoading && documents.length === 0 && (
                   <div className="col-span-full py-12 text-center">
-                    <Layers className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                    <p className="text-slate-400">No documents indexed yet</p>
+                    <Layers className="w-12 h-12 text-gray-400 dark:text-slate-600 mx-auto mb-3" />
+                    <p className="text-gray-600 dark:text-slate-400">No documents indexed yet</p>
                   </div>
                 )}
               </div>
 
               {documents.length > 0 && (
-                <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
-                  <p className="text-sm text-slate-400">{docsTotal} documents</p>
+                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-slate-700">
+                  <p className="text-sm text-gray-600 dark:text-slate-400">{docsTotal} documents</p>
                   <div className="flex gap-2">
                     <button onClick={() => setDocsPage(p => Math.max(1, p - 1))} disabled={docsPage === 1}
-                      className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                      <ChevronLeft className="w-4 h-4 text-white" />
+                      className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                      <ChevronLeft className="w-4 h-4 text-gray-800 dark:text-white" />
                     </button>
                     <button onClick={() => setDocsPage(p => Math.min(docsTotalPages, p + 1))} disabled={docsPage === docsTotalPages}
-                      className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                      <ChevronRight className="w-4 h-4 text-white" />
+                      className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                      <ChevronRight className="w-4 h-4 text-gray-800 dark:text-white" />
                     </button>
                   </div>
                 </div>
@@ -1845,49 +1931,49 @@ export default function AdminPage() {
               {faqsLoading && !faqStats ? (
                 <>
                   {[1, 2, 3, 4].map((i) => (
-                    <div key={i} className="bg-slate-800/50 rounded-xl border border-slate-700 p-4 animate-pulse">
-                      <div className="h-4 bg-slate-700 rounded w-20 mb-2"></div>
-                      <div className="h-8 bg-slate-700 rounded w-12"></div>
+                    <div key={i} className="bg-white dark:bg-slate-800/50 rounded-xl border border-gray-200 dark:border-slate-700 p-4 animate-pulse">
+                      <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-20 mb-2"></div>
+                      <div className="h-8 bg-gray-200 dark:bg-slate-700 rounded w-12"></div>
                     </div>
                   ))}
                 </>
               ) : (
                 <>
-                  <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-4">
-                    <p className="text-slate-400 text-sm">Total FAQs</p>
-                    <p className="text-2xl font-bold text-white">{faqStats?.total || 0}</p>
+                  <div className="bg-white dark:bg-slate-800/50 rounded-xl border border-gray-200 dark:border-slate-700 p-4 shadow-sm dark:shadow-none">
+                    <p className="text-gray-500 dark:text-slate-400 text-sm">Total FAQs</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{faqStats?.total || 0}</p>
                   </div>
-                  <div className="bg-orange-500/10 rounded-xl border border-orange-500/20 p-4">
-                    <p className="text-orange-400 text-sm">Pending Review</p>
-                    <p className="text-2xl font-bold text-orange-400">{faqStats?.pending_review || 0}</p>
+                  <div className="bg-orange-50 dark:bg-orange-500/10 rounded-xl border border-orange-200 dark:border-orange-500/20 p-4">
+                    <p className="text-orange-800 dark:text-orange-400 text-sm font-medium">Pending Review</p>
+                    <p className="text-2xl font-bold text-orange-700 dark:text-orange-400">{faqStats?.pending_review || 0}</p>
                   </div>
-                  <div className="bg-green-500/10 rounded-xl border border-green-500/20 p-4">
-                    <p className="text-green-400 text-sm">Approved</p>
-                    <p className="text-2xl font-bold text-green-400">{faqStats?.approved || 0}</p>
+                  <div className="bg-green-50 dark:bg-green-500/10 rounded-xl border border-green-200 dark:border-green-500/20 p-4">
+                    <p className="text-green-800 dark:text-green-400 text-sm font-medium">Approved</p>
+                    <p className="text-2xl font-bold text-green-700 dark:text-green-400">{faqStats?.approved || 0}</p>
                   </div>
-                  <div className="bg-red-500/10 rounded-xl border border-red-500/20 p-4">
-                    <p className="text-red-400 text-sm">Rejected</p>
-                    <p className="text-2xl font-bold text-red-400">{faqStats?.rejected || 0}</p>
+                  <div className="bg-red-50 dark:bg-red-500/10 rounded-xl border border-red-200 dark:border-red-500/20 p-4">
+                    <p className="text-red-800 dark:text-red-400 text-sm font-medium">Rejected</p>
+                    <p className="text-2xl font-bold text-red-700 dark:text-red-400">{faqStats?.rejected || 0}</p>
                   </div>
                 </>
               )}
             </div>
 
             {/* Actions & Filters */}
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-4">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-4 shadow-sm dark:shadow-none">
               <div className="flex flex-wrap gap-4 items-center">
                 <div className="flex-1 min-w-[200px] relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-slate-400" />
                   <input
                     type="text"
                     placeholder="Search FAQs..."
                     value={faqsSearch}
                     onChange={(e) => { setFaqsSearch(e.target.value); setFaqsPage(1); }}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400"
                   />
                 </div>
                 <select value={faqsStatusFilter} onChange={(e) => { setFaqsStatusFilter(e.target.value); setFaqsPage(1); }}
-                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                  className="px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white">
                   <option value="">All Status</option>
                   <option value="pending">Pending</option>
                   <option value="approved">Approved</option>
@@ -1902,7 +1988,7 @@ export default function AdminPage() {
                 </button>
                 <button
                   onClick={() => setShowBulkUpload(true)}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg"
+                  className="flex items-center gap-2 px-4 py-2.5 bg-gray-200 hover:bg-gray-300 text-gray-900 rounded-lg dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-white"
                 >
                   <FileUp className="w-4 h-4" /> Bulk Upload
                 </button>
@@ -1915,42 +2001,42 @@ export default function AdminPage() {
                 // Skeleton loading for FAQ cards
                 <>
                   {[1, 2, 3].map((i) => (
-                    <div key={i} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5 animate-pulse">
+                    <div key={i} className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-5 animate-pulse">
                       <div className="flex items-center gap-2 mb-3">
-                        <div className="h-5 bg-slate-700 rounded-full w-16"></div>
-                        <div className="h-5 bg-slate-700 rounded-full w-20"></div>
+                        <div className="h-5 bg-gray-200 dark:bg-slate-700 rounded-full w-16"></div>
+                        <div className="h-5 bg-gray-200 dark:bg-slate-700 rounded-full w-20"></div>
                       </div>
-                      <div className="h-5 bg-slate-700 rounded w-3/4 mb-2"></div>
-                      <div className="h-4 bg-slate-700 rounded w-full mb-1"></div>
-                      <div className="h-4 bg-slate-700 rounded w-2/3"></div>
+                      <div className="h-5 bg-gray-200 dark:bg-slate-700 rounded w-3/4 mb-2"></div>
+                      <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full mb-1"></div>
+                      <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-2/3"></div>
                     </div>
                   ))}
                 </>
               ) : (
                 faqs.map((faq) => (
-                <div key={faq.id} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5 hover:border-slate-600">
+                <div key={faq.id} className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-5 hover:border-gray-300 dark:hover:border-slate-600 shadow-sm dark:shadow-none">
                   <div className="flex items-start justify-between gap-4 mb-3">
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className={`px-2 py-0.5 text-xs rounded-full ${
-                          faq.status === 'pending' ? 'bg-orange-500/10 text-orange-400' :
-                          faq.status === 'approved' || faq.status === 'modified' ? 'bg-green-500/10 text-green-400' :
-                          'bg-red-500/10 text-red-400'
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
+                        <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${
+                          faq.status === 'pending' ? 'bg-orange-100 text-orange-800 dark:bg-orange-500/10 dark:text-orange-400' :
+                          faq.status === 'approved' || faq.status === 'modified' ? 'bg-green-100 text-green-800 dark:bg-green-500/10 dark:text-green-400' :
+                          'bg-red-100 text-red-800 dark:bg-red-500/10 dark:text-red-400'
                         }`}>
                           {faq.status}
                         </span>
                         {faq.detected_state && (
-                          <span className="px-2 py-0.5 text-xs bg-blue-500/10 text-blue-400 rounded-full">{faq.detected_state}</span>
+                          <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400 rounded-full">{faq.detected_state}</span>
                         )}
                         {faq.detected_category && (
-                          <span className="px-2 py-0.5 text-xs bg-purple-500/10 text-purple-400 rounded-full">{faq.detected_category}</span>
+                          <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-800 dark:bg-purple-500/10 dark:text-purple-400 rounded-full">{faq.detected_category}</span>
                         )}
                         {faq.occurrence_count > 1 && (
-                          <span className="text-xs text-slate-500">Asked {faq.occurrence_count}x</span>
+                          <span className="text-xs text-gray-500 dark:text-slate-500">Asked {faq.occurrence_count}x</span>
                         )}
                       </div>
-                      <p className="text-white font-medium mb-2">{faq.question}</p>
-                      <p className="text-slate-400 text-sm line-clamp-2">
+                      <p className="text-gray-900 dark:text-white font-medium mb-2">{faq.question}</p>
+                      <p className="text-gray-600 dark:text-slate-400 text-sm line-clamp-2">
                         {faq.modified_answer || faq.original_answer}
                       </p>
                     </div>
@@ -1960,67 +2046,67 @@ export default function AdminPage() {
                           <button
                             onClick={() => handleReviewFaq(faq.id, 'approve')}
                             disabled={reviewingFaqAction?.id === faq.id}
-                            className="p-2 hover:bg-green-500/10 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="p-2 hover:bg-green-50 dark:hover:bg-green-500/10 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                             title="Approve & Vectorize"
                           >
                             {reviewingFaqAction?.id === faq.id && reviewingFaqAction?.action === 'approve' ? (
-                              <Loader2 className="w-4 h-4 text-green-400 animate-spin" />
+                              <Loader2 className="w-4 h-4 text-green-600 dark:text-green-400 animate-spin" />
                             ) : (
-                              <Check className="w-4 h-4 text-green-400" />
+                              <Check className="w-4 h-4 text-green-600 dark:text-green-400" />
                             )}
                           </button>
                           <button
                             onClick={() => setReviewingFaq(faq)}
                             disabled={reviewingFaqAction?.id === faq.id}
-                            className="p-2 hover:bg-blue-500/10 rounded-lg disabled:opacity-50"
+                            className="p-2 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg disabled:opacity-50"
                             title="Review & Modify"
                           >
-                            <Edit2 className="w-4 h-4 text-blue-400" />
+                            <Edit2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                           </button>
                           <button
                             onClick={() => handleReviewFaq(faq.id, 'reject')}
                             disabled={reviewingFaqAction?.id === faq.id}
-                            className="p-2 hover:bg-red-500/10 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="p-2 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                             title="Reject"
                           >
                             {reviewingFaqAction?.id === faq.id && reviewingFaqAction?.action === 'reject' ? (
-                              <Loader2 className="w-4 h-4 text-red-400 animate-spin" />
+                              <Loader2 className="w-4 h-4 text-red-600 dark:text-red-400 animate-spin" />
                             ) : (
-                              <XCircle className="w-4 h-4 text-red-400" />
+                              <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
                             )}
                           </button>
                         </>
                       )}
                       <button
                         onClick={() => setReviewingFaq(faq)}
-                        className="p-2 hover:bg-slate-700 rounded-lg"
+                        className="p-2 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg"
                         title="View Details"
                       >
-                        <Eye className="w-4 h-4 text-slate-400" />
+                        <Eye className="w-4 h-4 text-gray-500 dark:text-slate-400" />
                       </button>
                       <button
                         onClick={() => handleDeleteFaq(faq.id)}
-                        className="p-2 hover:bg-red-500/10 rounded-lg"
+                        className="p-2 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg"
                         title="Delete"
                       >
-                        <Trash2 className="w-4 h-4 text-red-400" />
+                        <Trash2 className="w-4 h-4 text-red-600 dark:text-red-400" />
                       </button>
                     </div>
                   </div>
-                  <div className="flex items-center justify-between text-xs text-slate-500 pt-3 border-t border-slate-700">
+                  <div className="flex items-center justify-between text-xs text-gray-500 dark:text-slate-500 pt-3 border-t border-gray-200 dark:border-slate-700">
                     <span>Created: {new Date(faq.created_at).toLocaleDateString()}</span>
                     {faq.reviewed_at && <span>Reviewed: {new Date(faq.reviewed_at).toLocaleDateString()}</span>}
-                    {faq.faq_vector_id && <span className="text-green-400">✓ Vectorized</span>}
+                    {faq.faq_vector_id && <span className="text-green-700 dark:text-green-400 font-medium">✓ Vectorized</span>}
                   </div>
                 </div>
               ))
               )}
               
               {!faqsLoading && faqs.length === 0 && (
-                <div className="bg-slate-800/50 rounded-2xl border border-slate-700 py-12 text-center">
-                  <MessageSquare className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                  <p className="text-slate-400">No FAQs found</p>
-                  <p className="text-slate-500 text-sm mt-1">Create FAQs manually or wait for auto-learning from chat</p>
+                <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 py-12 text-center">
+                  <MessageSquare className="w-12 h-12 text-gray-400 dark:text-slate-600 mx-auto mb-3" />
+                  <p className="text-gray-600 dark:text-slate-400">No FAQs found</p>
+                  <p className="text-gray-500 dark:text-slate-500 text-sm mt-1">Create FAQs manually or wait for auto-learning from chat</p>
                 </div>
               )}
             </div>
@@ -2028,16 +2114,16 @@ export default function AdminPage() {
             {/* Pagination */}
             {faqs.length > 0 && (
               <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-400">{faqsTotal} FAQs total</p>
+                <p className="text-sm text-gray-600 dark:text-slate-400">{faqsTotal} FAQs total</p>
                 <div className="flex gap-2">
                   <button onClick={() => setFaqsPage(p => Math.max(1, p - 1))} disabled={faqsPage === 1}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                    <ChevronLeft className="w-4 h-4 text-white" />
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                    <ChevronLeft className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
-                  <span className="px-3 py-2 text-slate-400">Page {faqsPage} of {faqsTotalPages || 1}</span>
+                  <span className="px-3 py-2 text-gray-600 dark:text-slate-400">Page {faqsPage} of {faqsTotalPages || 1}</span>
                   <button onClick={() => setFaqsPage(p => Math.min(faqsTotalPages || 1, p + 1))} disabled={faqsPage >= (faqsTotalPages || 1)}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg">
-                    <ChevronRight className="w-4 h-4 text-white" />
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg">
+                    <ChevronRight className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
                 </div>
               </div>
@@ -2049,28 +2135,28 @@ export default function AdminPage() {
         {activeTab === 'queries' && (
           <div className="space-y-6">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-4">
-                <p className="text-slate-400 text-sm">Total Queries</p>
-                <p className="text-2xl font-bold text-white">{supportTotal}</p>
+              <div className="bg-white dark:bg-slate-800/50 rounded-xl border border-gray-200 dark:border-slate-700 p-4 shadow-sm dark:shadow-none">
+                <p className="text-gray-500 dark:text-slate-400 text-sm">Total Queries</p>
+                <p className="text-2xl font-bold text-gray-900 dark:text-white">{supportTotal}</p>
               </div>
-              <div className="bg-orange-500/10 rounded-xl border border-orange-500/20 p-4">
-                <p className="text-orange-400 text-sm">Pending</p>
-                <p className="text-2xl font-bold text-orange-400">{supportQueries.filter((q) => q.status === 'pending').length}</p>
+              <div className="bg-orange-50 dark:bg-orange-500/10 rounded-xl border border-orange-200 dark:border-orange-500/20 p-4">
+                <p className="text-orange-800 dark:text-orange-400 text-sm font-medium">Pending</p>
+                <p className="text-2xl font-bold text-orange-700 dark:text-orange-400">{supportQueries.filter((q) => q.status === 'pending').length}</p>
               </div>
-              <div className="bg-blue-500/10 rounded-xl border border-blue-500/20 p-4">
-                <p className="text-blue-400 text-sm">In Progress</p>
-                <p className="text-2xl font-bold text-blue-400">{supportQueries.filter((q) => q.status === 'in_progress').length}</p>
+              <div className="bg-blue-50 dark:bg-blue-500/10 rounded-xl border border-blue-200 dark:border-blue-500/20 p-4">
+                <p className="text-blue-800 dark:text-blue-400 text-sm font-medium">In Progress</p>
+                <p className="text-2xl font-bold text-blue-700 dark:text-blue-400">{supportQueries.filter((q) => q.status === 'in_progress').length}</p>
               </div>
-              <div className="bg-green-500/10 rounded-xl border border-green-500/20 p-4">
-                <p className="text-green-400 text-sm">Answered</p>
-                <p className="text-2xl font-bold text-green-400">{supportQueries.filter((q) => q.status === 'answered').length}</p>
+              <div className="bg-green-50 dark:bg-green-500/10 rounded-xl border border-green-200 dark:border-green-500/20 p-4">
+                <p className="text-green-800 dark:text-green-400 text-sm font-medium">Answered</p>
+                <p className="text-2xl font-bold text-green-700 dark:text-green-400">{supportQueries.filter((q) => q.status === 'answered').length}</p>
               </div>
             </div>
 
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-4">
+            <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-4 shadow-sm dark:shadow-none">
               <div className="flex flex-wrap gap-4 items-center">
                 <div className="flex-1 min-w-[220px] relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-slate-400" />
                   <input
                     type="text"
                     placeholder="Search by student/phone/subject..."
@@ -2079,7 +2165,7 @@ export default function AdminPage() {
                       setSupportSearch(e.target.value);
                       setSupportPage(1);
                     }}
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400"
                   />
                 </div>
                 <select
@@ -2088,7 +2174,7 @@ export default function AdminPage() {
                     setSupportStatusFilter(e.target.value);
                     setSupportPage(1);
                   }}
-                  className="px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  className="px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/50 dark:border-slate-600 dark:text-white"
                 >
                   <option value="unreplied">Unreplied (Default)</option>
                   <option value="all">All</option>
@@ -2104,10 +2190,10 @@ export default function AdminPage() {
               {supportLoading && supportQueries.length === 0 ? (
                 <>
                   {[1, 2].map((i) => (
-                    <div key={i} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5 animate-pulse">
-                      <div className="h-5 bg-slate-700 rounded w-1/3 mb-3"></div>
-                      <div className="h-4 bg-slate-700 rounded w-full mb-2"></div>
-                      <div className="h-4 bg-slate-700 rounded w-2/3"></div>
+                    <div key={i} className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-5 animate-pulse">
+                      <div className="h-5 bg-gray-200 dark:bg-slate-700 rounded w-1/3 mb-3"></div>
+                      <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-full mb-2"></div>
+                      <div className="h-4 bg-gray-200 dark:bg-slate-700 rounded w-2/3"></div>
                     </div>
                   ))}
                 </>
@@ -2121,23 +2207,23 @@ export default function AdminPage() {
                   const answeredByLabel = responderName || assigneeName;
                   const closedByLabel = assigneeName || responderName;
                   return (
-                    <div key={q.id} className="bg-slate-800/50 rounded-2xl border border-slate-700 p-5">
+                    <div key={q.id} className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 p-5 shadow-sm dark:shadow-none">
                       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                         <div>
-                          <p className="text-white font-semibold">{q.subject}</p>
-                          <p className="text-xs text-slate-400 mt-1">
+                          <p className="text-gray-900 dark:text-white font-semibold">{q.subject}</p>
+                          <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
                             {q.student_name} • {q.phone}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className={`px-2 py-1 text-xs rounded-full ${
+                          <span className={`px-2 py-1 text-xs rounded-full font-medium ${
                             q.status === 'pending'
-                              ? 'bg-orange-500/10 text-orange-400'
+                              ? 'bg-orange-100 text-orange-800 dark:bg-orange-500/10 dark:text-orange-400'
                               : q.status === 'in_progress'
-                              ? 'bg-blue-500/10 text-blue-400'
+                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-500/10 dark:text-blue-400'
                               : q.status === 'answered'
-                              ? 'bg-green-500/10 text-green-400'
-                              : 'bg-slate-600/30 text-slate-300'
+                              ? 'bg-green-100 text-green-800 dark:bg-green-500/10 dark:text-green-400'
+                              : 'bg-gray-200 text-gray-700 dark:bg-slate-600/30 dark:text-slate-300'
                           }`}>
                             {q.status}
                           </span>
@@ -2149,7 +2235,7 @@ export default function AdminPage() {
                                 e.target.value as 'pending' | 'in_progress' | 'answered' | 'closed'
                               )
                             }
-                            className="px-2 py-1 bg-slate-700 border border-slate-600 rounded text-xs text-white"
+                            className="px-2 py-1 bg-white border border-gray-300 rounded text-xs text-gray-900 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                             disabled={Boolean(supportActionLoading && supportActionLoading.id === q.id)}
                           >
                             <option value="pending">pending</option>
@@ -2160,14 +2246,14 @@ export default function AdminPage() {
                         </div>
                       </div>
 
-                      <p className="text-sm text-slate-300 whitespace-pre-wrap">{q.message}</p>
-                      {q.email && <p className="text-xs text-slate-500 mt-2">Email: {q.email}</p>}
+                      <p className="text-sm text-gray-700 dark:text-slate-300 whitespace-pre-wrap">{q.message}</p>
+                      {q.email && <p className="text-xs text-gray-500 dark:text-slate-500 mt-2">Email: {q.email}</p>}
 
                       {latestReply && (
-                        <div className="mt-3 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                          <p className="text-xs text-blue-300 mb-1">Latest reply</p>
-                          <p className="text-sm text-blue-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
-                          <p className="text-xs text-blue-300/70 mt-1">
+                        <div className="mt-3 p-3 rounded-lg bg-blue-50 border border-blue-200 dark:bg-blue-500/10 dark:border-blue-500/20">
+                          <p className="text-xs text-blue-800 dark:text-blue-300 mb-1 font-medium">Latest reply</p>
+                          <p className="text-sm text-blue-900 dark:text-blue-100 whitespace-pre-wrap">{latestReply.reply_text}</p>
+                          <p className="text-xs text-blue-700/80 dark:text-blue-300/70 mt-1">
                             Email sent: {latestReply.sent_email ? 'yes' : 'no'} • SMS sent: {latestReply.sent_sms ? 'yes' : 'no'}
                           </p>
                         </div>
@@ -2175,7 +2261,7 @@ export default function AdminPage() {
 
                       <div className="mt-3">
                         {alreadyReplied ? (
-                          <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-sm">
+                          <div className="p-2 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-300">
                             Reply already sent. Additional replies are disabled.
                           </div>
                         ) : (
@@ -2187,7 +2273,7 @@ export default function AdminPage() {
                               }
                               rows={3}
                               placeholder="Write reply to student..."
-                              className="w-full p-3 rounded-lg bg-slate-700/50 border border-slate-600 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="w-full p-3 rounded-lg bg-gray-50 border border-gray-300 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-slate-700/50 dark:border-slate-600 dark:text-white dark:placeholder-slate-400"
                             />
                             <div className="mt-2 flex justify-end">
                               <button
@@ -2202,7 +2288,7 @@ export default function AdminPage() {
                         )}
                       </div>
 
-                      <p className="text-xs text-slate-500 mt-3">
+                      <p className="text-xs text-gray-500 dark:text-slate-500 mt-3">
                         Created: {new Date(q.created_at).toLocaleString()} {q.answered_at ? `• Answered: ${new Date(q.answered_at).toLocaleString()}` : ''}
                         {q.status === 'answered' && answeredByLabel ? ` • Answered by ${answeredByLabel}` : ''}
                         {q.status === 'closed' && closedByLabel ? ` • Closed by ${closedByLabel}` : ''}
@@ -2213,33 +2299,33 @@ export default function AdminPage() {
               )}
 
               {!supportLoading && supportQueries.length === 0 && (
-                <div className="bg-slate-800/50 rounded-2xl border border-slate-700 py-12 text-center">
-                  <ShieldAlert className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                  <p className="text-slate-400">No support queries found</p>
+                <div className="bg-white dark:bg-slate-800/50 rounded-2xl border border-gray-200 dark:border-slate-700 py-12 text-center">
+                  <ShieldAlert className="w-12 h-12 text-gray-400 dark:text-slate-600 mx-auto mb-3" />
+                  <p className="text-gray-600 dark:text-slate-400">No support queries found</p>
                 </div>
               )}
             </div>
 
             {supportQueries.length > 0 && (
               <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-400">{supportTotal} support queries</p>
+                <p className="text-sm text-gray-600 dark:text-slate-400">{supportTotal} support queries</p>
                 <div className="flex gap-2">
                   <button
                     onClick={() => setSupportPage((p) => Math.max(1, p - 1))}
                     disabled={supportPage === 1}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg"
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg"
                   >
-                    <ChevronLeft className="w-4 h-4 text-white" />
+                    <ChevronLeft className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
-                  <span className="px-3 py-2 text-slate-400">
+                  <span className="px-3 py-2 text-gray-600 dark:text-slate-400">
                     Page {supportPage} of {supportTotalPages || 1}
                   </span>
                   <button
                     onClick={() => setSupportPage((p) => Math.min(supportTotalPages || 1, p + 1))}
                     disabled={supportPage >= (supportTotalPages || 1)}
-                    className="p-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg"
+                    className="p-2 bg-gray-200 hover:bg-gray-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 rounded-lg"
                   >
-                    <ChevronRight className="w-4 h-4 text-white" />
+                    <ChevronRight className="w-4 h-4 text-gray-800 dark:text-white" />
                   </button>
                 </div>
               </div>
@@ -2250,9 +2336,9 @@ export default function AdminPage() {
         {/* Cutoffs Tab */}
         {activeTab === 'cutoffs' && (
           <div className="space-y-6">
-            <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-5">
-              <h3 className="text-white font-semibold text-lg mb-2">NEET UG 2025 Cutoff Excel Upload</h3>
-              <p className="text-slate-400 text-sm mb-4">
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 p-5 shadow-sm dark:shadow-none">
+              <h3 className="text-gray-900 dark:text-white font-semibold text-lg mb-2">NEET UG 2025 Cutoff Excel Upload</h3>
+              <p className="text-gray-600 dark:text-slate-400 text-sm mb-4">
                 Upload a workbook with state sheets + MCC. You can upload full workbook or target a specific state sheet.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -2260,14 +2346,14 @@ export default function AdminPage() {
                   type="file"
                   accept=".xlsx"
                   onChange={(e) => setCutoffExcelFile(e.target.files?.[0] || null)}
-                  className="px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-slate-200"
+                  className="px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 text-sm file:mr-2 file:rounded file:border-0 file:bg-blue-50 file:px-2 file:py-1 dark:bg-slate-700/60 dark:border-slate-600 dark:text-slate-200"
                 />
                 <input
                   type="text"
                   placeholder="Optional state (e.g. Gujarat)"
                   value={cutoffUploadState}
                   onChange={(e) => setCutoffUploadState(e.target.value)}
-                  className="px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-white"
+                  className="px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 dark:bg-slate-700/60 dark:border-slate-600 dark:text-white dark:placeholder-slate-400"
                 />
                 <button
                   onClick={handleCutoffUpload}
@@ -2281,16 +2367,16 @@ export default function AdminPage() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
-                <p className="text-slate-400 text-sm">Total Rows</p>
-                <p className="text-2xl font-bold text-white">{cutoffSummary?.total_rows || 0}</p>
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 p-4 shadow-sm dark:shadow-none">
+                <p className="text-gray-500 dark:text-slate-400 text-sm">Total Rows</p>
+                <p className="text-2xl font-bold text-gray-900 dark:text-white">{cutoffSummary?.total_rows || 0}</p>
               </div>
-              <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-4">
-                <p className="text-slate-400 text-sm">States / Sheets Loaded</p>
-                <p className="text-2xl font-bold text-white">{cutoffSummary?.total_states || 0}</p>
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 p-4 shadow-sm dark:shadow-none">
+                <p className="text-gray-500 dark:text-slate-400 text-sm">States / Sheets Loaded</p>
+                <p className="text-2xl font-bold text-gray-900 dark:text-white">{cutoffSummary?.total_states || 0}</p>
               </div>
-              <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4">
-                <p className="text-slate-300 text-sm mb-2">Danger Zone</p>
+              <div className="rounded-2xl border border-red-300 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 p-4">
+                <p className="text-red-900 dark:text-slate-300 text-sm font-medium mb-2">Danger Zone</p>
                 <button
                   onClick={() => handleDeleteCutoffData()}
                   disabled={cutoffDeleteLoading === 'ALL'}
@@ -2302,12 +2388,12 @@ export default function AdminPage() {
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-5">
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 p-5 shadow-sm dark:shadow-none">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-white font-semibold">State-wise Data Distribution</h3>
+                <h3 className="text-gray-900 dark:text-white font-semibold">State-wise Data Distribution</h3>
                 <button
                   onClick={fetchCutoffSummary}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm flex items-center gap-2"
+                  className="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-900 rounded-lg text-sm flex items-center gap-2 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200"
                 >
                   {cutoffDataLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                   Refresh
@@ -2315,10 +2401,10 @@ export default function AdminPage() {
               </div>
               <div className="space-y-2 max-h-80 overflow-auto">
                 {(cutoffSummary?.states || []).map((item) => (
-                  <div key={item.state} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2">
+                  <div key={item.state} className="flex items-center justify-between rounded-lg border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-900/40 px-3 py-2">
                     <div>
-                      <p className="text-white text-sm font-medium">{item.state}</p>
-                      <p className="text-slate-400 text-xs">{item.rows.toLocaleString()} rows</p>
+                      <p className="text-gray-900 dark:text-white text-sm font-medium">{item.state}</p>
+                      <p className="text-gray-500 dark:text-slate-400 text-xs">{item.rows.toLocaleString()} rows</p>
                     </div>
                     <button
                       onClick={() => handleDeleteCutoffData(item.state)}
@@ -2331,7 +2417,7 @@ export default function AdminPage() {
                   </div>
                 ))}
                 {!cutoffDataLoading && (!cutoffSummary || cutoffSummary.states.length === 0) && (
-                  <p className="text-slate-400 text-sm">No cutoff rows found yet.</p>
+                  <p className="text-gray-500 dark:text-slate-400 text-sm">No cutoff rows found yet.</p>
                 )}
               </div>
             </div>
@@ -2357,13 +2443,13 @@ export default function AdminPage() {
                     )}
                   </div>
                   <div>
-                    <h3 className="text-white font-semibold flex items-center gap-2">
+                    <h3 className="text-gray-900 dark:text-white font-semibold flex items-center gap-2">
                       FAQ Auto-Learning
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${autoLearningEnabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                      <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${autoLearningEnabled ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-400'}`}>
                         {autoLearningEnabled ? 'Active' : 'Paused'}
                       </span>
                     </h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
+                    <p className="text-gray-600 dark:text-slate-400 text-sm mt-0.5">
                       {autoLearningEnabled
                         ? 'System captures Q&A pairs from chat for FAQ review'
                         : 'Auto-capture is paused - no new FAQs will be queued'}
@@ -2372,7 +2458,7 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   {autoLearningUpdatedAt && (
-                    <span className="text-xs text-slate-500 hidden md:block">
+                    <span className="text-xs text-gray-500 dark:text-slate-500 hidden md:block">
                       Last updated: {new Date(autoLearningUpdatedAt).toLocaleDateString()}
                       {autoLearningUpdatedBy ? ` • Updated by ${getAdminDisplayName(autoLearningUpdatedBy)}` : ''}
                     </span>
@@ -2380,7 +2466,7 @@ export default function AdminPage() {
                   <button
                     onClick={toggleAutoLearning}
                     disabled={autoLearningLoading}
-                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
                       autoLearningEnabled ? 'bg-emerald-500 focus:ring-emerald-500' : 'bg-slate-600 focus:ring-slate-500'
                     }`}
                   >
@@ -2405,13 +2491,13 @@ export default function AdminPage() {
                     <Globe className={`w-6 h-6 ${webFallbackEnabled ? 'text-indigo-400' : 'text-slate-400'}`} />
                   </div>
                   <div>
-                    <h3 className="text-white font-semibold flex items-center gap-2">
+                    <h3 className="text-gray-900 dark:text-white font-semibold flex items-center gap-2">
                       Web Search Fallback
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${webFallbackEnabled ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                      <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${webFallbackEnabled ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-400' : 'bg-gray-200 text-gray-700 dark:bg-slate-500/20 dark:text-slate-400'}`}>
                         {webFallbackEnabled ? 'Enabled' : 'Disabled'}
                       </span>
                     </h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
+                    <p className="text-gray-600 dark:text-slate-400 text-sm mt-0.5">
                       {webFallbackEnabled
                         ? 'If RAG has no result for NEET queries, system will try web search as fallback'
                         : 'System uses RAG-only mode and returns the standard "not in database" message'}
@@ -2420,7 +2506,7 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   {webFallbackUpdatedAt && (
-                    <span className="text-xs text-slate-500 hidden md:block">
+                    <span className="text-xs text-gray-500 dark:text-slate-500 hidden md:block">
                       Last updated: {new Date(webFallbackUpdatedAt).toLocaleDateString()}
                       {webFallbackUpdatedBy ? ` • Updated by ${getAdminDisplayName(webFallbackUpdatedBy)}` : ''}
                     </span>
@@ -2428,7 +2514,7 @@ export default function AdminPage() {
                   <button
                     onClick={toggleWebFallback}
                     disabled={webFallbackLoading}
-                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
                       webFallbackEnabled ? 'bg-indigo-500 focus:ring-indigo-500' : 'bg-slate-600 focus:ring-slate-500'
                     }`}
                   >
@@ -2449,12 +2535,12 @@ export default function AdminPage() {
                     <Database className="w-6 h-6 text-blue-400" />
                   </div>
                   <div>
-                    <h3 className="text-white font-semibold">Cutoff College Result Limit</h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
+                    <h3 className="text-gray-900 dark:text-white font-semibold">Cutoff College Result Limit</h3>
+                    <p className="text-gray-600 dark:text-slate-400 text-sm mt-0.5">
                       Controls how many cutoff rows are returned and shown in student chat.
                     </p>
                     {cutoffResultLimitUpdatedAt && (
-                      <p className="text-xs text-slate-500 mt-1">
+                      <p className="text-xs text-gray-500 dark:text-slate-500 mt-1">
                         Last updated: {new Date(cutoffResultLimitUpdatedAt).toLocaleDateString()}
                         {cutoffResultLimitUpdatedBy ? ` • Updated by ${getAdminDisplayName(cutoffResultLimitUpdatedBy)}` : ''}
                       </p>
@@ -2468,7 +2554,7 @@ export default function AdminPage() {
                     max={200}
                     value={cutoffResultLimitInput}
                     onChange={(e) => setCutoffResultLimitInput(e.target.value)}
-                    className="w-28 px-3 py-2 bg-slate-700/60 border border-slate-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    className="w-28 px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none dark:bg-slate-700/60 dark:border-slate-600 dark:text-white"
                   />
                   <button
                     onClick={updateCutoffResultLimit}
@@ -2480,8 +2566,8 @@ export default function AdminPage() {
                   </button>
                 </div>
               </div>
-              <p className="text-xs text-slate-500 mt-3">
-                Current active value: <span className="text-slate-300 font-medium">{cutoffResultLimit}</span>
+              <p className="text-xs text-gray-500 dark:text-slate-500 mt-3">
+                Current active value: <span className="text-gray-800 dark:text-slate-300 font-medium">{cutoffResultLimit}</span>
               </p>
             </div>
 
@@ -2497,13 +2583,13 @@ export default function AdminPage() {
                     <FileText className={`w-6 h-6 ${chatReferencesEnabled ? 'text-green-400' : 'text-slate-400'}`} />
                   </div>
                   <div>
-                    <h3 className="text-white font-semibold flex items-center gap-2">
+                    <h3 className="text-gray-900 dark:text-white font-semibold flex items-center gap-2">
                       Chat References Visibility
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${chatReferencesEnabled ? 'bg-green-500/20 text-green-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                      <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${chatReferencesEnabled ? 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-400' : 'bg-gray-200 text-gray-700 dark:bg-slate-500/20 dark:text-slate-400'}`}>
                         {chatReferencesEnabled ? 'Visible' : 'Hidden'}
                       </span>
                     </h3>
-                    <p className="text-slate-400 text-sm mt-0.5">
+                    <p className="text-gray-600 dark:text-slate-400 text-sm mt-0.5">
                       {chatReferencesEnabled
                         ? 'Students can see verification badge and source references in chat'
                         : 'Students will not see verification badge or source references in chat'}
@@ -2512,7 +2598,7 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   {chatReferencesUpdatedAt && (
-                    <span className="text-xs text-slate-500 hidden md:block">
+                    <span className="text-xs text-gray-500 dark:text-slate-500 hidden md:block">
                       Last updated: {new Date(chatReferencesUpdatedAt).toLocaleDateString()}
                       {chatReferencesUpdatedBy ? ` • Updated by ${getAdminDisplayName(chatReferencesUpdatedBy)}` : ''}
                     </span>
@@ -2520,7 +2606,7 @@ export default function AdminPage() {
                   <button
                     onClick={toggleChatReferences}
                     disabled={chatReferencesLoading}
-                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900 disabled:opacity-50 disabled:cursor-not-allowed ${
                       chatReferencesEnabled ? 'bg-green-500 focus:ring-green-500' : 'bg-slate-600 focus:ring-slate-500'
                     }`}
                   >
@@ -2531,6 +2617,79 @@ export default function AdminPage() {
                   </button>
                 </div>
               </div>
+            </div>
+
+            {/* Daily LLM token quota (students, UTC day) */}
+            <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-r from-amber-500/10 to-orange-500/10 p-4">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div className="flex items-start gap-4">
+                  <div className="p-3 rounded-xl bg-amber-500/20">
+                    <BarChart3 className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-gray-900 dark:text-white font-semibold flex items-center gap-2 flex-wrap">
+                      Student daily AI token limit
+                      <span
+                        className={`px-2 py-0.5 text-xs rounded-full font-medium ${
+                          dailyTokenLimitEnabled ? 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-300' : 'bg-gray-200 text-gray-700 dark:bg-slate-500/20 dark:text-slate-400'
+                        }`}
+                      >
+                        {dailyTokenLimitEnabled ? 'Enforced' : 'Off'}
+                      </span>
+                    </h3>
+                    <p className="text-gray-600 dark:text-slate-400 text-sm mt-0.5">
+                      Caps total OpenAI tokens per student per UTC day. Admin accounts are exempt.
+                    </p>
+                    <p className="text-amber-900/90 dark:text-amber-200/90 text-xs mt-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200/80 dark:border-amber-500/25 px-3 py-2">
+                      <strong className="font-semibold">Enforced</strong> must be on for the limit to block chat. If it is off, usage is still recorded in the database but students are not blocked.
+                    </p>
+                    {dailyTokenUpdatedAt && (
+                      <p className="text-xs text-gray-500 dark:text-slate-500 mt-1">
+                        Settings last checked: {new Date(dailyTokenUpdatedAt).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={toggleDailyTokenLimit}
+                    disabled={dailyTokenLoading}
+                    className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-slate-900 disabled:opacity-50 ${
+                      dailyTokenLimitEnabled ? 'bg-amber-500 focus:ring-amber-500' : 'bg-slate-600 focus:ring-slate-500'
+                    }`}
+                  >
+                    <span className="sr-only">Toggle daily token limit</span>
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform duration-300 ${
+                        dailyTokenLimitEnabled ? 'translate-x-8' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1000}
+                      max={10000000}
+                      value={dailyTokenLimitInput}
+                      onChange={(e) => setDailyTokenLimitInput(e.target.value)}
+                      className="w-32 px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-amber-500 focus:outline-none dark:bg-slate-700/60 dark:border-slate-600 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={saveDailyTokenLimitValue}
+                      disabled={dailyTokenLoading}
+                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50 text-sm"
+                    >
+                      Save limit
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 dark:text-slate-500 mt-3">
+                Active value: <span className="text-gray-800 dark:text-slate-300 font-medium">{dailyTokenLimitValue.toLocaleString()}</span>{' '}
+                tokens / user / UTC day
+              </p>
             </div>
           </div>
         )}
@@ -2609,7 +2768,7 @@ function EditUserModal({ user, onClose, onSave, isSuperAdmin }: { user: User; on
             <div>
               <label className="block text-sm text-gray-500 dark:text-slate-400 mb-1">Phone</label>
               <input type="text" value={form.phone} onChange={(e) => setForm(f => ({ ...f, phone: e.target.value }))}
-                className="w-full px-4 py-2.5 bg-slate-700/50 border border-slate-600 rounded-lg text-white" />
+                className="w-full px-4 py-2.5 bg-gray-50 dark:bg-slate-700/50 border border-gray-200 dark:border-slate-600 rounded-lg text-gray-900 dark:text-white" />
             </div>
             <div>
               <label className="block text-sm text-gray-500 dark:text-slate-400 mb-1">Age</label>

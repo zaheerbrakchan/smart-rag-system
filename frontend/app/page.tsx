@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ChatWindow from '@/components/ChatWindow';
@@ -18,6 +18,8 @@ import {
   connectSupportNotificationStream,
   SupportQuery,
   SupportNotification,
+  fetchMyDailyTokenQuota,
+  type DailyTokenQuotaStatus,
 } from '@/services/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
@@ -64,6 +66,7 @@ const TRANSLATIONS: Record<
     ask: string;
     footerPowerBy: string;
     footerEnter: string;
+    quotaExceededBanner: string;
     contactSupport: string;
     mySupportUpdates: string;
     supportModalTitle: string;
@@ -115,6 +118,8 @@ const TRANSLATIONS: Record<
     ask: 'Ask',
     footerPowerBy: 'Powered by',
     footerEnter: 'Press Enter to send',
+    quotaExceededBanner:
+      'Your daily Med Assist limit has been reached. You can resume tomorrow. Thank you for using Med Assist.',
     contactSupport: 'Support',
     mySupportUpdates: 'My Queries',
     supportModalTitle: 'Send query to Get My University team',
@@ -177,6 +182,8 @@ const TRANSLATIONS: Record<
     ask: 'पूछें',
     footerPowerBy: 'संचालित द्वारा',
     footerEnter: 'भेजने के लिए Enter दबाएं',
+    quotaExceededBanner:
+      'आपकी दैनिक Med Assist सीमा पूरी हो चुकी है। आप कल फिर से जारी रख सकते हैं। Med Assist उपयोग करने के लिए धन्यवाद।',
     contactSupport: 'सहायता',
     mySupportUpdates: 'मेरे प्रश्न',
     supportModalTitle: 'Get My University टीम को प्रश्न भेजें',
@@ -239,6 +246,8 @@ const TRANSLATIONS: Record<
     ask: 'विचारा',
     footerPowerBy: 'समर्थित',
     footerEnter: 'पाठवण्यासाठी Enter दाबा',
+    quotaExceededBanner:
+      'तुमची दैनिक Med Assist मर्यादा पूर्ण झाली आहे. तुम्ही उद्या पुन्हा सुरू करू शकता. Med Assist वापरल्याबद्दल धन्यवाद.',
     contactSupport: 'सपोर्ट',
     mySupportUpdates: 'माझे प्रश्न',
     supportModalTitle: 'Get My University टीमला प्रश्न पाठवा',
@@ -320,10 +329,12 @@ export default function Home() {
   const [supportPanelLoading, setSupportPanelLoading] = useState(false);
   const [chatReferencesEnabledGlobal, setChatReferencesEnabledGlobal] = useState(true);
   const [sidebarKey, setSidebarKey] = useState(0); // To refresh sidebar
+  const [dailyQuota, setDailyQuota] = useState<DailyTokenQuotaStatus | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const conversationIdRef = useRef<number | null>(null);
   const t = TRANSLATIONS[selectedLanguage];
   const isAdminUser = user?.role === 'admin' || user?.role === 'super_admin';
+  const isChatQuotaBlocked = Boolean(dailyQuota?.blocked);
   const displayedMessages = useMemo(
     () =>
       messages.map((msg) => {
@@ -411,6 +422,20 @@ export default function Home() {
     return chatReferencesEnabledGlobal;
   };
 
+  const refreshDailyQuota = useCallback(async () => {
+    if (!token) {
+      setDailyQuota(null);
+      return;
+    }
+    try {
+      const q = await fetchMyDailyTokenQuota(token);
+      setDailyQuota(q);
+    } catch (e) {
+      console.error('Failed to load daily token quota', e);
+      setDailyQuota(null);
+    }
+  }, [token]);
+
   const loadSupportPanelData = async () => {
     if (!token) return;
     setSupportPanelLoading(true);
@@ -492,6 +517,7 @@ export default function Home() {
     if (!token) return;
     void refreshSupportNotifications();
     void refreshChatReferencesVisibility();
+    void refreshDailyQuota();
     const stream = connectSupportNotificationStream(
       token,
       (event) => {
@@ -507,15 +533,16 @@ export default function Home() {
       }
     );
     return () => stream.close();
-  }, [token]);
+  }, [token, refreshDailyQuota]);
 
   useEffect(() => {
     const onFocus = () => {
       void refreshChatReferencesVisibility();
+      void refreshDailyQuota();
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [refreshChatReferencesVisibility]);
+  }, [refreshChatReferencesVisibility, refreshDailyQuota]);
 
   const handleSendMessage = async (
     quickReply?: string,
@@ -527,6 +554,7 @@ export default function Home() {
     const pending = pendingClarification;
 
     if (isLoading) return;
+    if (dailyQuota?.blocked) return;
 
     if (!pending && quickReply) {
       const intent = resolveGuidedIntent(quickReply);
@@ -658,6 +686,9 @@ export default function Home() {
         },
         // onMeta - set retrieval origin for badge rendering
         (meta) => {
+          if (meta?.daily_token_quota) {
+            setDailyQuota(meta.daily_token_quota as DailyTokenQuotaStatus);
+          }
           const refsEnabled = meta?.chat_references_enabled;
           const origin = meta?.source_origin;
           const cutoffInterpretationLoading = meta?.cutoff_interpretation_loading;
@@ -693,6 +724,7 @@ export default function Home() {
                 : msg
             )
           );
+          void refreshDailyQuota();
         },
         // onError
         (error) => {
@@ -795,11 +827,13 @@ export default function Home() {
 
   const handleSuggestedReply = (reply: string) => {
     if (isLoading) return;
+    if (dailyQuota?.blocked) return;
     void handleSendMessage(reply);
   };
 
   const handleCutoffProfileSubmit = (payload: { state: string; category: string; subCategory?: string }) => {
     if (isLoading) return;
+    if (dailyQuota?.blocked) return;
     const lines: string[] = [];
     if (payload.state && payload.state !== 'NOT_SURE') {
       lines.push(`Home state: ${payload.state}`);
@@ -821,6 +855,7 @@ export default function Home() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (isChatQuotaBlocked) return;
       handleSendMessage();
     }
   };
@@ -1109,24 +1144,28 @@ export default function Home() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <QuickQuestion
                   icon={<Calendar className="w-5 h-5" />}
+                  disabled={isChatQuotaBlocked}
                   onClick={() => void handleSendMessage(t.starter.neet_exam_guidance)}
                 >
                   {t.starter.neet_exam_guidance}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<BookOpen className="w-5 h-5" />}
+                  disabled={isChatQuotaBlocked}
                   onClick={() => void handleSendMessage(t.starter.counselling_process)}
                 >
                   {t.starter.counselling_process}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<HelpCircle className="w-5 h-5" />}
+                  disabled={isChatQuotaBlocked}
                   onClick={() => void handleSendMessage(t.starter.college_shortlist)}
                 >
                   {t.starter.college_shortlist}
                 </QuickQuestion>
                 <QuickQuestion
                   icon={<FileCheck className="w-5 h-5" />}
+                  disabled={isChatQuotaBlocked}
                   onClick={() => void handleSendMessage(t.starter.college_fee_structure)}
                 >
                   {t.starter.college_fee_structure}
@@ -1156,6 +1195,14 @@ export default function Home() {
       {/* Input Area */}
       <div className="shrink-0 sticky bottom-0 z-30 bg-white/80 dark:bg-slate-800/80 backdrop-blur-md border-t border-red-100 dark:border-slate-700 px-2 md:px-4 py-2.5 md:py-4 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
         <div className="max-w-4xl mx-auto">
+          {isChatQuotaBlocked && (
+            <div
+              role="alert"
+              className="mb-3 rounded-xl border border-amber-200 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/25 px-3 py-2.5 text-sm text-amber-900 dark:text-amber-100"
+            >
+              {t.quotaExceededBanner}
+            </div>
+          )}
           <div className="flex gap-2 md:gap-3">
             <div className="flex-1 relative">
               <textarea
@@ -1167,14 +1214,14 @@ export default function Home() {
                     ? t.placeholderClarification
                     : t.placeholderDefault
                 }
-                className="w-full px-3 md:px-5 py-3 md:py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm md:text-base"
+                className="w-full px-3 md:px-5 py-3 md:py-4 border border-gray-200 dark:border-slate-600 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all shadow-sm bg-white dark:bg-slate-700 text-gray-800 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm md:text-base disabled:opacity-60 disabled:cursor-not-allowed"
                 rows={1}
-                disabled={isLoading}
+                disabled={isLoading || isChatQuotaBlocked}
               />
             </div>
             <button
               onClick={() => handleSendMessage()}
-              disabled={!inputValue.trim() || isLoading}
+              disabled={!inputValue.trim() || isLoading || isChatQuotaBlocked}
               className="px-4 md:px-6 py-3 md:py-4 bg-gradient-to-r from-red-600 to-rose-600 text-white rounded-2xl font-medium hover:from-red-700 hover:to-rose-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl flex items-center gap-2"
             >
               {isLoading ? (
@@ -1296,15 +1343,19 @@ function QuickQuestion({
   children,
   onClick,
   icon,
+  disabled,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   icon: React.ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className="group flex items-center gap-3 p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl text-left hover:border-red-300 dark:hover:border-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 hover:shadow-md transition-all"
+      disabled={disabled}
+      className="group flex items-center gap-3 p-4 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl text-left hover:border-red-300 dark:hover:border-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-gray-200 dark:disabled:hover:border-slate-700"
     >
       <div className="p-2 bg-red-100 dark:bg-red-900/50 rounded-lg text-red-600 dark:text-red-400 group-hover:bg-red-600 group-hover:text-white transition-colors">
         {icon}
