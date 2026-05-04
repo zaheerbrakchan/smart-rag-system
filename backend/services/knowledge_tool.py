@@ -3,7 +3,7 @@ Knowledge Search Tool for NEET Counselling Assistant
 
 This module provides a unified search interface that:
 - Performs semantic search on the vector database
-- Supports optional metadata filter by state only (document_type / doc_topic are not used for retrieval)
+- Supports optional metadata filters (state, doc_topic)
 - Returns formatted chunks for LLM consumption
 """
 
@@ -24,6 +24,9 @@ TOOL_CHUNK_DEBUG_LOG = os.getenv("TOOL_CHUNK_DEBUG_LOG", "true").lower() in ("1"
 # Tokens too generic to help disambiguate colleges inside merged deemed fee PDFs.
 _LEXICAL_STOP_WORDS = frozenset(
     {
+        "also",
+        "please",
+        "help",
         "fee",
         "fees",
         "structure",
@@ -81,7 +84,8 @@ def _query_terms_for_lexical_boost(query: str) -> List[str]:
     seen: set = set()
     for w in raw:
         t = w.lower()
-        if len(t) < 4:
+        # Keep short institute tokens too (e.g., "era", "kmc", "ims").
+        if len(t) < 3:
             continue
         if t in _LEXICAL_STOP_WORDS:
             continue
@@ -89,6 +93,25 @@ def _query_terms_for_lexical_boost(query: str) -> List[str]:
             seen.add(t)
             out.append(t)
     return out[:14]
+
+
+def _token_present(text: str, token: str) -> bool:
+    """
+    Token-aware match to avoid accidental substring hits.
+    Example: token 'era' should match "Era's", but not inside unrelated words.
+    """
+    if not text or not token:
+        return False
+    # Allow common possessive/plural token variants (e.g., "Era", "Eras", "Era's")
+    # while still avoiding random substring matches.
+    return (
+        re.search(
+            rf"\b{re.escape(token)}(?:'s|s)?\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _lexical_rerank_results(
@@ -114,22 +137,25 @@ def _lexical_rerank_results(
         (r, (r.text or "").lower()) for r in results
     ]
     n = len(lowered)
-    term_freq = {t: sum(1 for _, text in lowered if t in text) for t in terms}
+    term_freq = {t: sum(1 for _, text in lowered if _token_present(text, t)) for t in terms}
     # Prefer terms that hit at most ~1/3 of this batch (discriminative for this query).
     max_common = max(1, (n + 2) // 3)
     rare = [t for t in terms if term_freq.get(t, 0) <= max_common]
     if not rare:
         rare = sorted(terms, key=lambda t: term_freq.get(t, n))[: min(5, len(terms))]
 
-    scored: List[Tuple[float, "SearchResult"]] = []
+    scored: List[Tuple[float, int, "SearchResult"]] = []
     for r, text in lowered:
-        hits = sum(1 for t in rare if t in text)
-        bonus = min(0.42, hits * 0.09)
+        hits = sum(1 for t in rare if _token_present(text, t))
+        # Strongly prioritize chunks that mention distinctive college tokens
+        # (e.g., "era", "nitte", "hegde") over generic fee-table chunks.
+        bonus = min(1.20, hits * 0.35)
         base = float(r.score or 0.0)
-        scored.append((base + bonus, r))
+        scored.append((base + bonus, hits, r))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in scored][:top_k]
+    # First keep chunks with lexical hits, then fill from non-hit chunks.
+    scored.sort(key=lambda x: (x[1] > 0, x[0]), reverse=True)
+    return [r for _, __, r in scored][:top_k]
 
 
 def log(msg: str):
@@ -262,12 +288,34 @@ def _normalize_states_argument(
     return out
 
 
-def build_metadata_filters(state: Optional[str] = None) -> Optional[Any]:
+def _is_fee_query(query: str) -> bool:
+    q = (query or "").lower()
+    if not q:
+        return False
+    fee_terms = (
+        "fee",
+        "fees",
+        "tuition",
+        "hostel",
+        "mess",
+        "bond",
+        "security deposit",
+        "fee structure",
+        "cost",
+    )
+    return any(t in q for t in fee_terms)
+
+
+def build_metadata_filters(
+    state: Optional[str] = None,
+    doc_topic: Optional[str] = None,
+) -> Optional[Any]:
     """
-    Build LlamaIndex metadata filters (state only).
+    Build LlamaIndex metadata filters (state + doc_topic).
 
     Args:
         state: Filter by state/UT name (e.g. "Maharashtra", "All-India"). Omit to search all states.
+        doc_topic: Optional topical filter (e.g. "fees")
 
     Returns:
         MetadataFilters object or None if no filters
@@ -278,30 +326,45 @@ def build_metadata_filters(state: Optional[str] = None) -> Optional[Any]:
         FilterOperator,
     )
 
-    if not state:
-        return None
-
-    return MetadataFilters(
-        filters=[
+    filters = []
+    if state:
+        filters.append(
             MetadataFilter(
                 key="state",
                 value=state,
                 operator=FilterOperator.EQ,
             )
-        ],
+        )
+    if doc_topic:
+        filters.append(
+            MetadataFilter(
+                key="doc_topic",
+                value=doc_topic,
+                operator=FilterOperator.EQ,
+            )
+        )
+
+    if not filters:
+        return None
+
+    return MetadataFilters(
+        filters=filters,
     )
 
 
 def _search_knowledge_base_single_state(
     query: str,
     state: Optional[str],
+    doc_topic: Optional[str],
     top_k: int,
 ) -> SearchResponse:
     """One vector retrieval with optional single-state metadata filter."""
-    filters = build_metadata_filters(state)
+    filters = build_metadata_filters(state=state, doc_topic=doc_topic)
     filters_applied: Dict[str, str] = {}
     if state:
         filters_applied["state"] = state
+    if doc_topic:
+        filters_applied["doc_topic"] = doc_topic
 
     # Pull a wider candidate pool, then re-rank so the right college block inside a merged
     # deemed PDF can surface (pure embedding top_k often returns sibling institutes).
@@ -312,7 +375,10 @@ def _search_knowledge_base_single_state(
 
     try:
         nodes: List[NodeWithScore] = retriever.retrieve(query)
-        log(f"[TOOL] Retrieved {len(nodes)} results (state={state or 'ALL'}, fetch_k={fetch_k})")
+        log(
+            f"[TOOL] Retrieved {len(nodes)} results "
+            f"(state={state or 'ALL'}, doc_topic={doc_topic or 'ALL'}, fetch_k={fetch_k})"
+        )
     except Exception as e:
         log(f"[TOOL] Search error: {e}")
 
@@ -342,6 +408,14 @@ def _search_knowledge_base_single_state(
             filters_applied = {}
         else:
             nodes = []
+
+    # If fees topic filter is too strict for a given KB snapshot, retry without doc_topic.
+    if not nodes and doc_topic:
+        log("[TOOL] No results with doc_topic filter; retrying without doc_topic...")
+        filters = build_metadata_filters(state=state, doc_topic=None)
+        retriever = index.as_retriever(similarity_top_k=fetch_k, filters=filters)
+        nodes = retriever.retrieve(query)
+        filters_applied.pop("doc_topic", None)
 
     results: List[SearchResult] = []
     for node in nodes:
@@ -404,21 +478,32 @@ def search_knowledge_base(
         SearchResponse with results and metadata
     """
     state_list = _normalize_states_argument(state, states)
+    fee_query = _is_fee_query(query)
+    doc_topic: Optional[str] = "fees" if fee_query else None
+    if fee_query and state_list:
+        # Fee documents are often merged/all-india scoped; state buckets can hide correct chunks.
+        log("[TOOL] Fee query detected; ignoring state filters and using doc_topic=fees")
+        state_list = []
 
     log(f"[TOOL] search_knowledge_base called:")
     log(f"       Query: {query}")
     log(f"       State filter: {state_list if state_list else 'None (all states)'}")
+    log(f"       Doc topic filter: {doc_topic or 'None'}")
+
+    # Fee retrieval often needs a wider final set so named-college chunks are not cut off
+    # before sufficiency evaluation.
+    effective_top_k = max(top_k, 16) if fee_query else top_k
 
     if len(state_list) <= 1:
         only = state_list[0] if state_list else None
-        return _search_knowledge_base_single_state(query, only, top_k)
+        return _search_knowledge_base_single_state(query, only, doc_topic, effective_top_k)
 
     # Multi-state: one retrieval per state, merge + dedupe, keep best scores
-    per_state_k = max(3, min(top_k, (top_k * 2) // len(state_list)))
+    per_state_k = max(3, min(effective_top_k, (effective_top_k * 2) // len(state_list)))
     merged: List[SearchResult] = []
     seen: set = set()
     for st in state_list:
-        part = _search_knowledge_base_single_state(query, st, per_state_k)
+        part = _search_knowledge_base_single_state(query, st, doc_topic, per_state_k)
         for r in part.results:
             key = (r.file_name or "", r.page_label or "", (r.text or "")[:200])
             if key in seen:
@@ -427,11 +512,14 @@ def search_knowledge_base(
             merged.append(r)
 
     merged.sort(key=lambda x: x.score, reverse=True)
-    merged = merged[:top_k]
+    merged = merged[:effective_top_k]
     return SearchResponse(
         results=merged,
         query=query,
-        filters_applied={"states_or": ", ".join(state_list)},
+        filters_applied={
+            "states_or": ", ".join(state_list),
+            **({"doc_topic": doc_topic} if doc_topic else {}),
+        },
         total_results=len(merged),
     )
 
